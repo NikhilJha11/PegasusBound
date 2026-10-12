@@ -1,0 +1,355 @@
+---
+title: Instance health
+description: The Setup and health page, what every check means, how to clear it, and how to run the same checks from a shell.
+---
+
+Pegasusbound reports configuration findings, service reachability and operational measurements separately. A silent instance and a healthy instance can look identical from the outside. The panel shows missing, partial and stale coverage explicitly instead of treating silence as proof of health.
+
+## Setup and health
+
+The page lives in the [admin panel](/development/admin-panel/) on `:5174`, under **Instance > Setup and health**. **Findings** lists configuration findings, **Services** holds per-service reachability probes and the platform mail card, and **Operations** holds read-only operational measurements. It is operator tooling, not a customer dashboard, and every route behind it is gated on a platform admin permission. Tabs support direct links such as `/health?tab=operations`.
+
+Configuration errors and warnings appear on the admin Overview, and the sidebar badge counts those findings. Informational notes do not count toward the badge. If there are no errors or warnings, Findings says **No errors or warnings reported**, not that all checks ran or the instance is healthy. The separate Overview monitoring panel shows operational signals and positive broker queue measurements.
+
+| Severity | Means |
+|---|---|
+| `error` | Something is broken or unsafe right now. Sending, signing in or key access is affected |
+| `warning` | Works today, will hurt you. Misconfiguration, a published secret, a concentration risk |
+| `info` | No action required, stated so you are not surprised later |
+
+Only findings are listed. A passing check returns nothing, but a skipped or unavailable check may also have no finding. The health response currently reports `execution_coverage: "unreported"`; an empty list is not a confirmed all-clear. Older responses without this additive field are treated the same way. The receipt time shown on Findings is when the browser received the response, not a source-evidence timestamp.
+
+Each row carries a title, the full message including the fix, and a link to the section of these docs that explains it. Every check that ships today is instance-wide, so no row is scoped to a single mailbox, worker or campaign.
+
+The configuration checks are documented below. Operational evidence has its own coverage and limits.
+
+## Running the checks from a shell
+
+```bash
+make doctor
+```
+
+That runs `pegasusboundctl status`, which prints this instance's state (accounts, platform admins, registration mode, mail transport, `APP_URL`) followed by a **Checks** section holding the same findings, and exits non-zero when anything is at error severity. It is the right thing to put at the end of a deploy script, and it is what to reach for when the backend is unhealthy enough that the admin panel will not load.
+
+Every command works in any runtime:
+
+```bash
+docker compose -p pegasusbound exec backend pegasusboundctl status   # docker compose
+docker exec -it pegasusbound-backend pegasusboundctl status          # plain docker
+kubectl exec -it deploy/pegasusbound-backend -- pegasusboundctl status
+pegasusboundctl status                                          # bare binary
+```
+
+`status` is one of nine commands. The rest, including the ones that create an account and reset a password when nobody can sign in, are on the [pegasusboundctl reference](/development/pegasusboundctl/).
+
+## Health endpoints
+
+These endpoints answer different questions.
+
+| Endpoint | Auth | Use it for |
+|---|---|---|
+| `GET /health` | none | Liveness. Is the process up. This is the one a load balancer or an orchestrator probes |
+| `GET /admin/instance/health` | platform admin, `view_analytics` | Deep diagnostics: the finding list the panel renders |
+| `GET /admin/system/status` | platform admin, `view_analytics` | Scoped backing-service probes at `checked_at`, not send or sync throughput |
+| `GET /admin/instance/monitoring` | platform admin, `view_analytics` | Versioned operational snapshot with per-source permission filtering and explicit measurement coverage |
+
+<Callout type="warn" title="Do not point a load balancer at the deep endpoint">
+The diagnostic endpoint reports warnings about configuration, and a warning is not a reason to take a node out of rotation. Use `GET /health` for liveness and leave the diagnostics to the panel and to `make doctor`.
+</Callout>
+
+Two neighbouring endpoints round out the surface, both under **Instance** in the panel:
+
+| Endpoint | Auth | Returns |
+|---|---|---|
+| `GET /admin/instance/config` | `manage_settings` | Every configuration entry with its resolved value, source and restart requirement. Sensitive keys return a fingerprint, never a value |
+| `GET /admin/instance/limits` | `view_analytics` | The effective sending, warmup and rate limits this build compiles in |
+| `GET /admin/instance/update` | `view_analytics` | The running build, the newest release, and the updater's state. Backs the version pill at the foot of the sidebar; see [Updates](/development/updates/) |
+
+## Operational monitoring
+
+**Operations** renders the version `"1"` snapshot from `GET /admin/instance/monitoring`. It covers registered workers, worker sample receipt, confirmed sends, campaign reservations, dispatch, safety holds, sync state and fair-use waits, stored mailbox errors, jobs, dead letters, webhooks, customer notification rows, send-result effects, domain checks, warmup mailbox loading and broker queue observations. Dead letters without safe replay proof remain visible as recovery-unverified even when a retry date has passed; the due, waiting and unscheduled counts only cover non-sending campaign wakeup passes. The consumer does not have a task scheduler for automatic replay. Unsupported sources remain visible as unavailable, including detailed send-wait attribution and external tracking-broker diagnostics. Optional arrival-outbox measurements are unavailable when their schema is absent; monitoring needs no arrival migration and does not require a new worker wire version.
+
+The backend collects with an eight-second overall timeout, three seconds per source and at most four concurrent collectors. It shares a one-minute snapshot across admins, then filters source permissions for each response. HTTP responses are not cacheable. On collection failure it can retain a source's last good measurement for at most five minutes, marked stale and with its original observation/evidence clocks. After that it is unavailable. Source samples are bounded; measured/expected scope counts and incomplete coverage expose truncation. Counts in partial samples may be lower bounds, never extrapolated fleet totals.
+
+Unresolved mailbox reports are stored evidence, not proof of an ongoing provider failure. New transport reports explicitly distinguish `sync`, `send` and `unknown` operations. Their `created_at` remains the latest failure observation; `observation_source` distinguishes a valid worker clock from receipt fallback, and `received_at` records backend receipt separately. Missing, invalid or future worker clocks fall back to receipt time. Older redelivery cannot move the latest observation backward. Upgrading does not rewrite historical clocks or guess the operation from a nullable task ID.
+
+Inbound sync cannot prove sending recovered. A completed provider pass automatically reconciles only earlier, explicitly sync-scoped native transport reports. Provider-confirmed sends independently reconcile earlier native send-scoped reports, with confirmed-task provenance, in the existing send-result transaction. Each operation retains its own monotonic success clock, so delayed older native failures stay resolved history instead of reopening an outage or emitting a fresh warning. Failure timestamps have second precision; recovery must be more than one second later. Credential and policy errors still use their existing recovery flows.
+
+Transport recovery additionally requires the worker's immutable, instance-local mailbox generation. The control plane reads that generation and the mailbox configuration and credentials in one database snapshot. It is part of the worker's execution identity, so an unchanged-credential restore still drains and replaces the old mailbox transport rather than relabeling it. Only a freshly completed provider sync pass stamps its generation; imported seeds, progress, partial or deferred passes, heartbeats and resumed checkpoints cannot create new proof. Sending captures the loaded transport's generation before execution and retains it in the genuine result. A task execution or dispatch marker alone is not proof of the restored configuration, and cannot establish sync recovery.
+
+Workspace import rotates this generation and invalidates derived clocks transactionally for actually inserted or overwritten mailboxes, including actual mailbox credential-table writes. Skipped, foreign, rolled-back and unaffected rows keep their generation and clocks. This is a restore-incarnation boundary, not a version for every ordinary settings edit or token refresh. The generation comparison and recovery write lock the same mailbox fence as restore, preserving task-before-mailbox lock order. A late pre-import or spanning result, even with a recent timestamp, cannot recreate current recovery. Genuine send outcomes still settle normally, including accounting and audit; mismatch never discards them or changes restrictive holds. Operator confirmation and imported confirmation history do not authorize transport recovery, even if metadata contains a generation.
+
+Missing generation remains unproven. Old workers continue to send and sync through upgraded consumers, but cannot advance these derived recovery clocks. New typed workers recover automatically with no customer confirmation, worker re-enrollment or shared-token permission change. JSON and Kafka/Avro fields are additive; the native registry regression checks both directions under FULL_TRANSITIVE compatibility. Upgrade the database and every backend and consumer before workers. Local regression results do not establish production provider recovery.
+
+Legacy and imported reports with unknown observation provenance stay outside native active-report deduplication and automatic recovery. Their IDs, timestamps, task references and resolutions remain available. Untyped worker events have unknown operation scope, even when their observation clock is valid. Neither sync nor sending alone can automatically clear ambiguous operation evidence. No new customer action is required for new typed reports. Transport recovery does not prove recipient delivery, inbox currentness or permission to replay an uncertain send. Sync passes can complete while the arrival queue is still behind. Unknown-send safety holds are not cleared by report reconciliation.
+
+Quiesce old mailbox-error writers and result consumers before applying migration 288: old account-plus-code conflict targets are incompatible with the new native unique index. Roll out schema and all backend/result consumers before typed workers. Old workers remain supported through new consumers, but their untyped reports stay unknown. Do not run old result consumers alongside typed workers; old consumers can still apply account-wide resolution. Workspace import resets report operation and observation provenance and invalidates derived destination clocks only for mailboxes actually written. Whole-instance database backups retain the original provenance and clocks. Downgrade refuses any set of unresolved reports that old uniqueness cannot represent, including multiple historical reports of the same operation, rather than discarding evidence or inventing recovery. A refused real-driver downgrade leaves migration metadata dirty and the typed schema intact. Verify the preserved schema and roll forward; do not delete reports or clear safety holds to force a downgrade.
+
+The local task dispatcher also waits five minutes before revisiting a task whose handler returned successfully but left it pending with an already-due schedule. This lets newer due work run without treating the no-op as a failure. It preserves any later retry floor, the original scheduled time, send outcomes and safety holds. Tasks that completed, became active or were rescheduled into the future do not receive this extra wait. A retry wait is not evidence of provider recovery.
+
+Failed attempts keep their existing retry policy. During a mixed-version rollout, older local dispatchers can still clear successful no-op waits. Verify dispatch fairness only after every service running the local dispatcher has been upgraded.
+
+Worker heartbeat totals and up to 20 worker details share one PostgreSQL snapshot and one database observation clock, captured after reading the registered workers. That source's observation can be later than the overall snapshot start; its collection-attempt clock still marks the refresh request start, not measurement time. Null timestamps, timestamps at least five minutes old, and timestamps ahead of that observation remain visible. Future worker details are unknown clock evidence, not proof of a stopped worker: HTTP heartbeat registration uses the database clock, while Redis-mirrored heartbeats retain the worker's timestamp. A future-only aggregate is also unknown; any stale or null heartbeat keeps the aggregate's stale-telemetry condition. Counts and positive warning severity do not change. No clock-skew tolerance is assumed. Expected scopes count all matching workers, measured scopes count the bounded details, and truncation is partial coverage even when the aggregate is complete.
+
+### Reading a snapshot
+
+Aggregate sources collected in one database query, including sync and worker health samples, capture one database reference time for all their thresholds, windows and source/metric observations. A normal completion or receipt visible when the query starts is compared with that reference, not the earlier refresh request start. Genuinely future-dated evidence still warns, with no clock-skew tolerance. The snapshot's checked time and cache expiry keep their collection-start meaning; the database observation does not confirm provider recovery.
+
+- **Snapshot checked** and **Collection attempted** are collection clocks. They do not confirm delivery, sync or recovery. **Source observed** and **Observed** are the measurement clocks; **Evidence since**, **Latest evidence**, their ages and any window are distinct. The UI retains the original clocks after a failed refresh and marks retained measurements stale. A successful browser fetch of old data does not make it fresh.
+- `fresh`, `stale` and `unavailable` describe measurement availability. The UI also marks observations older than two minutes or implausibly future-dated as stale/unknown. Coverage can be complete only for the measured sources; it does not mean every customer operation succeeded.
+- A nullable count is **Not measured**, not zero. A successful zero means no matching rows in that metric's scope/window. Zero recent sends means **No matching recent evidence**, not healthy throughput. A completed task, heartbeat, low memory usage or sync tick does not prove delivery or recovery.
+- Recent/persistent failure evidence, recovery unverified, safety holds, backlog and stale telemetry remain separate conditions. An old failure without later confirmed send evidence is **Recovery unverified**, not proof that a new failure is happening now. Unknown warning observations such as missing assignment remain unknown, not fabricated provider outages.
+- Schedule waits, retry waits, budget waits, daily-limit waits and in-flight work are informational. **Next eligible** describes eligibility, not a promise of success. A safety hold is a restriction, not an outage; monitoring never clears it.
+- A declining unknown-hold count alone does not prove successful sends. Definitive outcomes or nonce-gated retirement of commands that never started can resolve an unknown, but cancellation, deferral and authorized repair keep the mailbox held when another unknown or unresolved outcome conflict remains. Compare task-scoped evidence, not only before-and-after totals.
+- Contradictory definitive results retain the original applied outcome and accounting, record a payload-free conflict outcome, and hold sending without replay. Automatic conflict evidence is separate from operator/provider confirmation. Duplicate results cannot undo a fresh local confirmation of that conflict. Repair and result processing share the same task and mailbox locks so a concurrent conflict cannot disappear during hold recalculation.
+- Workspace archives preserve recovery audit history but reset its local provenance. Imported or older audit history without explicit local provenance cannot execute an operator-confirmed result or lift a conflict hold. Independent authoritative worker results still reconcile unknown sends automatically; only genuinely unresolved evidence needs fresh local administrator/provider confirmation. Two contradictory definitive outcomes are not resolved by choosing whichever arrived last. An upgrade does not infer that historical confirmations originated locally. Recovery-audit rollback is refused while audit rows remain; roll forward instead of deleting evidence to force a downgrade.
+- Normal customer sending, mailbox connection and authentication flows gain no new confirmation step. Administrators handle exceptional uncertain outcomes through the existing scoped recovery API after checking provider evidence; customers do not need to read logs or supply technical task identifiers. Status toggles, credential repair and duplicate results are not shortcuts around another unresolved send. See [send-safety upgrade ordering](/development/send-safety/#conflict-audit-upgrade-ordering) before enabling the audit extension on a mixed-version backend fleet.
+- Positive broker lag/pending/ack-pending/redelivered counts appear prominently on Overview even though the backend deliberately labels them `unknown` with severity `info`. Kafka committed lag excludes uncommitted processing; JetStream pending and acknowledgement-pending are different measurements. Neither is provider-send throughput. Redelivered is not a lifetime retry rate; absent group members can occur during rebalancing.
+- Counts, affected mailboxes, affected organizations and rows with unknown organization are separate quantities. Metrics and per-worker scopes may overlap. The attention total counts recorded signals, not failed sends or unique customers; do not add metric counts together.
+- Query errors, permission denials, unsupported capability, missing dependencies/schema and timeouts do not produce an all-clear. No sources or no metrics means unknown coverage. Raw provider/connection errors, credentials, payloads and mailbox addresses are not rendered by the monitoring panel.
+
+The Overview and Operations tab share the same frontend query cache, scoped to admin identity and permission mask. Monitoring polls at most once per minute while mounted in a visible tab, does not refetch on focus or retry automatically, and offers a refresh control that respects `refresh_after`. Service probes poll every 15 seconds while their tab is mounted; passed probes establish reachability at that time only. Failed or stale probes remain explicit, including whether a cached probe previously passed or failed, and raw component connection errors are withheld. The existing platform mail card is shown only with `manage_settings`, which its inspection and send-test endpoints require.
+
+This is observation-only tooling. It does not subscribe to brokers, create streams/groups, reconnect mailboxes, move assignments or offsets, reclaim tasks, replay results, clear holds, notify customers or deploy changes. Investigation links open existing admin pages when those pages cover the measured population; actions there retain their existing confirmations and permissions. Aggregate dispatch and send measurements have no direct link because the existing campaign-only detail tabs exclude some counted pending or warmup tasks. Keep the count and its evidence time in view while investigating through authorized backend diagnostics.
+
+### Monitoring permissions
+
+Every monitoring request requires an MFA-verified platform admin session and `view_analytics`, not a workspace API key. Source sections additionally require the bit below. Denied sources retain only an unavailable placeholder with `permission_denied`; their counts, scope measurements and private metrics are absent. The frontend also filters sections and checks destination permissions for every investigation link. Monitoring fails closed when an older identity response has no known admin mask.
+
+| Source IDs | Additional platform admin bit |
+|---|---|
+| `send_safety`, `sync`, `mailbox_errors`, `arrivals`, `domain_auth` | `view_users` |
+| `sends`, `campaign_reservations`, `dispatch`, `dead_letters`, `result_effects`, `warmup_loading`, `send_wait_attribution` | `view_campaigns` |
+| `workers`, `worker_samples`, `worker_command_broker` | `view_workers` |
+| `jobs`, `backend_event_broker`, `tracking_broker` | `view_analytics` (already required) |
+| `webhooks` | `view_organizations` |
+| `notifications` | `manage_settings` |
+
+For example, an admin may see webhook measurements with `view_organizations` but not a link into Sends without `view_campaigns`. Worker details, sync/mailboxes, organization details, jobs and configuration links likewise require their native page bit. Arbitrary/external investigation URLs are not accepted.
+
+## Security and secrets
+
+### secret_published_default
+
+One or more of `AUTH_SECRET`, `KMS_LOCAL_MASTER_KEY`, `CREDENTIALS_ENCRYPTION_KEY`, `INTERNAL_API_TOKEN` or `SECRET_KEY_BASE` still holds the value shipped in `docker-compose.yml`. Those values are published in this repository, so anyone can forge a session token or unwrap every organization key.
+
+Generate real values and restart. See [secrets](/development/configuration/#secrets). The backend refuses to boot on a published default once `APP_ENV` is not `dev`, but only the backend does that check: the consumer and every worker start happily on one, which is why this check exists.
+
+### allow_insecure_defaults
+
+`ALLOW_INSECURE_DEFAULTS=true` overrides the boot refusal above. Remove it once you have generated real values.
+
+### credentials_key_unset
+
+`CREDENTIALS_ENCRYPTION_KEY` is empty, so mailbox SMTP and IMAP passwords are stored without being sealed. Set a 64 hex character key (`openssl rand -hex 32`) before connecting any mailbox, and back it up: losing it makes connected mailboxes unrecoverable. See [encryption](/development/configuration/#encryption).
+
+### internal_token_unset
+
+`INTERNAL_API_TOKEN` is empty, so every request to `/api/v1/internal/` is rejected. Workers cannot fetch organization keys and the tracking service cannot resolve click links. Nothing fails at boot, only at runtime. See [workers](/development/configuration/#workers).
+
+### trusted_proxies_unset
+
+The request that loaded this page carried an `X-Forwarded-For` header while `TRUSTED_PROXIES` is empty, so Pegasusbound is recording your proxy's address as the client address. The per IP login limiter, session records, audit rows and API key IP allowlists all read the wrong address. Set `TRUSTED_PROXIES` to your proxy's CIDR. See [network and proxy](/development/configuration/#network-and-proxy).
+
+### captcha_misconfigured
+
+`CAPTCHA_PROVIDER=turnstile` with an empty `TURNSTILE_SECRET` fails every verification, which means nobody can sign in. Set the secret or set `CAPTCHA_PROVIDER=none`. See [captcha](/development/configuration/#captcha).
+
+### turnstile_bypass_set
+
+`TURNSTILE_BYPASS_TOKEN` is set. It is only honoured when `APP_ENV=dev`, so on a production deployment it does nothing except confuse the next person. Remove it.
+
+### dev_mode_public
+
+`APP_ENV` is not `prod` while `APP_URL` is not a loopback address. Dev mode allows the published default secrets and enables debug logging. Set `APP_ENV=prod`. See [deployment](/development/configuration/#deployment).
+
+### unsafe_webhook_urls
+
+`PEGASUSBOUND_ALLOW_UNSAFE_WEBHOOK_URLS=true` lets customer webhooks point at `http://` and private addresses, which means any workspace member can make the backend reach into your internal network. Development only. See [webhooks](/guides/webhooks/).
+
+### tls_verification_off
+
+`SMTP_TLS_INSECURE_SKIP_VERIFY` or `MAIL_TLS_INSECURE` is on, so TLS certificate verification is disabled for platform mail or for mailbox connections. Only legitimate for a relay using a private certificate authority.
+
+## URLs and reachability
+
+The dashboard, API and admin panel may use different hosts. `APP_URL` names the customer dashboard used in emailed links, not the API or admin panel. The checks do not compare it to the backend request's host or the admin panel's origin; HTTPS and CORS checks still apply.
+
+### app_url_unset
+
+`APP_URL` and `FRONTEND_BASE_URL` are both empty, so password reset, invitation and setup links are being built against `https://app.pegasusbound.com`. Those links go to the hosted service, not to your instance, and a live reset token in one of them leaves your deployment. Set `APP_URL` to your dashboard origin. See [addresses](/development/configuration/#addresses).
+
+### app_url_insecure
+
+`APP_URL` uses `http://` on a non-loopback host. Browsers refuse WebAuthn outside a secure context, so passkeys are disabled, and session cookies travel in the clear. Put the dashboard behind HTTPS.
+
+### cors_missing_origin
+
+An origin that talks to the API is not in the resolved CORS list, so the browser blocks its requests. In practice the app loads and then every request fails. Add it to `CORS_ALLOW_ORIGINS`.
+
+### api_public_url_unset_oidc
+
+`OIDC_ISSUER_URL` is set while both `API_PUBLIC_URL` and `OIDC_REDIRECT_URL` are empty, so there is no redirect URL and the single sign-on path is disabled. Set `API_PUBLIC_URL` to this backend's public base. See [single sign-on](/development/accounts-and-access/#single-sign-on).
+
+### oidc_discovery_failed
+
+Discovery against the configured issuer failed at boot, so the single sign-on button is not shown. The message carries the underlying error. Check the issuer URL, its TLS chain, and that the backend can reach it.
+
+### app_origin_wildcard
+
+Neither `APP_ORIGIN` nor a usable `APP_URL` is set, so the mailbox OAuth callback page posts the authorization code back to the dashboard with a wildcard target origin. Set `APP_URL` to your dashboard origin, or `APP_ORIGIN` if the dashboard is served somewhere else. Setting `APP_URL` alone clears this: the callback page derives its target from it.
+
+### tracking_domain_unreachable
+
+`TRACKING_DOMAIN` is set but a probe from the backend did not get an answer, so open pixels and click links in campaign mail will not record. Recipients still receive the mail.
+
+## Platform mail
+
+### mail_transport_log
+
+`MAIL_TRANSPORT=log` writes every message to the backend log instead of delivering it. Login codes, password resets, team invitations and notification digests will never arrive.
+
+Invitations still work: copy the invite link from **Settings > Members** and send it yourself. See [without a mail relay](/development/accounts-and-access/#without-a-mail-relay). To fix it properly, point `MAIL_TRANSPORT` at a relay. See [platform mail](/development/configuration/#platform-mail).
+
+### mail_preflight_failed
+
+The transport is meant to deliver, and the relay did not accept a connection. The message carries the raw SMTP dialogue. Nobody can reset a password or receive an invitation until this is fixed. This check stays quiet when `mail_transport_log` has already fired, so one incident is one row.
+
+### mail_identity_unset
+
+`EMAIL_ADDRESS` or `EMAIL_NAME` is missing. The backend refuses to start without them, but the consumer only warns and silently disables all notification and digest email, so this instance can look healthy while sending nothing.
+
+### mail_from_domain_mismatch
+
+Platform mail is sent from a domain that differs from the dashboard's. Mailbox providers may treat that as a mismatch. Only a problem if you did not intend them to differ.
+
+### login_code_demoted
+
+`AUTH_LOGIN_CODE=always` was demoted to `new_device` at boot because the transport does not deliver. Otherwise nobody could ever complete a login. See [login codes](/development/accounts-and-access/#login-codes).
+
+## Updates
+
+### update_available
+
+A newer Pegasusbound exists: a release on the configured channel is newer than the running build, or the checkout is behind its branch. The message names both versions and how to apply it. With the updater running, the version pill at the foot of the sidebar has an **Update and restart** button; without it, `git pull && make up`. See [Updates](/development/updates/).
+
+### updater_unreachable
+
+`UPDATER_URL` is set but nothing answers there, so the update button cannot work. Start the updater (the `updater` compose profile, or the systemd unit on a bare-metal host), fix the address, or remove the variable to update by hand. See [enabling the updater](/development/updates/#enabling-the-updater).
+
+## Accounts and access
+
+### registration_mode
+
+Always reported as information, with a description of the active mode. `DISABLE_REGISTRATION=false` means public signup is open, not disabled. `invite_only` closes public signup while keeping invitations enabled; signup from an invitation also requires `access.allow_invited_signup`. `true` closes signups and invitations. If `SSO_AUTO_PROVISION=true`, the note also explains that verified single sign-on identities can provision accounts independently of this mode. See [registration modes](/development/accounts-and-access/#registration-modes).
+
+### no_sign_in_method
+
+`DISABLE_PASSWORD_LOGIN=true` with no OIDC, Google or Apple provider configured leaves no way to sign in to this instance at all. Set `DISABLE_PASSWORD_LOGIN=false` or configure `OIDC_ISSUER_URL`. A provider counts as configured only when every value it needs is set, which is what the next two checks report.
+
+### google_sign_in_incomplete
+
+Some of the Google sign-in configuration is set and some is missing, so the button is not shown. `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are both required, and the callback needs a redirect URI, which derives from `API_PUBLIC_URL` when `GOOGLE_REDIRECT_URI` is unset. The same check warns when the redirect URI points at the dashboard: it is served by the API. See [sign-in methods](/development/accounts-and-access/#sign-in-methods).
+
+### apple_sign_in_incomplete
+
+The same for Sign in with Apple, which needs `APPLE_APP_ID` (the Services ID), `APPLE_TEAM_ID`, `APPLE_KEY_ID` and `APPLE_KEY_SECRET` together, plus an HTTPS redirect URI. Apple refuses a plain-http return URL, so Sign in with Apple cannot run against a local http install.
+
+### single_platform_admin
+
+Exactly one account holds **Grant admin access**. Read-only or operational admins do not provide a backup for granting access. This is a recovery advisory, not a broken instance. Add a trusted second admin with that permission from **Accounts > Admins** (the finding links there when you have permission), or recover with `pegasusboundctl user grant-admin`. See [platform admins](/development/accounts-and-access/#platform-admins).
+
+### bootstrap_password_still_set
+
+`PEGASUSBOUND_BOOTSTRAP_PASSWORD` is still in this deployment's environment. It is read only while the users table is empty, so it now does nothing except leave a plaintext password where `docker inspect` can read it. Remove it. See [first owner](/development/accounts-and-access/#first-owner).
+
+### setup_link_outstanding
+
+The instance has no accounts and a single-use setup link is live. Find it with `make claim`, or print a fresh one with `pegasusboundctl setup-link`. See [first run](/development/first-run/).
+
+### expired_invitations
+
+Some invitations have expired. They cannot be accepted and are no longer visible in the dashboard, but they do not block new invitations: re-inviting the same address replaces the expired row. Admins with `manage_organizations` can use **Remove expired invitations** on the finding, confirm removal across all workspaces, and refresh the checks automatically. Only already-expired records are deleted; active invitations, users and workspace membership stay unchanged. The cleanup is recorded in the admin audit log. See [invitations](/development/accounts-and-access/#invitations).
+
+## Workers
+
+### no_worker_heartbeat
+
+No worker has checked in for more than five minutes while mailboxes are assigned to workers, so nothing is being sent or synced.
+
+Check the worker process is running, then check `ENCRYPTED_KEYS_BACKEND_URL` and `ENCRYPTED_KEYS_WORKER_TOKEN`: an empty value lets the worker start, subscribe and never register, with no log line to tell you. See [workers](/development/configuration/#workers).
+
+### tracking_domain_shares_brand
+
+`TRACKING_DOMAIN` is on the same registered domain as `APP_URL` or `API_PUBLIC_URL`. Every campaign's links and unsubscribe pages carry that host, so complaints against any one workspace can get it listed on a URL blocklist, and the listing reaches the domain that also serves your marketing site and your platform mail.
+
+Use a separate registered domain for tracking, and move workspaces onto their own verified tracking domains so their link reputation is theirs rather than shared.
+
+### fleet_infra_unreachable
+
+Nodes are checking in from more than one machine, and `NATS_URL`, `REDIS` or `ENCRYPTED_KEYS_BACKEND_URL` still names a host that only resolves here, such as a compose service name or loopback. A joining node inherits those values verbatim, so it enrols, keeps heartbeating over HTTP, and reaches neither the bus nor the cache. The fleet looks healthy the whole time, which is why this is a check rather than a log line. See [split deployment](/development/split-deployment/).
+
+More than one machine is read as more than one distinct address among live nodes, so scaled replicas on a single host do not trigger it.
+
+### codec_registry
+
+`CODEC_PROVIDER` is `avro` and `SCHEMA_REGISTRY_URL` is empty. Avro resolves every event against a registry, so there is nothing to encode against. Set it, or set `CODEC_PROVIDER=json`, which needs no registry. See [event bus](/development/configuration/#event-bus).
+
+## Database
+
+### migrations_dirty
+
+The `schema_migrations` row is marked dirty. The backend applies migrations at boot; a dirty row means one failed halfway and must be resolved before the instance is used. The message carries the version it stopped at.
+
+### warmup_pools_missing
+
+Fewer than two warmup pools exist, so warmup cannot place a mailbox and every warmup task fails. Migration `000156` creates the free and premium pools on every instance and nothing else does; a data-only restore or a manual delete removes them, and the migration will not run a second time. Put them back under their fixed ids:
+
+```sql
+INSERT INTO warmup_pools (id, pool_type, name)
+VALUES ('77777777-aaaa-0000-0000-000000000001', 'free', 'Free warmup pool'),
+       ('77777777-aaaa-0000-0000-000000000002', 'premium', 'Premium warmup pool')
+ON CONFLICT (id) DO NOTHING;
+```
+
+## Redis
+
+### redis_unreachable
+
+Redis is not reachable. Rate limits, the organization key cache, the realtime bridge and the first-run setup token are all down. See [cache](/development/configuration/#cache).
+
+## Realtime
+
+### websocket_unreachable
+
+The backend turned `WEBSOCKET_URL` into a `/health` URL and the realtime service did not answer it, so the dashboard will not update live and presence stays empty. Anything below a `500` counts as an answer, so an auth wall does not trip this.
+
+A reachable realtime service that still leaves the dashboard dead has a different cause, and no check reports it: `AUTH_SECRET` on the backend and `JWT_SECRET` on the realtime service must be identical or every token is rejected. **Instance > Configuration > Environment** shows a four character fingerprint for each sensitive value so you can compare the two without either being disclosed.
+
+## Storage
+
+### blob_root_missing
+
+`BLOB_PROVIDER=filesystem` and `BLOB_FS_ROOT` is unset, missing or not writable, so email bodies, attachments and avatars cannot be stored. The check writes and deletes a probe file to prove the path is usable. The backend, the consumer and every worker on the host must share that path. See [storage](/development/configuration/#storage).
+
+### fleet_blobs_not_shared
+
+`BLOB_PROVIDER=filesystem` while nodes check in from more than one machine. A worker reads the message body the backend wrote, so a node that does not share this filesystem cannot send, and nothing says so until the last step of a send. Move to `BLOB_PROVIDER=s3` with a bucket both sides reach. See [split deployment](/development/split-deployment/).
+
+## What each service needs to be healthy
+
+| Service | Needs |
+|---|---|
+| backend | The five secrets, `PRIMARY_DB`, `REDIS`, the provider switches, the public URLs, `EMAIL_ADDRESS`, `EMAIL_NAME` and `GEODB_PATH` |
+| consumer | The same shared block. It writes to Postgres, so it needs `PRIMARY_DB` and both encryption keys, and it needs the mail identity or it silently sends nothing. `GEODB_PATH` is optional and only adds a location to opens and clicks |
+| worker | No database. The event bus, `REDIS`, both encryption keys, `ENCRYPTED_KEYS_BACKEND_URL` plus the worker token, and the `BOX_*` OAuth clients |
+| tracking | The event bus, plus `BACKEND_INTERNAL_URL` and `INTERNAL_API_TOKEN`. It exits at boot without either of those two |
+| realtime | `JWT_SECRET` equal to the backend's `AUTH_SECRET`, plus `SECRET_KEY_BASE` and `DATABASE_URL`. It refuses to boot without all three. `REDIS_URL`, `PHX_HOST` and the connection limits have defaults |
+| web and admin | Only the `PEGASUSBOUND_*` URLs, read at container start and written into `/config.js` |
+
+## See also
+
+- [Configuration reference](/development/configuration/) for every variable named here, including the [realtime](/development/configuration/#realtime-service) and [tracking](/development/configuration/#tracking-service) variables no check reads
+- [Accounts and access](/development/accounts-and-access/) for the access checks
+- [pegasusboundctl](/development/pegasusboundctl/) for `status` and every other operator command
+- [Troubleshooting](/development/troubleshooting/) for symptoms that do not come from a check

@@ -1,0 +1,670 @@
+package integration
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"strings"
+
+	"github.com/google/uuid"
+
+	"github.com/pegasusbound/pegasusbound/internal/app/webhook"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/pubsub"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+)
+
+// executeAutomationGraph walks one automation's flow graph for a fired event:
+// starting at the trigger node it follows edges, evaluating condition (IF) nodes
+// against the event data to pick the true/false branch, and running every
+// reachable action node. Best-effort and bounded (visited set + hop cap guard
+// against cycles). Each action reuses runAction -> execAction unchanged.
+func (s *service) executeAutomationGraph(ctx context.Context, a models.Automation, eventType string, data map[string]any) {
+	// A stable per-event seed so random/chance splits + re-deliveries are
+	// deterministic for a given event.
+	baseSeed := stringFromMap(data, "delivery_id", "id", "booking_id", "contact_email", "invitee_email", "email")
+
+	byID := make(map[string]models.AutomationNode, len(a.Graph.Nodes))
+	for _, n := range a.Graph.Nodes {
+		byID[n.ID] = n
+	}
+	outEdges := map[string][]models.AutomationEdge{}
+	for _, e := range a.Graph.Edges {
+		outEdges[e.Source] = append(outEdges[e.Source], e)
+	}
+
+	start := models.AutomationTriggerNodeID
+	if _, ok := byID[start]; !ok {
+		for _, n := range a.Graph.Nodes {
+			if n.Type == models.AutomationNodeTrigger {
+				start = n.ID
+				break
+			}
+		}
+	}
+
+	// Anything an action does under this context (a contact it creates, a deal
+	// it opens) is one hop deeper, so the events those writes fire carry the
+	// depth and Dispatch can stop a flow that keeps re-triggering itself.
+	ctx = webhook.WithAutomationDepth(ctx, int(toFloat(data[automationDepthKey]))+1)
+
+	// Best-effort run record — observability, never blocks the walk.
+	run := &models.AutomationRun{AutomationID: a.ID, OrganizationID: a.OrganizationID, TriggerEvent: eventType, Status: "running"}
+	_ = s.repo.CreateAutomationRun(ctx, run)
+	// Carry the run id through the event data (internal, underscore-prefixed so
+	// it's stripped from outbound webhooks) so an AI node can scope its credit
+	// idempotency key to this run.
+	data[automationRunIDKey] = run.ID.String()
+	results := []models.AutomationNodeResult{}
+	anyError := false
+
+	visited := map[string]bool{}
+	queue := []string{start}
+	const maxHops = 128
+	for hops := 0; len(queue) > 0 && hops < maxHops; hops++ {
+		id := queue[0]
+		queue = queue[1:]
+		if visited[id] {
+			continue
+		}
+		visited[id] = true
+		n, ok := byID[id]
+		if !ok {
+			continue
+		}
+		switch n.Type {
+		case models.AutomationNodeCondition:
+			res := false
+			var condErr error
+			if n.Condition != nil {
+				if n.Condition.Field == models.AutoCondAI {
+					// Ask-AI branch: credit-charged model call; errors fail safe
+					// down the false edge and are recorded on the run.
+					res, condErr = s.evalAICondition(ctx, a, n, data, true)
+				} else {
+					res = evaluateAutomationCondition(*n.Condition, data, baseSeed+"|"+id)
+				}
+			}
+			want := "false"
+			status := "branch_false"
+			if res {
+				want = "true"
+				status = "branch_true"
+			}
+			nr := models.AutomationNodeResult{NodeID: id, Type: "condition", Label: conditionSummary(n.Condition), Status: status}
+			if condErr != nil {
+				nr.Error = truncate(condErr.Error(), 300)
+			}
+			results = append(results, nr)
+			// A condition only follows the branch matching its outcome. Edges
+			// out of a condition are always labeled true/false (enforced on
+			// write); an unlabeled edge here is malformed and ignored.
+			for _, e := range outEdges[id] {
+				if e.When == want {
+					queue = append(queue, e.Target)
+				}
+			}
+		case models.AutomationNodeAction:
+			label, aerr := s.runGraphAction(ctx, a, n, eventType, data)
+			nr := models.AutomationNodeResult{NodeID: id, Type: "action", Action: string(n.Action), Label: label, Status: "success"}
+			// Capture what the action actually did (rendered fields + any output it
+			// wrote) so run history shows the result, not just success/failure.
+			nr.Preview = actionRunOutput(n, data)
+			if aerr != nil {
+				nr.Status = "error"
+				nr.Error = truncate(aerr.Error(), 300)
+				// try/catch: if the node has an "on error" branch, route the failure
+				// there and treat it as handled (the run is not marked failed, the
+				// normal path is skipped). With no error branch, fall back to the old
+				// best-effort behavior: mark the run errored and continue downstream.
+				handled := false
+				for _, e := range outEdges[id] {
+					if e.When == "error" {
+						queue = append(queue, e.Target)
+						handled = true
+					}
+				}
+				if !handled {
+					anyError = true
+					for _, e := range actionSuccessEdges(n, data, outEdges[id]) {
+						queue = append(queue, e.Target)
+					}
+				}
+			} else {
+				for _, e := range actionSuccessEdges(n, data, outEdges[id]) {
+					queue = append(queue, e.Target)
+				}
+			}
+			results = append(results, nr)
+		default: // trigger / unknown: just follow outgoing edges
+			for _, e := range outEdges[id] {
+				queue = append(queue, e.Target)
+			}
+		}
+	}
+
+	status := "success"
+	if anyError {
+		status = "error"
+	}
+	_ = s.repo.FinishAutomationRun(ctx, run.ID, status, "", results)
+
+	// Best-effort realtime: refresh the builder's run history live.
+	if s.publisher != nil {
+		s.publisher.PublishAutomationEvent(ctx, a.OrganizationID, uuid.Nil, pubsub.EventAutomationRun, a.ID.String(), a.Name)
+	}
+}
+
+// conditionSummary is a short backend label for a condition node in run history.
+func conditionSummary(c *models.AutomationCondition) string {
+	if c == nil {
+		return "condition"
+	}
+	if c.Field == models.AutoCondExpression {
+		return "expression"
+	}
+	if c.Field == models.AutoCondAI {
+		return "ask AI"
+	}
+	field := c.Field
+	if c.Field == models.AutoCondField && c.Key != "" {
+		field = c.Key
+	}
+	if c.Operator != "" {
+		return field + " " + c.Operator
+	}
+	return field
+}
+
+// automationDepthKey carries the re-entrancy depth through an automation's event
+// data; maxAutomationChainDepth bounds it. Today the only launcher is a campaign
+// "Run automation" step (depth 0 -> 1), so the guard never trips in practice. It
+// is pre-emptive: if a future action ever launches a campaign or another
+// automation, that launcher MUST forward this key so a misconfigured loop
+// (campaign -> automation -> campaign -> ...) is bounded instead of infinite.
+const (
+	automationDepthKey      = webhook.AutomationDepthKey
+	maxAutomationChainDepth = 5
+)
+
+// RunAutomationByID runs one automation's graph on demand (launched from a
+// campaign step), ignoring the trigger-matching gate. Condition nodes still
+// evaluate against `data`. Returns a descriptive error when the automation is
+// missing or disabled so the caller can record it — a disabled automation is a
+// logged skip, never a silent no-op (a toggled-off automation must not make
+// campaign steps quietly stop doing anything).
+func (s *service) RunAutomationByID(ctx context.Context, orgID, automationID uuid.UUID, data map[string]any) error {
+	depth := int(toFloat(data[automationDepthKey]))
+	if depth >= maxAutomationChainDepth {
+		return fmt.Errorf("automation chain depth limit (%d) reached; refusing to launch %s", maxAutomationChainDepth, automationID)
+	}
+	a, err := s.repo.GetAutomation(ctx, orgID, automationID)
+	if err != nil {
+		return err
+	}
+	if a == nil {
+		return fmt.Errorf("automation not found")
+	}
+	if !a.Enabled {
+		return fmt.Errorf("automation %q is disabled", a.Name)
+	}
+	eventType := a.TriggerEvent
+	if eventType == "" {
+		eventType = string(models.WebhookEventCampaignAction)
+	}
+	// Run on a COPY of the caller's data: a graph with several "run automation"
+	// actions shares one data map, so bumping depth in place would let sibling #2
+	// inherit the depth that sibling #1's nested chain reached and false-trip the
+	// cap. The copy gives each launch the same starting depth, +1.
+	d := make(map[string]any, len(data)+2)
+	for k, v := range data {
+		d[k] = v
+	}
+	d[automationDepthKey] = float64(depth + 1)
+	d["trigger"] = "campaign" // provenance: launched on demand, not event-matched
+	s.executeAutomationGraph(ctx, *a, eventType, d)
+	return nil
+}
+
+// ListAutomationRuns returns recent run history for an automation.
+func (s *service) ListAutomationRuns(ctx context.Context, orgID, id uuid.UUID, limit int) ([]models.AutomationRun, error) {
+	return s.repo.ListAutomationRuns(ctx, orgID, id, limit)
+}
+
+// DryRunAutomation walks the graph against sample (or provided) data WITHOUT any
+// side effects — no action execution, no sync runs, no run row, no realtime — and
+// returns the path taken plus a preview of what each action would send.
+func (s *service) DryRunAutomation(ctx context.Context, orgID, id uuid.UUID, req models.DryRunRequest) (*models.DryRunResponse, error) {
+	a, err := s.repo.GetAutomation(ctx, orgID, id)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil {
+		return nil, fmt.Errorf("automation not found")
+	}
+	data := req.Data
+	if len(data) == 0 {
+		data = sampleEventData(a.TriggerEvent)
+	}
+	skip := make(map[string]bool, len(req.SkipNodeIDs))
+	for _, id := range req.SkipNodeIDs {
+		skip[id] = true
+	}
+	// A dry-run executes AI nodes for real (and is charged), so scope their
+	// credit idempotency keys to a fresh id. "dryrun:" namespaces it so a test
+	// can never collide with a live run's charge.
+	data[automationRunIDKey] = "dryrun:" + uuid.NewString()
+	return &models.DryRunResponse{Trace: s.dryRunGraph(ctx, *a, data, skip), Data: data}, nil
+}
+
+// dryRunGraph mirrors executeAutomationGraph's walk but records a preview trace
+// instead of executing side-effecting actions (conditions are pure, so they
+// evaluate for real). AI nodes are the exception: a dry-run runs them for real
+// (and is charged) so the test shows the actual model output and downstream
+// conditions branch on it, matching a live run. Action nodes in skip are
+// recorded as "skipped" and not previewed, but the walk still follows their
+// normal edge so downstream steps are reflected.
+func (s *service) dryRunGraph(ctx context.Context, a models.Automation, data map[string]any, skip map[string]bool) []models.AutomationNodeResult {
+	baseSeed := stringFromMap(data, "delivery_id", "id", "booking_id", "contact_email", "invitee_email", "email")
+	byID := make(map[string]models.AutomationNode, len(a.Graph.Nodes))
+	for _, n := range a.Graph.Nodes {
+		byID[n.ID] = n
+	}
+	outEdges := map[string][]models.AutomationEdge{}
+	for _, e := range a.Graph.Edges {
+		outEdges[e.Source] = append(outEdges[e.Source], e)
+	}
+	start := models.AutomationTriggerNodeID
+	if _, ok := byID[start]; !ok {
+		for _, n := range a.Graph.Nodes {
+			if n.Type == models.AutomationNodeTrigger {
+				start = n.ID
+				break
+			}
+		}
+	}
+	trace := []models.AutomationNodeResult{}
+	visited := map[string]bool{}
+	queue := []string{start}
+	const maxHops = 128
+	for hops := 0; len(queue) > 0 && hops < maxHops; hops++ {
+		id := queue[0]
+		queue = queue[1:]
+		if visited[id] {
+			continue
+		}
+		visited[id] = true
+		n, ok := byID[id]
+		if !ok {
+			continue
+		}
+		switch n.Type {
+		case models.AutomationNodeCondition:
+			res := false
+			var condErr error
+			if n.Condition != nil {
+				if n.Condition.Field == models.AutoCondAI {
+					// Like AI action nodes, an Ask-AI branch runs for real in a
+					// dry-run (and is charged) so the test branches like a live
+					// run — but never feeds the auto-pause counter.
+					res, condErr = s.evalAICondition(ctx, a, n, data, false)
+				} else {
+					res = evaluateAutomationCondition(*n.Condition, data, baseSeed+"|"+id)
+				}
+			}
+			want := "false"
+			status := "branch_false"
+			if res {
+				want = "true"
+				status = "branch_true"
+			}
+			nr := models.AutomationNodeResult{NodeID: id, Type: "condition", Label: conditionSummary(n.Condition), Status: status}
+			if condErr != nil {
+				nr.Error = truncate(condErr.Error(), 300)
+			}
+			trace = append(trace, nr)
+			for _, e := range outEdges[id] {
+				if e.When == want {
+					queue = append(queue, e.Target)
+				}
+			}
+		case models.AutomationNodeAction:
+			switch {
+			case skip[id]:
+				// Toggled off for this test: record as skipped, no preview.
+				trace = append(trace, models.AutomationNodeResult{
+					NodeID: id,
+					Type:   "action",
+					Action: string(n.Action),
+					Label:  string(n.Action),
+					Status: "skipped",
+				})
+			case models.IsAIAction(n.Action):
+				// Run the AI node for real (charged) but never let a dry-run's
+				// credit miss auto-pause the flow (feedPause=false).
+				nr := models.AutomationNodeResult{NodeID: id, Type: "action", Action: string(n.Action), Label: aiActionLabel(n.Action), Status: "success"}
+				if aerr := s.execAIAction(ctx, a, n, data, false); aerr != nil {
+					nr.Status = "error"
+					nr.Error = truncate(aerr.Error(), 300)
+				}
+				nr.Preview = actionRunOutput(n, data)
+				trace = append(trace, nr)
+			default:
+				trace = append(trace, models.AutomationNodeResult{
+					NodeID:  id,
+					Type:    "action",
+					Action:  string(n.Action),
+					Label:   string(n.Action),
+					Status:  "success",
+					Preview: actionPreview(n, data),
+				})
+			}
+			// A dry run never fails an action, so it follows the normal path and
+			// not the "on error" branch (a skipped action still continues the
+			// walk; a skipped AI switch has no verdict, so its label branches
+			// stay unfollowed).
+			for _, e := range actionSuccessEdges(n, data, outEdges[id]) {
+				queue = append(queue, e.Target)
+			}
+		default:
+			for _, e := range outEdges[id] {
+				queue = append(queue, e.Target)
+			}
+		}
+	}
+	return trace
+}
+
+// actionPreview renders the templatable fields an action would send (no calls).
+func actionPreview(n models.AutomationNode, data map[string]any) map[string]any {
+	p := map[string]any{}
+	for _, k := range []string{"channel", "url", "message_template"} {
+		if v := configString(n.Config, k); v != "" {
+			p[k] = renderTemplate(v, data)
+		}
+	}
+	if models.IsNativeAction(n.Action) {
+		cfg := parseNativeConfig(n.Config)
+		if cfg.DealName != "" {
+			p["deal_name"] = renderTemplate(cfg.DealName, data)
+		}
+		if cfg.TaskTitle != "" {
+			p["task_title"] = renderTemplate(cfg.TaskTitle, data)
+		}
+		if n.Action == models.IntegrationActionUpsertContact {
+			for k, v := range map[string]string{
+				"email": cfg.Email, "first_name": cfg.FirstName, "last_name": cfg.LastName,
+				"company": cfg.Company, "phone": cfg.Phone,
+			} {
+				if v != "" {
+					p[k] = renderTemplate(v, data)
+				}
+			}
+			for _, f := range cfg.CustomFields {
+				if k := strings.TrimSpace(f.Key); k != "" {
+					p["custom:"+k] = renderTemplate(f.Value, data)
+				}
+			}
+			if cfg.CampaignID != "" {
+				p["campaign_id"] = cfg.CampaignID
+			}
+		}
+		if n.Action == models.IntegrationActionAddToCampaign && cfg.CampaignID != "" {
+			p["campaign_id"] = cfg.CampaignID
+		}
+		if n.Action == models.IntegrationActionFireEvent {
+			p["event"] = renderTemplate(cfg.EventName, data)
+			for _, f := range cfg.EventFields {
+				if k := strings.TrimSpace(f.Key); k != "" {
+					p[k] = renderTemplate(f.Value, data)
+				}
+			}
+		}
+	}
+	return p
+}
+
+// actionRunOutput captures, after an action node ran, a small summary of what it
+// did for run history: the rendered templatable fields (channel/url/message/deal/
+// task), plus node-specific output such as the values a set-variables node wrote.
+// Returns nil when there is nothing to show. Kept scalar + bounded so it stays
+// cheap to store in the run's node_results jsonb.
+func actionRunOutput(n models.AutomationNode, data map[string]any) map[string]any {
+	out := actionPreview(n, data)
+	switch {
+	case n.Action == models.IntegrationActionUpsertContact:
+		out["contact_id"] = valueString(data["contact_id"])
+		out["contact_created"] = valueString(data["contact_created"])
+	case n.Action == models.IntegrationActionSetVariables:
+		cfg := parseNativeConfig(n.Config)
+		for _, v := range cfg.SetVars {
+			if k := strings.TrimSpace(v.Key); k != "" {
+				out[k] = truncate(valueString(data[k]), 200)
+			}
+		}
+	case models.IsAIAction(n.Action):
+		cfg := parseAIConfig(n.Config)
+		for _, k := range aiOutputKeys(n.Action, cfg) {
+			out[k] = truncate(valueString(data[k]), 200)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// sampleEventData builds a placeholder event payload for a trigger so a dry-run
+// has something to render/evaluate against when the caller supplies none.
+func sampleEventData(triggerEvent string) map[string]any {
+	base := map[string]any{
+		"contact_email": "jane@example.com",
+		"contact_id":    "00000000-0000-0000-0000-000000000001",
+		"campaign_id":   "00000000-0000-0000-0000-000000000002",
+		"campaign_name": "Q3 Outbound",
+		"first_name":    "Jane",
+		"last_name":     "Doe",
+		"company":       "Example Inc",
+	}
+	switch triggerEvent {
+	case "campaign.reply_received":
+		base["intent"] = "positive"
+		base["confidence"] = 0.92
+		base["subject"] = "Re: quick question"
+		base["snippet"] = "Sure, let's talk next week."
+	case "meeting.booked", "meeting.rescheduled", "meeting.canceled":
+		base["source"] = "calendly"
+		base["invitee_email"] = "jane@example.com"
+		base["invitee_name"] = "Jane Doe"
+		base["event_name"] = "Intro call"
+		base["scheduled_for"] = "2026-07-01T15:00:00Z"
+		base["join_url"] = "https://example.com/join/abc"
+	case "campaign.email_bounced", "deliverability.bounce", "deliverability.complaint":
+		base["event_type"] = "bounce"
+		base["provider"] = "ses"
+		base["reason"] = "mailbox full"
+	case "warmup.health_changed":
+		base["email"] = "sender@example.com"
+		base["new_state"] = "watch"
+		base["previous_state"] = "healthy"
+		base["reason"] = "spam placement rising"
+	case "contact.created":
+		delete(base, "campaign_id")
+		delete(base, "campaign_name")
+		base["phone"] = "+1 555 0100"
+		base["subscribed"] = true
+		base["custom_fields"] = map[string]any{"industry": "SaaS"}
+		base["source"] = "form"
+		base["source_detail"] = "Demo request"
+		base["campaign_ids"] = []any{}
+		base["category_ids"] = []any{}
+	case "form.submitted":
+		delete(base, "campaign_name")
+		base["form_id"] = "00000000-0000-0000-0000-000000000003"
+		base["form_name"] = "Demo request"
+		base["submission_id"] = "00000000-0000-0000-0000-000000000004"
+		base["phone"] = "+1 555 0100"
+		base["source_url"] = "https://example.com/pricing"
+		base["data"] = map[string]any{
+			"email": "jane@example.com", "first_name": "Jane", "last_name": "Doe",
+			"company": "Example Inc", "team_size": "10-50",
+		}
+	}
+	return base
+}
+
+// runGraphAction executes one action node by building a synthetic dispatch
+// target and reusing runAction (which applies filters, logs a sync run, and
+// updates connection health) -> execAction. The automation-wide filter is
+// merged into the node config so any intent/confidence gate still applies.
+// runGraphAction executes one action node and returns a label + the action error
+// (for run-history recording). Native (Pegasusbound-internal) actions run without a
+// connection; everything else builds a synthetic dispatch target and reuses
+// runAction -> execAction.
+func (s *service) runGraphAction(ctx context.Context, a models.Automation, n models.AutomationNode, eventType string, data map[string]any) (string, error) {
+	if models.IsAIAction(n.Action) {
+		return aiActionLabel(n.Action), s.execAIAction(ctx, a, n, data, true)
+	}
+	if models.IsNativeAction(n.Action) {
+		return string(n.Action), s.execNativeAction(ctx, a, n, data)
+	}
+	if n.ConnectionID == nil {
+		return string(n.Action), nil
+	}
+	// Re-verify the connection belongs to this automation's org at run time
+	// (defense in depth — write-time validation already checks this, but never
+	// trust a stored connection id to fetch another org's secrets).
+	owned, oerr := s.repo.GetConnectionByID(ctx, a.OrganizationID, *n.ConnectionID)
+	if oerr != nil {
+		return string(n.Action), oerr
+	}
+	if owned == nil {
+		return string(n.Action), fmt.Errorf("connection not found")
+	}
+	sec, err := s.repo.GetConnectionSecrets(ctx, *n.ConnectionID)
+	if err != nil {
+		return string(n.Action), err
+	}
+	if sec == nil {
+		return string(n.Action), fmt.Errorf("connection secrets unavailable")
+	}
+	sub := models.IntegrationEventSubscription{
+		ID:             uuid.New(),
+		ConnectionID:   *n.ConnectionID,
+		OrganizationID: a.OrganizationID,
+		EventType:      eventType,
+		Action:         n.Action,
+		Config:         mergeFilterIntoConfig(a.Filter, n.Config),
+		Enabled:        true,
+		UseCase:        "automation",
+	}
+	return string(n.Action), s.runAction(ctx, repository.DispatchTarget{Subscription: sub, Secrets: *sec}, data)
+}
+
+// evaluateAutomationCondition resolves an IF node against the event payload. The
+// generic "field" type tests data[c.Key] with the operator; the rest are legacy
+// semantic shortcuts (kept working for older saved automations).
+func evaluateAutomationCondition(c models.AutomationCondition, data map[string]any, seed string) bool {
+	switch c.Field {
+	case models.AutoCondExpression:
+		return EvalExpression(c.Expression, data)
+	case models.AutoCondField:
+		raw, present := data[c.Key]
+		switch c.Operator {
+		case models.AutoOpExists:
+			return present && valueString(raw) != ""
+		case models.AutoOpIsTrue:
+			return toBool(raw)
+		case models.AutoOpNotEquals:
+			return !strings.EqualFold(valueString(raw), valueString(c.Value))
+		case models.AutoOpContains:
+			return strings.Contains(strings.ToLower(valueString(raw)), strings.ToLower(valueString(c.Value)))
+		case models.AutoOpGte:
+			return toFloat(raw) >= toFloat(c.Value)
+		case models.AutoOpLte:
+			return toFloat(raw) <= toFloat(c.Value)
+		case models.AutoOpChance:
+			return chanceHit(seed, toFloat(c.Value))
+		default: // equals
+			return strings.EqualFold(valueString(raw), valueString(c.Value))
+		}
+	case models.AutoCondIntent:
+		return strings.EqualFold(stringFromMap(data, "intent"), valueString(c.Value))
+	case models.AutoCondSource:
+		return strings.EqualFold(stringFromMap(data, "source", "campaign", "provider"), valueString(c.Value))
+	case models.AutoCondConfidence:
+		return toFloat(data["confidence"]) >= toFloat(c.Value)
+	case models.AutoCondHasContact:
+		return contactEmail(data) != ""
+	case models.AutoCondRandom:
+		return chanceHit(seed, toFloat(c.Value))
+	default:
+		return false
+	}
+}
+
+// toBool coerces an event-data value to a boolean (handles bool, "true"/"yes"/"1"
+// strings, and non-zero numbers).
+func toBool(raw any) bool {
+	switch t := raw.(type) {
+	case bool:
+		return t
+	case string:
+		s := strings.ToLower(strings.TrimSpace(t))
+		return s == "true" || s == "yes" || s == "1"
+	case float64:
+		return t != 0
+	case int:
+		return t != 0
+	default:
+		return raw != nil && valueString(raw) != ""
+	}
+}
+
+// mergeFilterIntoConfig overlays the automation-wide filter (intents,
+// min_confidence) onto an action node's config without clobbering node keys.
+func mergeFilterIntoConfig(filter, config json.RawMessage) json.RawMessage {
+	m := map[string]any{}
+	if len(config) > 0 {
+		_ = json.Unmarshal(config, &m)
+	}
+	if len(filter) > 0 {
+		f := map[string]any{}
+		if json.Unmarshal(filter, &f) == nil {
+			for k, v := range f {
+				if _, exists := m[k]; !exists {
+					m[k] = v
+				}
+			}
+		}
+	}
+	out, _ := json.Marshal(m)
+	return out
+}
+
+// chanceHit returns true for ~pct% of distinct seeds, deterministically.
+func chanceHit(seed string, pct float64) bool {
+	if pct <= 0 {
+		return false
+	}
+	if pct >= 100 {
+		return true
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(seed))
+	return float64(h.Sum32()%100) < pct
+}
+
+// valueString renders a condition value (from jsonb, so string/number/bool) as
+// a comparable string.
+func valueString(v any) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return t
+	default:
+		return strings.TrimSpace(fmt.Sprint(t))
+	}
+}

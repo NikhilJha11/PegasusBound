@@ -1,0 +1,14 @@
+# Security response headers for the marketing site. Static pages, no
+# credentials, but the site serves install.sh and cli.sh, so framing and
+# content-type sniffing are both switched off.
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+# Built assets carry a content hash in their name, so a new build is a new
+# URL and the old one can be cached for good.
+/_astro/*
+  Cache-Control: public, max-age=31536000, immutable

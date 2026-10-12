@@ -1,0 +1,60 @@
+import type React from "react";
+import { useState, useEffect } from "react";
+import { useNavigate } from "@tanstack/react-router";
+import { useSearchParams } from "@/hooks/useSearchParams";
+import useResetPasswordConfirm from "@/lib/api/hooks/auth/useResetPasswordConfirm";
+import { usePasswordStrength } from "@/hooks/usePasswordStrength";
+import toast from "react-hot-toast/headless";
+import type { AppError } from "@/lib/api/client/normalizeError";
+import buildError from "@/lib/helper/buildError";
+
+export function useResetPasswordConfirmForm() {
+    // The emailed link is /auth/reset-password/confirm?session=<jwt>. This
+    // read a path param named "token" against a route with no path
+    // segments, and then validated it as 128 hex characters, which a JWT
+    // can never be, so the page always rendered "Link expired" and never
+    // called the API.
+    const [params] = useSearchParams();
+    const navigate = useNavigate();
+    const resetConfirm = useResetPasswordConfirm();
+    const { evaluate } = usePasswordStrength();
+
+    const session = params.get("session") ?? "";
+    const isValidToken = session.length > 0;
+    const [password, setPassword] = useState("");
+    const [password2, setPassword2] = useState("");
+    const [captcha, setCaptcha] = useState(false);
+    const [pending, setPending] = useState(false);
+    const [strength, setStrength] = useState<{ score: 0 | 1 | 2 | 3 | 4; warning: string }>({ score: 0, warning: "" });
+
+    useEffect(() => {
+        if (!password) { setStrength({ score: 0, warning: "" }); return; }
+        let cancelled = false;
+        evaluate(password).then((r) => { if (!cancelled) setStrength({ score: r.score, warning: r.warning }); });
+        return () => { cancelled = true; };
+    }, [password, evaluate]);
+
+    const submit = async (turnstileToken: string) => {
+        setPending(true);
+        try {
+            await toast.promise(
+                resetConfirm.mutateAsync({ session, password, turnstile: turnstileToken }),
+                { loading: "Loading...", success: "Password successfully changed", error: (err: AppError) => buildError(err) }
+            );
+            navigate({ to: "/auth/login", search: { action: "1" } });
+        } finally { setPending(false); }
+    };
+
+    const onSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (pending) return;
+        if (password.length < 8) { toast.error("Password must be at least 8 characters long."); return; }
+        if (password !== password2) { toast.error("Passwords don't match. Please make sure you type the same password twice."); return; }
+        const result = await evaluate(password);
+        if (result.score < 2) { toast.error(result.warning || "Please choose a stronger password."); return; }
+        setCaptcha(true);
+    };
+    const onToken = async (t: string) => { setCaptcha(false); await submit(t); };
+
+    return { isValidToken, password, setPassword, password2, setPassword2, strength, captcha, pending, onSubmit, onToken };
+}

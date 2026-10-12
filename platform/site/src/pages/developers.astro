@@ -1,0 +1,313 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import { GITHUB_PATH } from '../lib/marks';
+import ApiKeysScene from '../components/scenes/developers/ApiKeysScene.astro';
+import CliScene from '../components/scenes/developers/CliScene.astro';
+import McpScene from '../components/scenes/developers/McpScene.astro';
+import WebhookScene from '../components/scenes/developers/WebhookScene.astro';
+import RealtimeScene from '../components/scenes/developers/RealtimeScene.astro';
+import IdempotencyScene from '../components/scenes/developers/IdempotencyScene.astro';
+import ScopesScene from '../components/scenes/developers/ScopesScene.astro';
+import ErrorsScene from '../components/scenes/developers/ErrorsScene.astro';
+import { LANG_LOGOS } from '../components/scenes/developers/langLogos';
+
+// Every snippet matches docs/content/docs/api: index, authentication, sdks,
+// cli, mcp, realtime, reference/contacts and reference/webhooks.
+
+const samples = [
+  {
+    id: 'curl', label: 'curl', logo: null, status: '201 Created',
+    code: `curl -X POST "https://api.pegasusbound.com/v1/contacts" \\
+  -H "Authorization: Bearer $PEGASUSBOUND_API_KEY" \\
+  -H "Idempotency-Key: 7f3c9a2e-import-01" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "email": "dana@acme.com",
+    "first_name": "Dana",
+    "company": "Acme",
+    "campaigns": ["4c1d7a90-2f3b-4e8a-9d61-0b5e7f2c3a18"]
+  }'`,
+    out: `[
+  {
+    "id": "2c3d4e5f-6071-4b2c-9d3e-4f5a6b7c8d9e",
+    "email": "dana@acme.com",
+    "first_name": "Dana",
+    "company": "Acme",
+    "subscribed": true,
+    "campaigns": [{ "id": "4c1d7a90-…", "name": "Q3 outbound" }]
+  }
+]`,
+  },
+  {
+    id: 'js', label: 'JavaScript', logo: LANG_LOGOS.javascript.svg, status: '200 OK',
+    code: `import { Pegasusbound } from "pegasusbound";
+
+const pegasusbound = new Pegasusbound({ apiKey: process.env.PEGASUSBOUND_API_KEY });
+
+for await (const campaign of await pegasusbound.campaigns.list()) {
+  console.log(campaign.id, campaign.name);
+}`,
+    out: `4c1d7a90-2f3b-4e8a-9d61-0b5e7f2c3a18 Q3 outbound
+b9e2f6c1-7a43-4d0e-8c25-1f6a9b3d7e02 Agencies, EU
+0d5a3e8f-96b1-4c7a-a2e4-7b8c1d9f6a35 Founders list`,
+  },
+  {
+    id: 'py', label: 'Python', logo: LANG_LOGOS.python.svg, status: '200 OK',
+    code: `from pegasusbound import Pegasusbound
+
+client = Pegasusbound()  # reads PEGASUSBOUND_API_KEY
+
+for campaign in client.campaigns.list():
+    print(campaign.id, campaign.name)`,
+    out: `4c1d7a90-2f3b-4e8a-9d61-0b5e7f2c3a18 Q3 outbound
+b9e2f6c1-7a43-4d0e-8c25-1f6a9b3d7e02 Agencies, EU
+0d5a3e8f-96b1-4c7a-a2e4-7b8c1d9f6a35 Founders list`,
+  },
+  {
+    id: 'go', label: 'Go', logo: LANG_LOGOS.go.svg, status: '200 OK',
+    code: `client, err := pegasusbound.New(pegasusbound.WithAPIKey(os.Getenv("PEGASUSBOUND_API_KEY")))
+if err != nil {
+    log.Fatal(err)
+}
+
+page, err := client.Campaigns.List(ctx, nil)
+for campaign, err := range page.All(ctx) {
+    fmt.Println(campaign.Name)
+}`,
+    out: `Q3 outbound
+Agencies, EU
+Founders list`,
+  },
+];
+
+const sdks = [
+  { name: 'JavaScript and TypeScript', logo: LANG_LOGOS.javascript.svg, pkg: 'npm install pegasusbound', runtime: 'Node 20+, Bun, Deno, browsers, edge', href: 'https://github.com/pegasusbound/pegasusbound-js',
+    code: `new Pegasusbound({ apiKey: "pgsbd_..." });      // API key
+new Pegasusbound({ accessToken: "wmat_..." });  // OAuth token` },
+  { name: 'Python', logo: LANG_LOGOS.python.svg, pkg: 'pip install pegasusbound', runtime: 'Python 3.10+, sync and async', href: 'https://github.com/pegasusbound/pegasusbound-py',
+    code: `client = Pegasusbound()  # reads PEGASUSBOUND_API_KEY
+for key in client.api_keys.list():
+    print(key.name, key.status)` },
+  { name: 'Go', logo: LANG_LOGOS.go.svg, pkg: 'go get github.com/pegasusbound/pegasusbound-go', runtime: 'Go 1.23+', href: 'https://github.com/pegasusbound/pegasusbound-go',
+    code: `client, err := pegasusbound.New(
+    pegasusbound.WithAPIKey("pgsbd_..."),
+)` },
+];
+
+const webhookFacts = [
+  ['Signed', 'An HMAC-SHA256 signature over the timestamp and the raw body, with your endpoint’s secret.'],
+  ['Retried', 'Up to 8 attempts with backoff from 30 seconds to an hour, then marked abandoned.'],
+  ['Replayable', 'Every attempt is in the delivery log, and a failed one can be sent again with its original event id.'],
+  ['HTTPS only', 'Private, loopback and link-local addresses are refused, and redirects are never followed.'],
+];
+
+const realtimeFacts = [
+  ['In order', 'Every event carries a sequence number, so you always know what came first.'],
+  ['Resumable', 'Reconnect with the last sequence you handled and the events you missed are replayed.'],
+  ['Narrowed by intent', 'Join with the event families you act on and the rest never reach you.'],
+];
+
+const faq: [string, string][] = [
+  ['How do I authenticate?', 'Create an API key under Settings and send it as a Bearer token on every request. Each key carries only the scopes you give it, and can be limited to certain IP addresses. Apps acting for other people use OAuth instead.'],
+  ['Are retries safe?', 'Yes. Send an Idempotency-Key header with any write, and Pegasusbound stores the response for 24 hours and replays it for a retry with the same key instead of doing the work twice.'],
+  ['How do I verify a webhook?', 'Every delivery carries an X-Pegasusbound-Signature header of the form t=<timestamp>,v1=<signature>. Compute an HMAC-SHA256 of the timestamp, a dot and the raw body with your endpoint’s secret, and compare. Webhook targets must be HTTPS.'],
+  ['What do errors look like?', 'Every error has a stable machine-readable code and a request_id, next to a human-readable message. Build your logic on the code and the HTTP status, and quote the request_id when you contact us.'],
+  ['Can an AI assistant send email through the MCP server?', 'No. Over MCP the assistant can read, organise and draft, but tools that send a message to a recipient are never exposed, and a client that signs in over OAuth is never given the scope that starts campaigns.'],
+  ['Is there an API for self-hosted instances?', 'The same one. A self-hosted instance serves the same API on its own domain, and the SDKs and CLI can point at any host.'],
+];
+
+const h2 = 'text-[32px] md:text-[48px] font-medium tracking-[-0.045em] leading-[1.04] text-slate-900';
+const lead = 'text-[17px] md:text-[19px] leading-[1.55] text-slate-500';
+const title = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const body = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+const link = 'group mt-4 inline-flex items-center gap-2 text-[16px] text-[color:var(--brand)] hover:text-[color:var(--brand-strong)]';
+---
+<Layout
+  title="Cold Email API, Webhooks, SDKs and CLI | Pegasusbound"
+  description="The Pegasusbound REST API with scoped keys, idempotent writes and signed webhooks, plus official SDKs for JavaScript, Python and Go, a CLI and an MCP server for AI tools."
+>
+  <!-- HERO: the promise, then the API keys page beside a working request. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="grid gap-8 lg:grid-cols-[1.15fr_1fr] lg:items-end lg:gap-16">
+      <div>
+        <div class="text-[14px] text-slate-500">Developers</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+          Everything in the dashboard is an API call.
+        </h1>
+      </div>
+      <div class="lg:pb-2">
+        <p class={lead}>
+          Add contacts, launch campaigns, read replies and react to events from your own code. Scoped keys, safe retries and signed webhooks come as standard, and the whole thing is open source.
+        </p>
+        <div class="mt-7 flex flex-wrap items-center gap-3">
+          <a href="https://docs.pegasusbound.com/api/" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+            Read the API docs <Icon name="arrowRight" size={14} />
+          </a>
+          <a href="https://github.com/pegasusbound/pegasusbound" target="_blank" rel="noopener noreferrer" class="inline-flex h-11 items-center gap-2 rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={GITHUB_PATH} /></svg>
+            View the source
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-12 md:mt-16 grid gap-3 lg:grid-cols-[1.2fr_1fr]">
+      <ApiKeysScene />
+
+      <div class="flex min-w-0 flex-col overflow-hidden rounded-[6px] bg-[#0b1020] ring-1 ring-slate-900/20" data-tabs>
+        <div class="flex items-center gap-1 overflow-x-auto border-b border-white/10 px-3 pt-3" role="tablist" aria-label="Code samples">
+          {samples.map((s, i) => (
+            <button type="button" role="tab" aria-selected={i === 0 ? 'true' : 'false'} data-tab={s.id} class="relative inline-flex h-9 shrink-0 items-center gap-2 rounded-t-md px-3 text-[13px] text-white/50 transition-colors hover:text-white aria-selected:text-white">
+              {s.logo ? <span class="inline-flex size-3.5 [&>svg]:size-3.5" aria-hidden="true" set:html={s.logo} /> : <Icon name="code" size={13} />}
+              {s.label}
+              <span class="tab-line absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-sky-400"></span>
+            </button>
+          ))}
+        </div>
+        {samples.map((s, i) => (
+          <div class={`flex min-h-0 flex-1 flex-col ${i ? 'hidden' : ''}`} role="tabpanel" data-panel={s.id}>
+            <pre class="flex-1 overflow-x-auto p-5 font-mono text-[12.5px] leading-[1.75] text-slate-200 sm:p-6 sm:text-[13px]"><code>{s.code}</code></pre>
+            <div class="border-t border-white/10 bg-white/[0.03]">
+              <div class="flex items-center justify-between px-5 pt-3 font-mono text-[11px] uppercase tracking-[0.14em] text-white/35 sm:px-6">
+                <span>{s.id === 'curl' ? 'Response' : 'Output'}</span>
+                <span class="normal-case tracking-normal text-emerald-400">{s.status}</span>
+              </div>
+              <pre class="overflow-x-auto px-5 pb-5 pt-2 font-mono text-[12px] leading-[1.7] text-slate-400 sm:px-6"><code>{s.out}</code></pre>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </section>
+
+  <!-- WAYS IN: the terminal and the AI client, then the three SDKs. -->
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1.15fr_1fr] lg:items-end lg:gap-16">
+      <h2 class={h2}><span class="text-slate-400">Five ways in.</span> Pick the one that fits the job.</h2>
+      <p class={lead}>The REST API is underneath all of them. The CLI and the SDKs wrap it, the MCP server hands it to an AI client, and the realtime stream pushes its events to you as they happen.</p>
+    </div>
+
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 lg:grid-cols-6">
+      <article class="lg:col-span-3">
+        <CliScene />
+        <h3 class={title}>The pegasusbound CLI</h3>
+        <p class={body}>Sign in once through the browser, then run campaigns, contacts and the inbox from your terminal or CI. It prints a table to a person and JSON to a pipe, and asks before anything sends real mail.</p>
+        <code class="mt-4 inline-block rounded-md bg-slate-50 px-3 py-2 font-mono text-[12.5px] text-slate-700 ring-1 ring-slate-200">brew install pegasusbound/tap/pegasusbound</code>
+        <div><a href="https://docs.pegasusbound.com/api/cli/" class={link}>Read the CLI guide <Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a></div>
+      </article>
+      <article class="lg:col-span-3">
+        <McpScene />
+        <h3 class={title}>An MCP server for AI clients</h3>
+        <p class={body}>Give Claude, Cursor or any MCP client your contacts, campaigns and inbox as tools. It signs in with OAuth, sees only the scopes your role allows, and drafts replies rather than sending them.</p>
+        <code class="mt-4 inline-block max-w-full truncate rounded-md bg-slate-50 px-3 py-2 font-mono text-[12.5px] text-slate-700 ring-1 ring-slate-200">claude mcp add --transport http pegasusbound https://api.pegasusbound.com/v1/mcp</code>
+        <div><a href="https://docs.pegasusbound.com/api/mcp/" class={link}>Connect an MCP client <Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a></div>
+      </article>
+    </div>
+
+    <div class="mt-12 md:mt-16 grid gap-3 md:grid-cols-3">
+      {sdks.map((s) => (
+        <a href={s.href} target="_blank" rel="noopener noreferrer" class="group flex flex-col overflow-hidden rounded-[6px] bg-[#0b1020] ring-1 ring-slate-900/20 transition-transform hover:-translate-y-0.5">
+          <div class="flex items-center gap-2.5 border-b border-white/10 px-5 py-3.5">
+            <span class="inline-flex size-5 [&>svg]:size-5" aria-hidden="true" set:html={s.logo} />
+            <span class="text-[14px] font-medium text-white">{s.name}</span>
+            <Icon name="arrowUpRight" size={14} class="ml-auto text-white/30 transition-colors group-hover:text-white" />
+          </div>
+          <div class="px-5 pt-4 font-mono text-[12px] text-sky-300"><span class="text-white/35">$ </span>{s.pkg}</div>
+          <pre class="flex-1 overflow-x-auto px-5 pb-4 pt-3 font-mono text-[12px] leading-[1.7] text-slate-300"><code>{s.code}</code></pre>
+          <div class="border-t border-white/10 px-5 py-3 text-[12.5px] text-white/45">{s.runtime} · typed, auto-paginating, retries built in</div>
+        </a>
+      ))}
+    </div>
+  </section>
+
+  <!-- WEBHOOKS: copy beside an endpoint's delivery log. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-[1fr_1.25fr] lg:gap-16">
+      <div>
+        <h2 class={h2}><span class="text-slate-400">Webhooks.</span> Every event, signed and logged.</h2>
+        <p class={`mt-5 ${lead}`}>Subscribe an HTTPS endpoint to replies, sends, bounces, new contacts, booked meetings and more. Each delivery is signed with your endpoint’s secret, and every attempt is kept so you can see what your server answered.</p>
+        <dl class="mt-8 divide-y divide-slate-200 border-y border-slate-200">
+          {webhookFacts.map(([k, v]) => (
+            <div class="grid gap-1 py-3.5 sm:grid-cols-[120px_1fr] sm:gap-6">
+              <dt class="text-[15px] font-medium text-slate-900">{k}</dt>
+              <dd class="text-[15px] leading-[1.55] text-slate-500">{v}</dd>
+            </div>
+          ))}
+        </dl>
+        <a href="https://docs.pegasusbound.com/api/reference/webhooks/" class={link}>Read the webhooks reference <Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a>
+      </div>
+      <WebhookScene />
+    </div>
+  </section>
+
+  <!-- REALTIME: one wide live log. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1.15fr_1fr] lg:items-end lg:gap-16">
+      <h2 class={h2}><span class="text-slate-400">Realtime.</span> The stream the dashboard runs on.</h2>
+      <div>
+        <p class={lead}>Open one WebSocket with a key that has REALTIME_SUBSCRIBE and receive sends, opens, replies, audit entries and your own custom events as they happen, filtered by the same permissions as the dashboard.</p>
+        <a href="https://docs.pegasusbound.com/api/realtime/" class={link}>Read the realtime guide <Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a>
+      </div>
+    </div>
+    <div class="mt-12 md:mt-16">
+      <RealtimeScene />
+    </div>
+    <div class="mt-8 grid gap-6 md:grid-cols-3 md:gap-10">
+      {realtimeFacts.map(([k, v]) => (
+        <div class="border-t border-slate-200 pt-4">
+          <h3 class="text-[16px] font-medium text-slate-900">{k}</h3>
+          <p class="mt-1.5 text-[15px] leading-[1.55] text-slate-500">{v}</p>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <!-- SAFETY: retries, scopes and errors, each shown rather than told. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <h2 class={`max-w-4xl ${h2}`}><span class="text-slate-400">Built to be relied on.</span> Retries, permissions and errors you can plan around.</h2>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-3">
+      <article>
+        <IdempotencyScene />
+        <h3 class={title}>Safe retries</h3>
+        <p class={body}>Send an <code class="font-mono text-[14px] text-slate-900">Idempotency-Key</code> with any write. A retry within 24 hours gets the original response back instead of doing the work twice.</p>
+      </article>
+      <article>
+        <ScopesScene />
+        <h3 class={title}>Scoped keys</h3>
+        <p class={body}>A key can read and write contacts without being able to send a single email. Give each integration only what it needs, and limit it to your own IP addresses.</p>
+      </article>
+      <article class="md:col-span-2 lg:col-span-1">
+        <ErrorsScene />
+        <h3 class={title}>Errors with a code</h3>
+        <p class={body}>Every error carries a stable code for your logic and a request id for support, next to a message written for people.</p>
+      </article>
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="The API, answered." />
+
+  <CTA photo="paint-teal" title="Build on Pegasusbound." description="Create an API key, send your first request, and get every event back as a signed webhook." primaryLabel="Get an API key" secondaryLabel="Read the docs" secondaryHref="https://docs.pegasusbound.com/api/" />
+</Layout>
+
+<style>
+  .tab-line { opacity: 0; transition: opacity 200ms; }
+  [aria-selected='true'] .tab-line { opacity: 1; }
+</style>
+
+<script>
+  document.querySelectorAll<HTMLElement>('[data-tabs]').forEach((root) => {
+    const tabs = [...root.querySelectorAll<HTMLButtonElement>('[data-tab]')];
+    tabs.forEach((tab) => tab.addEventListener('click', () => {
+      tabs.forEach((t) => t.setAttribute('aria-selected', String(t === tab)));
+      root.querySelectorAll<HTMLElement>('[data-panel]').forEach((p) => p.classList.toggle('hidden', p.dataset.panel !== tab.dataset.tab));
+    }));
+  });
+</script>

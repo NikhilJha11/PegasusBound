@@ -1,0 +1,361 @@
+---
+title: HubSpot
+description: "Run your workspace's CRM on HubSpot: deals, tasks and notes written through, outreach logged on the timeline, and campaigns that stop when HubSpot says a contact has moved on."
+---
+
+HubSpot mode makes HubSpot your workspace's CRM. The deals, pipelines, tasks and notes you see in Pegasusbound are HubSpot's records, and your outreach is logged on each contact's HubSpot timeline.
+
+## Switch to HubSpot
+
+<Steps>
+
+<Step>
+
+Open **Integrations > HubSpot** and select **Connect**.
+
+</Step>
+
+<Step>
+
+Sign in to HubSpot, pick the account, and approve the permissions.
+
+</Step>
+
+<Step>
+
+Go through the setup wizard. Every question has a default that works, so you can finish without changing anything.
+
+</Step>
+
+<Step>
+
+Finish the wizard. The dashboard fills in as the first pull runs, usually within a minute or two.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- Every change you make in Pegasusbound is written to HubSpot first. If HubSpot refuses it, nothing is saved.
+- A deal opened in HubSpot, a lifecycle stage you choose or an email opt-out holds the contact's campaigns.
+- Pipelines and stages are managed in HubSpot only.
+- It works with free HubSpot.
+- Switching back or disconnecting deletes nothing on either side.
+
+<Fold>
+
+## How HubSpot mode works
+
+A workspace can use Pegasusbound's own CRM or HubSpot. In **HubSpot mode**, HubSpot is the system of record. The deals, pipelines, tasks and notes you see in Pegasusbound are HubSpot's records, mirrored into Pegasusbound so lists, search and the board stay fast, and every change you make in Pegasusbound goes to HubSpot first. Your outreach is logged on each contact's HubSpot timeline, and HubSpot can stop a campaign when a contact becomes a deal or a customer.
+
+The basic HubSpot connection (a contact upsert from an [automation](/guides/automations/#actions) or **Push to CRM**) works without HubSpot mode. This page covers the full mode.
+
+</Fold>
+
+<Fold>
+
+## What HubSpot mode does
+
+- **Deals, pipelines, tasks and notes are HubSpot's.** A deal you create, move or edit in Pegasusbound is written to HubSpot before it is saved here. If HubSpot refuses it (a required property, a missing permission), you see HubSpot's reason and nothing is saved.
+- **Your outreach lands on the HubSpot timeline.** Sends and replies are logged as email activities, bounces and unsubscribes are recorded, and booked meetings become HubSpot meetings.
+- **A "Pegasusbound" property group** on HubSpot contacts carries each contact's outreach status, so HubSpot users can filter lists, build reports and trigger workflows on it.
+- **HubSpot can stop outreach.** A deal opened in HubSpot, a lifecycle stage you choose or an email opt-out holds the contact's campaigns.
+- **The contact panel shows HubSpot's side.** In the contact drawer and the inbox, a contact shows its HubSpot owner, lifecycle stage, lead status, company and any properties you choose, and you can edit the owner, lifecycle stage and lead status in place.
+
+</Fold>
+
+<Fold>
+
+## Connect and set up
+
+1. Open **Integrations > HubSpot** and select **Connect**. Sign in to HubSpot, pick the account, and approve the permissions. Connecting takes someone who can install apps in that HubSpot account.
+2. The setup wizard opens. Every question has a default that works, so you can finish it without changing anything and adjust later. It asks which activity to log, whether Pegasusbound may create contacts and companies, what a positive reply does, which rules stop outreach, which deal pipelines to mirror, and how contact fields map.
+3. Finish the wizard. Pegasusbound creates the Pegasusbound property group in HubSpot and starts the first pull: owners, pipelines, then recent deals and tasks. The dashboard fills in as it runs, usually within a minute or two.
+
+After setup the same page holds the settings and the [sync health](#sync-health-and-fixing-errors) panel. Changing them needs the `manage_settings` permission.
+
+<Callout type="info" title="A connection made before HubSpot mode existed needs a reconnect">
+Earlier HubSpot connections only asked for contact access. HubSpot mode also needs companies, deals, owners and the contact schema, so the page asks you to reconnect before you can switch, and the switch is refused with `crm_reauth_required` until you do.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## What syncs
+
+| Record | Direction | How |
+| --- | --- | --- |
+| Deals | Both ways | Pegasusbound writes through to HubSpot. Changes in HubSpot are pulled every minute |
+| Pipelines and stages | HubSpot to Pegasusbound | Managed in HubSpot only. Pulled every 30 minutes, and sooner when a deal arrives in a stage Pegasusbound has not seen |
+| Tasks | Both ways | Pegasusbound writes through. Tasks owned by matched members are pulled every minute |
+| Notes | Both ways | Pegasusbound writes through. A contact's HubSpot notes are pulled when you open the contact |
+| Task types | HubSpot to Pegasusbound | Fixed to HubSpot's: To-do, Call, Email, LinkedIn |
+| Owners | HubSpot to Pegasusbound | Pulled every 30 minutes and matched to members by email |
+| Contacts | Both ways, per field | Owner, lifecycle stage, lead status, company, opt-out and the fields you map. See [contacts and field mapping](#contacts-and-field-mapping) |
+| Outreach activity | Pegasusbound to HubSpot | See [activity logged to HubSpot](#activity-logged-to-hubspot) |
+
+Pegasusbound pulls only what changed since the last pull, so the minute-by-minute pull stays light. Opening a contact in Pegasusbound also refreshes that contact's HubSpot record, deals, tasks and notes on the spot.
+
+### Deals and pipelines
+
+The Pipelines page lists only your HubSpot pipelines, and creating, renaming or deleting a pipeline or stage is refused with `crm_managed_externally`: make the change in HubSpot and it appears in Pegasusbound within minutes. In the wizard you can limit the mirror to some pipelines; deals in the others are not mirrored.
+
+Deals in a pipeline that only exists in Pegasusbound are hidden from the deal table and board while HubSpot is your CRM. They are not deleted: [copy them into HubSpot](#copying-your-pegasusbound-crm-into-hubspot) or [switch back](#switching-back-and-disconnecting) to see them again.
+
+In HubSpot, won and lost are stages rather than a status. Marking a deal won or lost in Pegasusbound moves it to the pipeline's first closed-won or closed-lost stage, and moving it to a closed stage sets its status. Stages carry HubSpot's closed flag, won flag and probability. A deal owned by someone in HubSpot who is not a workspace member shows that owner's name.
+
+Deals created by an automation's **Create deal** or **Move deal stage** action reach HubSpot too, through the [sync queue](#sync-health-and-fixing-errors) rather than at once.
+
+### Tasks
+
+The Tasks page shows the HubSpot tasks owned by HubSpot users who are matched to workspace members. The first pull brings in tasks changed in the last 90 days. A contact's own tasks are pulled when you open the contact, whoever owns them.
+
+| Pegasusbound | HubSpot |
+| --- | --- |
+| Priority `low`, `medium`, `high`, `urgent` | `Low`, `Medium`, `High` (`urgent` is written as `High`) |
+| Status `pending`, `in progress`, `completed`, `cancelled` | `Not started`, `In progress`, `Completed`, `Deferred` |
+| Assignee | Task owner. A member with no matched HubSpot owner cannot be assigned (`crm_owner_unmapped`) |
+
+Creating, editing or deleting a task type is refused with `crm_managed_externally`, because HubSpot's task types are fixed. Tasks Pegasusbound opens by itself, such as [follow-up tasks from replies](/guides/contacts-crm/#follow-up-tasks-from-replies) and an automation's **Create a task**, are written to HubSpot as well.
+
+</Fold>
+
+<Fold>
+
+## Contacts and field mapping
+
+A Pegasusbound contact is linked to a HubSpot contact by email address. Linking happens when Pegasusbound emails the contact, when you open it, when HubSpot changes a contact whose address Pegasusbound has, and after an [import from a HubSpot list](#importing-from-hubspot-lists).
+
+When Pegasusbound emails someone HubSpot does not have, it creates the HubSpot contact (on by default). With company creation on (also the default), the new contact is associated with the company on its email domain, and a company is created when HubSpot has none. Free mail domains such as `gmail.com` never become companies. With creating contacts off, a contact HubSpot does not have is simply not logged there.
+
+Each mapped field has a direction:
+
+| Direction | What happens |
+| --- | --- |
+| Push | Pegasusbound writes the field to HubSpot when the contact is edited in Pegasusbound and each time it emails them |
+| Pull | A change in HubSpot is copied onto the Pegasusbound contact |
+| Both | The most recent change wins: an edit in HubSpot is copied onto the Pegasusbound contact, and an edit in Pegasusbound is written to HubSpot |
+
+The defaults map first name, last name, company and phone to `firstname`, `lastname`, `company` and `phone`, all **Both**. A custom field maps as `custom:<key>`. A blank value in HubSpot never blanks a Pegasusbound field, and the email address is never overwritten from HubSpot.
+
+You can also pick up to 40 extra HubSpot properties to show on the contact panel.
+
+</Fold>
+
+<Fold>
+
+## Activity logged to HubSpot
+
+| In Pegasusbound | In HubSpot | Default |
+| --- | --- | --- |
+| A campaign email is sent | An outgoing email activity with the subject and body | On |
+| The contact replies | An incoming email activity | On |
+| An email bounces | The logged email is marked `BOUNCED` | On |
+| The contact unsubscribes | A note on the contact, and `pegasusbound_unsubscribed` set | On |
+| A meeting is booked through Calendly or Cal.com | A HubSpot meeting | On |
+| An open | `pegasusbound_last_opened_at` updated, no timeline entry | Off |
+| A click | `pegasusbound_last_clicked_at` updated, no timeline entry | Off |
+
+Each email activity is associated with the contact, its company and its open deals. Its owner is the member who owns the sending mailbox when that member is matched to a HubSpot owner, otherwise the contact's owner. Activity is logged within seconds and never depends on your [webhooks](/guides/webhooks/) or their per-minute limit, so a large send is logged in full.
+
+Opens and clicks are off by default because mail privacy proxies and security scanners open and click on their own, and HubSpot timelines fill with noise. Turned on, they only update the two properties, at most once an hour per contact, and never create a contact in HubSpot.
+
+</Fold>
+
+<Fold>
+
+## The Pegasusbound property group
+
+Pegasusbound creates a **Pegasusbound** group of contact properties in HubSpot when you switch, and keeps it up to date (on by default; turning it off stops every property write, including opens and clicks). Properties you or your HubSpot admins already changed are left as they are.
+
+| Property | Holds |
+| --- | --- |
+| `pegasusbound_status` | `contacted`, `replied`, `interested`, `not_interested`, `meeting_booked`, `bounced` or `unsubscribed`. A later send never moves a contact back from a reply status to `contacted` |
+| `pegasusbound_last_campaign` | The name of the last campaign that emailed the contact |
+| `pegasusbound_last_contacted_at` | When Pegasusbound last emailed the contact |
+| `pegasusbound_last_replied_at` | When the contact last replied |
+| `pegasusbound_reply_intent` | How Pegasusbound classified the latest reply |
+| `pegasusbound_last_opened_at` | Last open, when open logging is on |
+| `pegasusbound_last_clicked_at` | Last click, when click logging is on |
+| `pegasusbound_unsubscribed` | Set when the contact unsubscribes from Pegasusbound outreach |
+| `pegasusbound_link` | A link that opens the contact in Pegasusbound |
+
+</Fold>
+
+<Fold>
+
+## Owners
+
+HubSpot's owners (its users) are matched to workspace members by email address. Where the addresses differ, pick the member by hand on the HubSpot page; a match you choose is kept and never replaced by the email match. Matching decides:
+
+- whose tasks appear on the Tasks page
+- who owns the email activity a mailbox logs
+- which HubSpot owner a deal or task gets when you assign it to a member in Pegasusbound
+- who the [Pegasusbound card](#working-from-inside-hubspot) acts as, and so what a HubSpot user can do from it
+
+</Fold>
+
+<Fold>
+
+## Positive replies
+
+When a reply is classified as interested, Pegasusbound can:
+
+- set the contact's **lead status** (default `In progress`)
+- set its **lifecycle stage** (off by default). HubSpot refuses to move a lifecycle stage backwards; the lead status is still set when it does
+- **create a deal** in a pipeline and stage you choose (off by default). It is skipped when the contact already has an open deal
+
+The follow-up task comes from your existing [reply follow-up setting](/guides/contacts-crm/#follow-up-tasks-from-replies) and is written to HubSpot like any other task.
+
+</Fold>
+
+<Fold>
+
+## Exit rules
+
+Exit rules hold a contact in every campaign it is in when HubSpot says it has moved on, so nobody gets a follow-up after becoming a deal or a customer. A held lead stays held until someone resumes it; the hold shows the reason, such as "A deal was opened in HubSpot".
+
+| Rule | Default |
+| --- | --- |
+| A deal associated with the contact is opened in HubSpot | On. Only deals created in the last 48 hours count, so the first pull's existing deals stop nobody |
+| The contact's lifecycle stage changes to one you choose | On, for `Opportunity` and `Customer` |
+| The contact opts out of email in HubSpot | On. The address is added to the [suppression list](/guides/unsubscribe/) |
+
+### Import guards
+
+Guards decide who an [import from a HubSpot list](#importing-from-hubspot-lists) leaves out:
+
+| Guard | Default |
+| --- | --- |
+| Skip contacts opted out of email | On |
+| Skip contacts in these lifecycle stages | On, for `Customer` and `Evangelist` |
+| Skip contacts with an open deal | On |
+| Skip contacts owned by someone outside the workspace | Off |
+
+</Fold>
+
+<Fold>
+
+## Working from inside HubSpot
+
+Two things put Pegasusbound inside HubSpot itself, so a rep never has to switch tabs to act on a contact:
+
+- **The Pegasusbound card** on every contact record shows the contact's Pegasusbound status, each campaign they are in with its step, and why a lead is paused. From the card you can add the contact to a campaign, pause or resume all of their campaigns, and open them in Pegasusbound. A contact new to Pegasusbound is created from the HubSpot record when you add them.
+- **The "Add to Pegasusbound campaign" workflow action** enrolls a workflow's contacts in the campaign you pick, so a HubSpot list, form or lifecycle change can feed outreach on its own. Contacts who opted out of email in HubSpot are skipped, and the action reports what happened in its output for the next step of the workflow.
+
+The card acts as the Pegasusbound member matched to the HubSpot user viewing it (see [owners](#owners)), with that member's role:
+
+| On the card | The member needs |
+| --- | --- |
+| See the contact's Pegasusbound status and campaigns | View campaigns and view contacts |
+| Add to campaign | Manage campaigns and manage contacts |
+| Pause or resume campaigns | Manage campaigns |
+
+A HubSpot user with no matched member, or whose member is still invited, is banned from signing in, or lacks the permission, sees why on the card and changes nothing. The workflow action has no viewer: it is set up by whoever can edit HubSpot workflows, and it acts as the workspace owner.
+
+The card and the workflow action need the HubSpot account to be in HubSpot mode in exactly one Pegasusbound workspace. When more than one workspace has it connected in HubSpot mode, both refuse until only one does.
+
+</Fold>
+
+<Fold>
+
+## Importing from HubSpot lists
+
+On the HubSpot page, pick one of your HubSpot lists. The preview counts who would come in and who is skipped, by reason: opted out, lifecycle stage, open deal, owned by someone outside the workspace, no email address, and duplicate address. Continue, and the list becomes an ordinary contact import, finished in the usual [import review](/guides/contacts-crm/#importing) where you pick the campaign, labels and duplicate handling.
+
+One import takes up to 25,000 contacts; a larger list is cut off at that number and the preview says so. The imported contacts are linked to their HubSpot records a couple of minutes later, so their first sends log against the right person.
+
+List import needs HubSpot's list permission, which is optional. A connection without it is asked to reconnect and allow list access.
+
+</Fold>
+
+<Fold>
+
+## Copying your Pegasusbound CRM into HubSpot
+
+When a workspace that used Pegasusbound's CRM switches, its own deals, tasks and notes are not in HubSpot yet. The HubSpot page counts them and copies the kinds you pick, once:
+
+- **Deals** move onto your first HubSpot pipeline. Each keeps its stage when HubSpot has a stage with the same name, and otherwise goes to the first stage that matches its status (open, won or lost)
+- **Tasks** and **notes** are created in HubSpot with their contact and deal
+
+A record already in HubSpot is never copied twice, so running it again only picks up what was missed. A Pegasusbound deal, task or note you edit after switching is also created in HubSpot at that moment.
+
+</Fold>
+
+<Fold>
+
+## Sync health and fixing errors
+
+The HubSpot page shows what is waiting, what failed in the last runs, how many records are mirrored, and when each pull (owners, pipelines, deals, tasks, contacts) last ran with any error it hit. **Sync now** starts a full pull; a second one within 30 seconds is refused with `crm_sync_running`.
+
+Changes you make in the dashboard go to HubSpot while you wait. Activity logging, automation-written records and copies go through a queue that retries a failure with growing gaps (a minute, five minutes, half an hour, up to several hours) before marking it failed. Failed items stay listed for 30 days with a plain-language reason. **Retry** sends them again and **Discard** drops them.
+
+| You see | What to do |
+| --- | --- |
+| Reconnect HubSpot | HubSpot revoked Pegasusbound's access or a permission is missing. Reconnect from **Integrations** and approve every permission |
+| HubSpot refused the change | HubSpot's own rule, shown in its words (for example a required deal property). Fix it in HubSpot or on the record, then retry |
+| This record no longer exists in HubSpot | It was deleted in HubSpot. Discard the item |
+| That member is not a HubSpot user yet | Match the member to a HubSpot owner in [owners](#owners) |
+| HubSpot did not answer | HubSpot was slow or down. It retries by itself |
+
+Pegasusbound keeps its calls under HubSpot's limit for each HubSpot account (about 90 requests every 10 seconds, shared across every Pegasusbound process), and waits and retries when HubSpot asks it to slow down.
+
+</Fold>
+
+<Fold>
+
+## Switching back and disconnecting
+
+Choosing **Pegasusbound** as the CRM again, or disconnecting HubSpot, stops the sync and the activity logging. Nothing is deleted on either side: the deals, pipelines, tasks and notes that were mirrored stay in Pegasusbound as ordinary records you can edit, the hidden Pegasusbound-only pipelines come back, and HubSpot keeps everything that was written there. Switching back to the same HubSpot account later picks up the same records rather than duplicating them.
+
+</Fold>
+
+<Fold>
+
+## Self-hosting
+
+A self-hosted instance uses its own HubSpot app. Create one in a HubSpot developer account, then:
+
+1. Set the redirect URL to `BACKEND_PUBLIC_URL` plus `/integrations/oauth/callback`, or to the value of `INTEGRATIONS_OAUTH_REDIRECT_URL` when you set one.
+2. Add the required scopes: `oauth`, `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.objects.companies.read`, `crm.objects.companies.write`, `crm.objects.deals.read`, `crm.objects.deals.write`, `crm.objects.owners.read`, `crm.schemas.contacts.read` and `crm.schemas.contacts.write`. Add `crm.lists.read` and `sales-email-read` as optional scopes.
+3. Set `HUBSPOT_OAUTH_CLIENT_ID` and `HUBSPOT_OAUTH_CLIENT_SECRET` on the backend and the consumer, and set `APP_URL` so the `pegasusbound_link` property points at your dashboard. See [configuration](/development/configuration/#integrations).
+
+The consumer runs the minute-by-minute pull and the sync queue, so HubSpot mode needs no inbound traffic from HubSpot. Webhooks are optional: subscribe the app to `contact.creation`, `contact.propertyChange`, `contact.deletion`, `deal.creation`, `deal.propertyChange` and `deal.deletion` with the target URL `<backend>/api/v1/integrations/hubspot/webhooks`, and a change is picked up within seconds instead of within the minute. Deliveries are verified with HubSpot's `X-HubSpot-Signature-v3` signature over `BACKEND_PUBLIC_URL` and only make the next read come sooner; Pegasusbound always reads the record from HubSpot itself, and removes a deal or task only when HubSpot answers that it is gone.
+
+</Fold>
+
+<Fold>
+
+## Moving a workspace
+
+A [workspace export](/guides/workspace-export-import/) carries the CRM mode, its setup choices, the owner matches, which Pegasusbound record is which HubSpot record, and each contact's HubSpot details, so the destination keeps updating the same HubSpot records instead of creating duplicates. The sync queue and the pull checkpoints stay behind; the destination starts its own pull. Reconnect HubSpot on the destination unless it uses the same HubSpot app and the archive carried credentials.
+
+</Fold>
+
+<Fold>
+
+## FAQ
+
+**Does it work with free HubSpot?** Yes. Contacts, companies, deals, tasks, notes, owners and custom contact properties are all part of HubSpot's free CRM. The list and email-reading permissions are optional, so an account that cannot grant them still connects; only list import is unavailable without the list permission.
+
+**Which permissions does Pegasusbound ask for?** Read and write on contacts, companies and deals, read on owners, and read and write on the contact schema (for the Pegasusbound property group). Lists and email reading are asked for as optional.
+
+**Why are opens off?** Mail privacy proxies and security scanners open and click automatically, so opens are a weak signal and would bury the timeline. Turned on, they only update `pegasusbound_last_opened_at` and `pegasusbound_last_clicked_at`.
+
+**What happens to my data when I disconnect?** Everything that was mirrored stays in Pegasusbound as ordinary records, and nothing is removed from HubSpot. See [switching back and disconnecting](#switching-back-and-disconnecting).
+
+**Can I edit pipelines in Pegasusbound?** No, while HubSpot is your CRM. Edit them in HubSpot and they update in Pegasusbound within minutes.
+
+**Does every member need a HubSpot seat?** No. Members without a matched owner still see deals, tasks and notes; they cannot be assigned HubSpot deals or tasks, and their mailboxes log email under the contact's owner.
+
+</Fold>
+
+## Next steps
+
+<Cards>
+  <Card title="Contacts & CRM" href="/guides/contacts-crm/" />
+  <Card title="Integrations" href="/guides/integrations/" />
+  <Card title="Automations" href="/guides/automations/" />
+</Cards>

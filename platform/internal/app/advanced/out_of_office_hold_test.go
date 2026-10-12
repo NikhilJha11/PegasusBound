@@ -1,0 +1,191 @@
+package advanced
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/app/inboxtag"
+	"github.com/pegasusbound/pegasusbound/internal/app/replyclassify"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+)
+
+// holdRecorder captures the one call holdForOutOfOffice makes. Embedding the
+// interface beats stubbing forty methods; anything else the code reached for
+// would panic rather than pass quietly.
+//
+// It records HoldLeadEverywhere, not HoldLead: an away message holds the
+// person across every campaign they are a lead of, so reaching for the
+// single-campaign write here would be the bug back (issue #518).
+type holdRecorder struct {
+	repository.CampaignProgressRepository
+	until  *time.Time
+	reason string
+	source string
+	calls  int
+	refuse bool
+}
+
+func (h *holdRecorder) HoldLeadEverywhere(_ context.Context, _ uuid.UUID, until *time.Time, reason, source string) ([]uuid.UUID, error) {
+	h.calls++
+	h.until, h.reason, h.source = until, reason, source
+	if h.refuse {
+		return nil, nil
+	}
+	return []uuid.UUID{uuid.New()}, nil
+}
+
+// An out-of-office reply parks the contact until they are back: the date the
+// away message names, plus a working day so the follow-up does not land in the
+// backlog of their first morning. Without a readable date the workspace's
+// fallback applies instead of nothing at all.
+func TestHoldForOutOfOffice(t *testing.T) {
+	cfg := models.ReplyIntentSettings{HoldOnOutOfOffice: true, OutOfOfficeHoldDays: 7}
+	// Dates are written relative to today, so the assertions do not expire.
+	// A week out is inside the parser's sanity window and safely in the future
+	// whatever day the suite runs on.
+	back := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, 7)
+	cases := []struct {
+		name       string
+		subject    string
+		body       string
+		wantDay    string // "" = the fallback hold
+		wantReason string
+	}{
+		{
+			name:       "an ISO return date, plus a working day",
+			subject:    "Automatic reply: Quick question",
+			body:       "I am away and back on " + back.Format("2006-01-02") + ".",
+			wantDay:    replyclassify.NextBusinessDay(back).Format("2006-01-02"),
+			wantReason: "back " + back.Format("2 Jan 2006"),
+		},
+		{
+			name:       "a German day-dot-month return date",
+			subject:    "Abwesenheitsnotiz",
+			body:       "Ich bin wieder erreichbar am " + back.Format("02.01.2006") + ".",
+			wantDay:    replyclassify.NextBusinessDay(back).Format("2006-01-02"),
+			wantReason: "back " + back.Format("2 Jan 2006"),
+		},
+		{
+			name:       "no readable date falls back",
+			subject:    "Automatische Antwort: Ihre Nachricht",
+			body:       "Ich bin zur Zeit nicht im Büro.",
+			wantReason: "auto-reply, no return date",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &holdRecorder{}
+			s := &service{campaignProgressRepo: rec}
+			got := s.holdForOutOfOffice(context.Background(), uuid.New(), uuid.New(),
+				cfg, &models.EmailMessageStoreData{Subject: tc.subject, BodyText: tc.body})
+
+			if rec.calls != 1 {
+				t.Fatalf("HoldLeadEverywhere called %d times, want once", rec.calls)
+			}
+			if rec.source != models.LeadHoldSourceOutOfOffice {
+				t.Fatalf("hold source = %q, want %q", rec.source, models.LeadHoldSourceOutOfOffice)
+			}
+			if rec.reason != tc.wantReason {
+				t.Fatalf("hold reason = %q, want %q", rec.reason, tc.wantReason)
+			}
+			if rec.until == nil || got == nil {
+				t.Fatal("no hold end written; the follow-up would keep its schedule")
+			}
+			if tc.wantDay == "" {
+				// The fallback: seven days out, give or take the clock.
+				if d := time.Until(*rec.until); d < 6*24*time.Hour || d > 7*24*time.Hour+time.Minute {
+					t.Fatalf("fallback hold lifts in %s, want about seven days", d.Round(time.Hour))
+				}
+				return
+			}
+			if day := rec.until.UTC().Format("2006-01-02"); day != tc.wantDay {
+				t.Fatalf("hold lifts on %s, want %s", day, tc.wantDay)
+			}
+		})
+	}
+}
+
+// A hold the repository refuses (a member's own pause already there) reports
+// nothing, so the notification does not promise a hold that was not written.
+func TestHoldForOutOfOfficeReportsARefusal(t *testing.T) {
+	rec := &holdRecorder{refuse: true}
+	s := &service{campaignProgressRepo: rec}
+	if got := s.holdForOutOfOffice(context.Background(), uuid.New(), uuid.New(),
+		models.ReplyIntentSettings{HoldOnOutOfOffice: true, OutOfOfficeHoldDays: 7},
+		&models.EmailMessageStoreData{Subject: "Out of office", BodyText: "away"}); got != nil {
+		t.Fatalf("holdForOutOfOffice = %v after a refused hold, want nil", got)
+	}
+}
+
+// A workspace whose stored settings predate the setting carries a zero here.
+// Read as "resume immediately" it would send into the away message it was
+// triggered by, so the floor applies.
+func TestHoldForOutOfOfficeFloorsAZeroFallback(t *testing.T) {
+	rec := &holdRecorder{}
+	s := &service{campaignProgressRepo: rec}
+	s.holdForOutOfOffice(context.Background(), uuid.New(), uuid.New(),
+		models.ReplyIntentSettings{HoldOnOutOfOffice: true},
+		&models.EmailMessageStoreData{Subject: "Out of office", BodyText: "away"})
+	if rec.until == nil || !rec.until.After(time.Now().Add(23*time.Hour)) {
+		t.Fatalf("hold lifts at %v, want at least a day out", rec.until)
+	}
+}
+
+// verdictStore answers the one lookup the hold makes, with a stored verdict.
+type verdictStore struct {
+	repository.InboxTagRepository
+	res *repository.InboxTagResult
+}
+
+func (v verdictStore) GetByMessageID(context.Context, uuid.UUID, string) (*repository.InboxTagResult, error) {
+	return v.res, nil
+}
+
+// With inbox tagging on, the model is asked whether the phrase the parser read
+// says when the sender is back. Only a firm no about the same day sends the
+// hold to the fallback; an unsure answer, or one about another day, leaves the
+// parsed date standing.
+func TestHoldForOutOfOfficeReadsTheReturnDateCheck(t *testing.T) {
+	cfg := models.ReplyIntentSettings{HoldOnOutOfOffice: true, OutOfOfficeHoldDays: 7}
+	back := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, 21)
+	msg := &models.EmailMessageStoreData{
+		MessageID: "<ooo@example.com>",
+		Subject:   "Abwesenheitsnotiz",
+		BodyText:  "Ich bin ab dem " + back.Format("02.01.2006") + " nicht im Büro.",
+	}
+	verdict := func(day time.Time, noul float64) *repository.InboxTagResult {
+		answers, _ := json.Marshal(map[string]inboxtag.Answer{inboxtag.QReturnDate: {Type: inboxtag.QuestionNoul, Noul: noul}})
+		return &repository.InboxTagResult{Kind: inboxtag.KindAutoReplyOOO, ReturnDate: &day, Answers: answers}
+	}
+	parsed := "back " + back.Format("2 Jan 2006")
+	cases := []struct {
+		name       string
+		res        *repository.InboxTagResult
+		wantReason string
+	}{
+		{"no verdict", nil, parsed},
+		{"confirmed", verdict(back, 0.93), parsed},
+		{"unsure is no evidence", verdict(back, 0.5), parsed},
+		{"a firm no takes the fallback", verdict(back, 0.12), "auto-reply, return date unclear"},
+		{"a no about another day does not count", verdict(back.AddDate(0, 0, 1), 0.12), parsed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := &holdRecorder{}
+			s := &service{campaignProgressRepo: rec, inboxTags: verdictStore{res: tc.res}}
+			s.holdForOutOfOffice(context.Background(), uuid.New(), uuid.New(), cfg, msg)
+			if rec.reason != tc.wantReason {
+				t.Fatalf("hold reason = %q, want %q", rec.reason, tc.wantReason)
+			}
+			if tc.wantReason != parsed {
+				if d := time.Until(*rec.until); d < 6*24*time.Hour || d > 7*24*time.Hour+time.Minute {
+					t.Fatalf("fallback hold lifts in %s, want about seven days", d.Round(time.Hour))
+				}
+			}
+		})
+	}
+}

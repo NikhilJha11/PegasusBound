@@ -1,0 +1,82 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Icon from '../../components/Icon.astro';
+import CTA from '../../components/CTA.astro';
+import FoundersTile from '../../components/scenes/use-cases/tiles/FoundersTile.astro';
+import AgenciesTile from '../../components/scenes/use-cases/tiles/AgenciesTile.astro';
+import SalesTile from '../../components/scenes/use-cases/tiles/SalesTile.astro';
+import RecruitersTile from '../../components/scenes/use-cases/tiles/RecruitersTile.astro';
+import FundraisingTile from '../../components/scenes/use-cases/tiles/FundraisingTile.astro';
+
+const cases = [
+  {
+    key: 'founders',
+    href: '/use-cases/founders/',
+    title: 'Founders',
+    body: 'Run intro sequences from your domain without burning your only mailbox.',
+    setup: '4 mailboxes · plain text · founder@ stays clean',
+  },
+  {
+    key: 'agencies',
+    href: '/use-cases/agencies/',
+    title: 'Agencies',
+    body: 'Outbound for many clients on many domains, without spreadsheet triage.',
+    setup: 'A workspace per client · their own domains · their own CRM',
+  },
+  {
+    key: 'sales',
+    href: '/use-cases/sales/',
+    title: 'Sales teams',
+    body: 'Distribute sends across reps. Surface positive replies fast.',
+    setup: 'A pool of mailboxes · team roles · CRM sync',
+  },
+  {
+    key: 'recruiters',
+    href: '/use-cases/recruiters/',
+    title: 'Recruiters',
+    body: 'Personalised outreach to candidates from multiple sender mailboxes.',
+    setup: 'A mailbox per recruiter · a pipeline per role',
+  },
+  {
+    key: 'fundraising',
+    href: '/use-cases/fundraising/',
+    title: 'Fundraising',
+    body: 'Plan a focused VC sequence that lands in the inbox, not promotions.',
+    setup: 'Plain text · reply branches · a close eye on reputation',
+  },
+];
+---
+<Layout
+  title="Cold Email Use Cases: Who Pegasusbound Is For | Pegasusbound"
+  description="How founders, agencies, sales teams, recruiters and fundraisers use Pegasusbound to warm up mailboxes and run cold email that reaches the inbox. Pick the playbook closest to you."
+>
+  <section class="container-page pt-14 md:pt-24 pb-20 md:pb-28">
+    <div class="grid items-end gap-8 lg:grid-cols-[1.3fr_1fr]">
+      <div>
+        <div class="text-[14px] text-slate-500">Use cases</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">Who Pegasusbound is built for.</h1>
+      </div>
+      <p class="text-[17px] md:text-[19px] leading-[1.55] text-slate-500 lg:pb-2">Five playbooks for five kinds of sender. Each one is a setup you can copy, with the mailboxes, limits and habits that keep it working.</p>
+    </div>
+
+    <div class="mt-14 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-6">
+      {cases.map((c, i) => (
+        <a href={c.href} class={`group block ${i < 2 ? 'lg:col-span-3' : i === 4 ? 'md:col-span-2 lg:col-span-2' : 'lg:col-span-2'}`}>
+          {c.key === 'founders' && <FoundersTile />}
+          {c.key === 'agencies' && <AgenciesTile />}
+          {c.key === 'sales' && <SalesTile />}
+          {c.key === 'recruiters' && <RecruitersTile />}
+          {c.key === 'fundraising' && <FundraisingTile />}
+          <h2 class="mt-6 flex items-center gap-2 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900">
+            {c.title}
+            <Icon name="arrowRight" size={16} class="text-slate-300 transition-all group-hover:translate-x-1 group-hover:text-slate-900" />
+          </h2>
+          <p class="mt-2 max-w-md text-[16px] leading-[1.55] text-slate-500">{c.body}</p>
+          <p class="mt-3 text-[13.5px] text-slate-400">{c.setup}</p>
+        </a>
+      ))}
+    </div>
+  </section>
+
+  <CTA />
+</Layout>

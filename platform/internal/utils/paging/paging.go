@@ -1,0 +1,290 @@
+// Package paging encodes keyset pagination cursors as opaque tokens.
+//
+// The wire value a client sees is a versioned base64url token, NOT the raw
+// record id that happens to be the sort key. That keeps clients from coupling
+// to the id being the cursor (or to it being a UUID at all), so the keyset can
+// evolve without breaking callers. Decoding a malformed or wrong-version token
+// is an error, which handlers surface as a 400 rather than silently ignoring.
+package paging
+
+import (
+	"encoding/base64"
+	"errors"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+)
+
+// offsetPrefix versions the opaque offset-cursor format. Offset-paginated
+// endpoints (faceted searches that sort by nullable columns, where a keyset
+// cursor would drop NULL rows) expose the SAME opaque next_cursor token as
+// keyset endpoints, so every list looks identical to a client. The offset is an
+// implementation detail hidden inside the token.
+const offsetPrefix = "o1_"
+
+// EncodeOffset wraps a next-page offset in an opaque cursor token.
+func EncodeOffset(offset int) *string {
+	tok := offsetPrefix + base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(offset)))
+	return &tok
+}
+
+// DecodeOffsetCursor decodes an opaque offset cursor back to its 0-based offset.
+// An empty token yields (0, nil) (first page); an invalid token returns a 400.
+func DecodeOffsetCursor(token string) (int, *errx.Error) {
+	if token == "" {
+		return 0, nil
+	}
+	if !strings.HasPrefix(token, offsetPrefix) {
+		return 0, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, offsetPrefix))
+	if err != nil {
+		return 0, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	n, err := strconv.Atoi(string(raw))
+	if err != nil || n < 0 {
+		return 0, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	return n, nil
+}
+
+// prefix versions the token format. Bump it if the encoding ever changes so old
+// tokens decode to a clear error instead of garbage.
+const prefix = "c1_"
+
+// ErrInvalid is returned for a malformed or wrong-version cursor token.
+var ErrInvalid = errors.New("invalid cursor")
+
+// EncodeUUID wraps a record id in an opaque token. Returns nil for the zero id
+// (used to mean "no next page") so the JSON cursor field serializes as null.
+func EncodeUUID(id uuid.UUID) *string {
+	if id == uuid.Nil {
+		return nil
+	}
+	tok := prefix + base64.RawURLEncoding.EncodeToString(id[:])
+	return &tok
+}
+
+// UUIDString returns the record id as its plain canonical string for the keyset
+// cursor field. Used by first-party admin endpoints, which keep transparent
+// UUID cursors (their request structs bind ?cursor as a uuid.UUID directly).
+// Public endpoints use EncodeUUID for opaque tokens instead.
+func UUIDString(id uuid.UUID) *string {
+	if id == uuid.Nil {
+		return nil
+	}
+	s := id.String()
+	return &s
+}
+
+// DecodeUUID reverses EncodeUUID. An empty token yields the zero id with no
+// error (no cursor supplied = start from the beginning); any non-empty token
+// that is not a valid current-version cursor returns ErrInvalid.
+func DecodeUUID(token string) (uuid.UUID, error) {
+	if token == "" {
+		return uuid.Nil, nil
+	}
+	if !strings.HasPrefix(token, prefix) {
+		return uuid.Nil, ErrInvalid
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, prefix))
+	if err != nil || len(raw) != 16 {
+		return uuid.Nil, ErrInvalid
+	}
+	var id uuid.UUID
+	copy(id[:], raw)
+	return id, nil
+}
+
+// timePrefix versions the composite time-keyset token: (created_at, id). Used
+// by lists sorted chronologically where the id alone is not a monotonic sort
+// key (e.g. random-UUID rows ordered by created_at DESC, id DESC).
+const timePrefix = "t1_"
+
+// EncodeTime wraps a (createdAt, id) keyset position in an opaque token.
+// Returns nil for the zero id ("no next page") so the JSON field serializes as
+// null.
+func EncodeTime(createdAt time.Time, id uuid.UUID) *string {
+	if id == uuid.Nil {
+		return nil
+	}
+	payload := createdAt.UTC().Format(time.RFC3339Nano) + "|" + id.String()
+	tok := timePrefix + base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return &tok
+}
+
+// DecodeTimeCursor reverses EncodeTime. An empty token yields (zeroTime,
+// uuid.Nil, nil) (start from the beginning); an invalid token returns a 400.
+func DecodeTimeCursor(token string) (time.Time, uuid.UUID, *errx.Error) {
+	if token == "" {
+		return time.Time{}, uuid.Nil, nil
+	}
+	if !strings.HasPrefix(token, timePrefix) {
+		return time.Time{}, uuid.Nil, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, timePrefix))
+	if err != nil {
+		return time.Time{}, uuid.Nil, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	parts := strings.SplitN(string(raw), "|", 2)
+	if len(parts) != 2 {
+		return time.Time{}, uuid.Nil, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	at, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, uuid.Nil, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	id, err := uuid.Parse(parts[1])
+	if err != nil {
+		return time.Time{}, uuid.Nil, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	return at, id, nil
+}
+
+// DecodeCursor decodes an opaque cursor token into the canonical UUID string the
+// repositories key on. It is a drop-in for validate.Uuid at list endpoints: an
+// empty token yields (nil, nil) (start from the beginning); an invalid token
+// returns a 400 instead of being silently ignored.
+func DecodeCursor(token string) (*string, *errx.Error) {
+	if token == "" {
+		return nil, nil
+	}
+	id, err := DecodeUUID(token)
+	if err != nil {
+		return nil, errx.New(errx.BadRequest, "invalid cursor")
+	}
+	s := id.String()
+	return &s, nil
+}
+
+// mergedPrefix versions the merged-feed keyset token: (at, source, id). Used by
+// feeds that merge several tables into one chronological list, where two rows
+// can share a timestamp across tables and even within one, so the position
+// needs the source and that source's row id to be unambiguous.
+const mergedPrefix = "m1_"
+
+// EncodeMerged wraps an (at, source, id) keyset position in an opaque token.
+// Returns nil for the zero id ("no next page") so the JSON field serializes as
+// null.
+func EncodeMerged(at time.Time, source int, id uuid.UUID) *string {
+	if id == uuid.Nil {
+		return nil
+	}
+	payload := at.UTC().Format(time.RFC3339Nano) + "|" + strconv.Itoa(source) + "|" + id.String()
+	tok := mergedPrefix + base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return &tok
+}
+
+// DecodeMergedCursor reverses EncodeMerged. An empty token yields (zeroTime, 0,
+// uuid.Nil, nil) (start from the beginning); an invalid token returns a 400.
+func DecodeMergedCursor(token string) (time.Time, int, uuid.UUID, *errx.Error) {
+	if token == "" {
+		return time.Time{}, 0, uuid.Nil, nil
+	}
+	invalid := errx.New(errx.BadRequest, "invalid cursor")
+	if !strings.HasPrefix(token, mergedPrefix) {
+		return time.Time{}, 0, uuid.Nil, invalid
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, mergedPrefix))
+	if err != nil {
+		return time.Time{}, 0, uuid.Nil, invalid
+	}
+	parts := strings.SplitN(string(raw), "|", 3)
+	if len(parts) != 3 {
+		return time.Time{}, 0, uuid.Nil, invalid
+	}
+	at, err := time.Parse(time.RFC3339Nano, parts[0])
+	if err != nil {
+		return time.Time{}, 0, uuid.Nil, invalid
+	}
+	source, err := strconv.Atoi(parts[1])
+	if err != nil || source < 0 {
+		return time.Time{}, 0, uuid.Nil, invalid
+	}
+	id, err := uuid.Parse(parts[2])
+	if err != nil {
+		return time.Time{}, 0, uuid.Nil, invalid
+	}
+	return at, source, id, nil
+}
+
+// sortPrefix versions the composite sort-keyset token: (sort key, sort value,
+// id). Used by lists whose sort column is caller-chosen, nullable, or computed,
+// where the boundary cannot be re-read from the row later: the row may be gone
+// by the next page, and a mutable column (updated_at) may have moved.
+const sortPrefix = "s1_"
+
+// SortCursor is the keyset boundary of a caller-sorted list: the first row of
+// the next page, described by the ordering it was taken under, that row's sort
+// value (nil when the column is NULL there) and its id, which breaks ties.
+type SortCursor struct {
+	// Sort names the ordering ("<column>:<asc|desc>"). A token replayed under a
+	// different ordering describes a position that does not exist there, so the
+	// caller rejects the mismatch instead of paging into nonsense.
+	Sort string
+	// Value is the boundary row's sort key rendered as text. The caller casts it
+	// back to the column's type, so the rendering has to round-trip.
+	Value *string
+	ID    uuid.UUID
+}
+
+// EncodeSort wraps a (sort key, sort value, id) keyset position in an opaque
+// token. Returns nil for the zero id ("no next page") so the JSON field
+// serializes as null.
+func EncodeSort(sort string, value *string, id uuid.UUID) *string {
+	if id == uuid.Nil {
+		return nil
+	}
+	// Flag byte, then the fixed-width id, then the sort key; the value goes last
+	// so it keeps every byte it had, separators included.
+	flag := "0"
+	raw := ""
+	if value != nil {
+		flag = "1"
+		raw = *value
+	}
+	payload := flag + id.String() + "|" + sort + "|" + raw
+	tok := sortPrefix + base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return &tok
+}
+
+// DecodeSortCursor reverses EncodeSort. An empty token yields (nil, nil) (start
+// from the beginning); an invalid token returns a 400.
+func DecodeSortCursor(token string) (*SortCursor, *errx.Error) {
+	if token == "" {
+		return nil, nil
+	}
+	invalid := errx.New(errx.BadRequest, "invalid cursor")
+	if !strings.HasPrefix(token, sortPrefix) {
+		return nil, invalid
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(token, sortPrefix))
+	if err != nil {
+		return nil, invalid
+	}
+	head, rest, ok := strings.Cut(string(raw), "|")
+	if !ok || len(head) != 37 {
+		return nil, invalid
+	}
+	id, err := uuid.Parse(head[1:])
+	if err != nil {
+		return nil, invalid
+	}
+	sort, value, ok := strings.Cut(rest, "|")
+	if !ok || sort == "" {
+		return nil, invalid
+	}
+	switch head[0] {
+	case '0':
+		if value != "" {
+			return nil, invalid
+		}
+		return &SortCursor{Sort: sort, ID: id}, nil
+	case '1':
+		return &SortCursor{Sort: sort, Value: &value, ID: id}, nil
+	}
+	return nil, invalid
+}

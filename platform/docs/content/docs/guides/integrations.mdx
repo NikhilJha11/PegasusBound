@@ -1,0 +1,235 @@
+---
+title: Integrations
+description: "Connect third-party tools over OAuth and send data out via webhooks."
+---
+
+Integrations connect Pegasusbound to the rest of your tools. When a reply lands, a meeting is booked or an email bounces, your CRM, chat channel or automation tool hears about it.
+
+## Connect an integration
+
+<Steps>
+
+<Step>
+
+Open **Integrations** and find the app in **Discover**, **All apps** or a category, or search for it.
+
+</Step>
+
+<Step>
+
+Select **Connect** on its card or its page.
+
+</Step>
+
+<Step>
+
+Sign in to the provider for a one-click connection, or paste an API key or webhook URL when asked.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- Credentials are sealed with envelope encryption before they touch the database.
+- An expired or revoked token moves the connection to "reconnect required", and one click fixes it.
+- A workspace uses one verification service at a time.
+- Outbound events are HMAC-SHA256 signed so receivers can verify them.
+- HubSpot or Pipedrive can become the workspace's whole CRM, one at a time.
+
+<Fold>
+
+## About the Integrations page
+
+Browsing filters, searches and view choices are [remembered in your browser tab](/guides/browsing/) across refreshes and navigation, separately for each user and workspace.
+
+Integrations push Pegasusbound events into the rest of your stack: a reply lands, a meeting is booked, an email bounces, and your CRM, chat channel, or automation tool hears about it.
+
+The Integrations page is one directory for everything that connects to Pegasusbound: the built-in integrations below, apps other developers have published, and the tools to build your own. State stays live, so a connection needing reauthorization surfaces without a refresh.
+
+</Fold>
+
+<Fold>
+
+## Finding an integration
+
+The sidebar holds **Discover**, **All apps**, **Connected**, one view per category, **Community apps** and **Build your own**; on a phone the same views sit in a row of tabs.
+
+**Discover** shows a banner for any connection that is degraded or needs reconnecting, then **Recommended for you** (the gaps in your setup: a CRM if you have none, a chat alert so a reply never sits unseen, a scheduler so booked calls are credited to the campaign that earned them, and an address verifier), **Popular** (the integrations used by the most workspaces on the instance, or a curated order on a new one), and **Featured community apps**.
+
+Every app has its own page, at `/app/integrations/<provider>` for a built-in integration (for example `/app/integrations/hubspot`) and `/app/integrations/apps/<slug>` for a community app. It shows what the app does, the actions and triggers it adds to automations, the access it asks for, and your connections to it. **Connect** on a card or a page starts the connection in place; **Manage** opens one you already have. Built-in integrations carry a blue check next to Pegasusbound.
+
+### Search and filters
+
+The search box sits at the top of the sidebar (above the views on a phone). On Discover and on an app's page it suggests apps and categories as you type; the arrow keys move through them, Enter opens the highlighted one, and **See all results** (or Enter with nothing highlighted) opens **All apps** with your search. Press `/` to jump to the search box when you are not typing in another field. Every word you type has to match, a match in an app's name ranks above one in its description, and everyday words find their category: "chat" finds Slack and Discord, "calendar" finds the schedulers.
+
+On **All apps**, **Connected**, **Community apps** and each category, the same box filters the list as you type instead, and they share one toolbar:
+
+- **Sort** by best match (while searching), most popular, most installed, newest, or name.
+- **Category** (several at once, each with the number of apps it would leave), **Made by** (official or community), **Status** (connected or not), and under **More filters**, how an app connects (one-click sign in, API key or webhook URL), featured community apps only, and hiding integrations that are not available yet.
+- A grid or a list view.
+
+The active filters show as chips you can clear one at a time or all at once. Search, sort, filters and view are kept in the page address, so a filtered view can be bookmarked or shared with a teammate.
+
+</Fold>
+
+<Fold>
+
+## Supported providers
+
+| Provider | Category | Connect | What it does |
+| --- | --- | --- | --- |
+| HubSpot | CRM | one-click OAuth | Create or update a contact, log the reply as a note, or run the workspace's whole CRM on HubSpot ([HubSpot mode](/guides/hubspot/)) |
+| Salesforce | CRM | one-click OAuth (production, sandbox or My Domain) | Two-way sync: activity on the timeline, Lead Status writeback, opt-outs both ways, list view and Campaign imports. See [Salesforce](/guides/salesforce/) |
+| Pipedrive | CRM | one-click OAuth | Upsert a person on reply or on demand, or run the workspace's whole CRM on Pipedrive ([Pipedrive mode](/guides/pipedrive/)) |
+| Close | CRM | API key | Upsert a lead on reply or on demand |
+| Apollo | Data | API key | Import saved lists and keep them in sync, and enrich contacts from Apollo with your own credits. See [Apollo](/guides/apollo/) |
+| Clay | Data | minted inbound URL and a table webhook | Turn rows from a Clay table into contacts, and send replies, bounces and meetings back to Clay. See [Clay](/guides/clay/) |
+| Zapier, Make, n8n | Automation | Pegasusbound API key | Fan events to that tool's webhook URL |
+| Slack | Notifications and assistant | one-click OAuth | Route notifications to channels or DMs, work inbox replies in a channel, and ask the AI assistant from Slack. See [Slack](/guides/slack/) |
+| Discord | Notifications | webhook URL | Ping a server channel on reply, bounce, or warmup health |
+| Calendly, Cal.com | Meetings | minted inbound URL | Track booked, rescheduled, and canceled calls |
+| MillionVerifier | Verification | API key | Check every contact's address through your pay-as-you-go credits instead of the built-in probe |
+| CleanMyList | Verification | API key | Verify contacts using your CleanMyList plan allowance and credits |
+
+Slack does more than post: it brings the [AI assistant](/guides/ai-assistant/) into Slack, mirrors [Unibox](/guides/unibox/) replies into a channel where the team can reply, label and draft, and each member links their own Slack account. Its setup and settings have their own guide, [Slack](/guides/slack/).
+
+Only one Verification connection is active at a time; see [one verifier at a time](/guides/integrations/#one-verifier-at-a-time).
+
+Three connect styles appear on the catalog cards: `one-click` OAuth, `api_key` for providers without an OAuth app, and `webhook` for a minted inbound URL or a pasted channel URL.
+
+<Callout type="info" title="OAuth providers cannot be connected with a pasted key">
+You must start the authorize flow; pasting credentials for an OAuth provider is rejected so a token is never stored the wrong way. An expired or revoked token moves the connection to "reconnect required" and one click fixes it.
+</Callout>
+
+<Callout type="info" title="Automation tools store no secret">
+Zapier, Make, and n8n connect in one click with nothing stored on the integration. Pegasusbound sends events to the webhook URL you configure there; when they call back into Pegasusbound they use a scoped API key you create.
+</Callout>
+
+<Callout type="info" title="MillionVerifier is checked before it is saved">
+The key is tested against your MillionVerifier account when you connect, so a mistyped key is refused rather than silently leaving contacts on the built-in check. From then on every new contact, and every re-verify, spends one credit there, from pay-as-you-go credits or a subscription's renewing allowance. Each verdict it produces reads **Verified with MillionVerifier** on the contact. When the balance runs out or the key is revoked, the connection is marked and the built-in check covers until it is fixed. See [address verification](/guides/deliverability/#address-verification).
+</Callout>
+
+**Credentials** (OAuth tokens, pasted keys, webhook URLs) are sealed with envelope encryption before touching the database. Only non-secret display details like an account name or Salesforce instance host are stored in the clear, so the dashboard can label the connection.
+
+### Connect CleanMyList
+
+1. Verify your account email in [CleanMyList](https://www.cleanmylist.io/), then create a workspace key under **App → API keys**.
+2. In Pegasusbound, open **Integrations → CleanMyList → Connect** and paste the key. Pegasusbound validates it with a free, read-only account request and stores it encrypted.
+3. New contacts and re-verification requests use CleanMyList. Each address uses one unit of plan allowance first, then credits. Its deliverable, risky, undeliverable, and unknown verdicts map to Pegasusbound's corresponding statuses.
+
+CleanMyList does not expose a balance through its API, so Pegasusbound omits the credit counter. View your allowance and credits in CleanMyList. If verification fails, including an exhausted account, Pegasusbound uses the built-in check. Fix the account or reconnect a revoked key to restore verification.
+
+An account with nothing left is only visible when a check is refused, so Pegasusbound stops checking against it for 15 minutes rather than retrying every address. Topping up takes effect on the next pass after that. See the [CleanMyList API documentation](https://www.cleanmylist.io/developers) and [address verification](/guides/deliverability/#address-verification).
+
+### One verifier at a time
+
+A workspace uses one verification service. Connecting a second one is refused while the first is connected, because which one ran would otherwise be decided by connection order alone and every check would quietly move to a different bill. Disconnect the current service first, then connect the new one.
+
+</Fold>
+
+<Fold>
+
+## Community apps
+
+A community app is an [OAuth app](/api/oauth/) another team built on the Pegasusbound API and published. Opening one shows who built it, what it does, how many workspaces use it, and every permission it can ask for.
+
+**Install** opens the app's own install page. The app then sends you back to Pegasusbound's consent screen, where you approve exactly what it gets, the same as any OAuth app. Nothing is granted by opening the listing or clicking Install. A row reads **Installed** once anyone in your workspace has authorized the app, and you can remove your own access from the listing or under **Settings > OAuth apps > Authorized apps**.
+
+Publishing an app does not put it in front of everyone. A published app is **link only**: its developer shares `/app/integrations/apps/<slug>` with the people who use it, and it stays out of the directory, search and recommendations. It joins the **Community apps** view in one of two ways:
+
+- **Featured**: the team picked it. It carries a Featured badge and also appears on Discover. Featured means chosen for the directory, not built or run by Pegasusbound.
+- **Widely used**: it is installed in 25 workspaces on the instance other than the publisher's, each at least two weeks old.
+
+An app opened from a link that is neither says so: it is shared by link and nobody has reviewed it, so install it only if you know who built it. The team can also **hide** an app, which takes it out of the directory and stops its link from opening.
+
+<Callout type="info" title="Community apps are per instance">
+An OAuth app can only authorize against the instance that registered it, so a self-hosted instance lists the apps published on that instance, and Pegasusbound Cloud lists the apps published on Cloud.
+</Callout>
+
+### Publish your app
+
+1. Register the app under **Settings > OAuth apps**: a name and logo, what it can do, and the address people return to after approving, then optionally the events it receives. Its name, logo, website and requested permissions are what the listing shows. See [register your app](/api/oauth/#register-your-app).
+2. On the app, choose **Publish** and fill in the listing: a link (the slug), a one-line tagline, a description, a category, and the **install URL** that Install opens. Start the OAuth flow from that page with your own `state`. Support and privacy links are optional.
+3. Copy the link and share it with the people who use your app.
+
+Any change to the listing, or to the app's name, logo, website or permissions, removes the Featured mark until the team picks it again, so a featured app cannot change after it was chosen. Saving without changing anything keeps it. A hidden listing stays hidden when edited, and shows the team's note. **Unpublish** removes the listing and its link; workspaces that already installed the app keep their access until they revoke it.
+
+A listing's link must be 3 to 48 lowercase letters, numbers or single dashes, and the names of the built-in integrations are reserved. The tagline is at most 120 characters and the description 2,000. Every link must be `https`.
+
+</Fold>
+
+<Fold>
+
+## HubSpot or Pipedrive as your CRM
+
+HubSpot and Pipedrive can do more than receive contacts: in [HubSpot mode](/guides/hubspot/) or [Pipedrive mode](/guides/pipedrive/) one of them becomes the workspace's CRM. Deals, pipelines, tasks and notes are the CRM's records written through from Pegasusbound, sends, replies, bounces, unsubscribes and meetings are logged on the contact, and a deal opened or a lifecycle stage (in Pipedrive, a label) reached there stops the contact's campaigns. Set it up from **Integrations > HubSpot** or **Integrations > Pipedrive**. A workspace runs on one CRM at a time.
+
+</Fold>
+
+<Fold>
+
+## CRM field mappings
+
+A mapping decides how a Pegasusbound contact projects onto provider fields. Every connection ships a sensible default:
+
+| Provider | Default mapping |
+|----------|-----------------|
+| HubSpot | `email`, `firstname`, `lastname`, `company`, `phone` |
+| Pipedrive | `name`, `email`, `phone` (a person) |
+| Close | `name`, `email`, `phone`, `company` (a lead) |
+
+Salesforce has its own field rules, per object and with a direction and a conflict policy; see [Salesforce field mapping](/guides/salesforce/#field-mapping).
+
+Override per connection: each row pairs a Pegasusbound source field with a destination name and can apply a `uppercase`, `lowercase`, or `trim` transform, or write a fixed `static` value. Custom contact fields are addressed as `custom:your_key`, and a static value can include event variables like `{{.company}}`.
+
+Mappings resolve by specificity: provider defaults, then your connection map, then per-automation overrides, with the most specific winning.
+
+In HubSpot or Pipedrive mode, contacts sync on their own with a field map of their own that also sets a direction per field. See [HubSpot contacts and field mapping](/guides/hubspot/#contacts-and-field-mapping) and [Pipedrive people and field mapping](/guides/pipedrive/#people-and-field-mapping).
+
+<Callout type="info" title="Blank values are not written">
+Empty values are dropped before the upsert, so a missing first name never blanks an existing one in your CRM.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Webhook delivery
+
+Outbound events are **HMAC-SHA256 signed** so receivers can verify them. Reveal the connection's `whsec_` signing secret in its settings and check the signature header on every request. The signed body carries a stable delivery id, event type, version, timestamp, and full event data.
+
+URLs are validated before storage under the same policy as customer webhooks: the scheme must be `https` and the host must be publicly routable, with no localhost, loopback, private, or link-local addresses. This blocks requests aimed at internal services. Only development or self-hosted setups can opt out with `PEGASUSBOUND_ALLOW_UNSAFE_WEBHOOK_URLS=true`.
+
+<Callout type="info" title="Send a test event">
+**Send test event** fires a synthetic payload through the real delivery path, signed exactly like production, so you can verify your signature check first. CRM upserts are skipped during a test, so nothing junk lands in your CRM.
+</Callout>
+
+**Inbound webhooks** work the other way: Calendly and Cal.com call into a URL Pegasusbound mints for you, landing booked, rescheduled, and canceled calls on the contact timeline in real time. Rotate the secret from connection settings if exposed.
+
+</Fold>
+
+<Fold>
+
+## Feeding automations
+
+Integrations are most useful as the actions at the end of an [automation](/guides/automations/): post to Slack or Discord, upsert into a CRM, or fan out to Zapier, Make, n8n, or any signed webhook.
+
+The most actionable events are available as triggers: reply received (with intent), contact created, form submitted, email bounced, unsubscribed, meeting booked, rescheduled, or canceled, warmup health changed, and deliverability complaint.
+
+Data flows in as well as out. An automation's inbound webhook URL plus its **Create or update contact** action turns any push (a lead-form connector in Zapier, Make or n8n, a form tool's webhook, your own code) into a tagged, campaign-enrolled contact. See [Lead intake](/guides/automations/#lead-intake).
+
+Actions run in the background, so a slow third party never blocks the event that triggered it. Failures are recorded against the connection's health and visible in its recent activity rather than retried forever or silently lost.
+
+You can filter when an action runs, commonly firing only on a `positive` reply or above a minimum classifier confidence. Beyond events, you can push a batch of contacts into a connected CRM on demand, with each record reporting its own result.
+
+</Fold>
+
+## Next steps
+
+<Cards>
+  <Card title="Automations" href="/guides/automations/" />
+  <Card title="Slack" href="/guides/slack/" />
+  <Card title="Personalization & expressions" href="/guides/expressions/" />
+  <Card title="Deliverability" href="/guides/deliverability/" />
+</Cards>

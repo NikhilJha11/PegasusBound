@@ -1,0 +1,129 @@
+# Dev mode override. Brings all stateful build steps inside long-
+# running containers with bind-mounted source so a save in the host
+# triggers an in-container recompile/restart — no docker image
+# rebuild, no container recreate.
+#
+# Activated via `make app` (or `docker compose -f docker-compose.yml
+# -f docker-compose.dev.yml up`).
+#
+# Covers:
+#   - backend / consumer / worker-shared-1  (Go via air)
+#   - tracking                              (Rust via cargo-watch)
+#   - realtime                              (Elixir via mix phx.server)
+#
+# The default `docker-compose.yml` keeps the production-style images
+# untouched; `make up` still uses those.
+#
+# Caching strategy: each language's build cache lives on a named
+# volume whose `name:` skips the per-project prefix, so worktrees
+# point at the same physical volumes on the host and starts after the
+# first are seconds, not minutes.
+
+services:
+  # ─── Go services (backend / consumer / worker) ────────────────────────
+  backend:
+    image: pegasusbound-go-dev
+    build:
+      context: .
+      dockerfile: deploy/docker/go-dev.Dockerfile
+    environment:
+      PEGASUSBOUND_CMD: backend
+    volumes:
+      - .:/app
+      - pegasusbound_gomodcache:/go/pkg/mod
+      - pegasusbound_gocache:/root/.cache/go-build
+    # Relax the prod healthcheck instead of disabling it: dev needs to
+    # keep one because web, seed and the base consumer all depend on
+    # backend with `condition: service_healthy`, and compose refuses to
+    # bring up a service whose service_healthy target has no
+    # healthcheck.
+    #
+    # The bigger start_period gives air time to do a cold first compile
+    # (Go build cache empty in a fresh worktree → 60-90s isn't unusual).
+    # depends_on only gates initial startup, so the brief unhealthy
+    # blips on each subsequent rebuild don't bounce dependents.
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 180s
+
+  consumer:
+    image: pegasusbound-go-dev
+    build:
+      context: .
+      dockerfile: deploy/docker/go-dev.Dockerfile
+    environment:
+      PEGASUSBOUND_CMD: consumer
+    volumes:
+      - .:/app
+      - pegasusbound_gomodcache:/go/pkg/mod
+      - pegasusbound_gocache:/root/.cache/go-build
+    depends_on:
+      backend:
+        condition: service_started
+      nats:
+        condition: service_healthy
+
+  worker:
+    image: pegasusbound-go-dev
+    build:
+      context: .
+      dockerfile: deploy/docker/go-dev.Dockerfile
+    environment:
+      PEGASUSBOUND_CMD: worker
+    volumes:
+      - .:/app
+      - pegasusbound_gomodcache:/go/pkg/mod
+      - pegasusbound_gocache:/root/.cache/go-build
+
+  # ─── Rust (tracking) ──────────────────────────────────────────────────
+  tracking:
+    image: pegasusbound-rust-dev
+    build:
+      context: .
+      dockerfile: deploy/docker/rust-dev.Dockerfile
+    volumes:
+      - ./tracking:/app
+      - pegasusbound_cargo_home:/usr/local/cargo
+      # Build artifacts default to ./tracking/target inside the bind
+      # mount. Redirecting to a named volume keeps the host tree clean
+      # and lets the artifact cache survive container recreates.
+      - pegasusbound_cargo_target:/app/target
+    healthcheck:
+      disable: true
+
+  # ─── Elixir (realtime) ────────────────────────────────────────────────
+  realtime:
+    image: pegasusbound-elixir-dev
+    build:
+      context: .
+      dockerfile: deploy/docker/elixir-dev.Dockerfile
+    environment:
+      # Phoenix uses MIX_ENV=dev for code reload; PHX_HOST/PORT/etc
+      # from the base file still apply.
+      MIX_ENV: dev
+    volumes:
+      - ./realtime:/app
+      - pegasusbound_mix_deps:/app/deps
+      - pegasusbound_mix_build:/app/_build
+    healthcheck:
+      disable: true
+
+volumes:
+  # `name:` overrides the default `<project>_<volume>` prefixing. Every
+  # worktree that brings up this override mounts the same physical
+  # volume, so cache populated in one worktree is warm in every other.
+  pegasusbound_gomodcache:
+    name: pegasusbound_gomodcache
+  pegasusbound_gocache:
+    name: pegasusbound_gocache
+  pegasusbound_cargo_home:
+    name: pegasusbound_cargo_home
+  pegasusbound_cargo_target:
+    name: pegasusbound_cargo_target
+  pegasusbound_mix_deps:
+    name: pegasusbound_mix_deps
+  pegasusbound_mix_build:
+    name: pegasusbound_mix_build

@@ -1,0 +1,164 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import AnalyticsHero from '../components/scenes/analytics/AnalyticsHero.astro';
+import CountedScene from '../components/scenes/analytics/CountedScene.astro';
+import StepsScene from '../components/scenes/analytics/StepsScene.astro';
+import MailboxScene from '../components/scenes/analytics/MailboxScene.astro';
+import ReadScene from '../components/scenes/analytics/ReadScene.astro';
+import ABScene from '../components/scenes/analytics/ABScene.astro';
+import ShareScene from '../components/scenes/analytics/ShareScene.astro';
+
+// Counting rules from docs/content/docs/guides/analytics.mdx.
+
+const counted = [
+  'An open by a person, once per email',
+  'A click by a person, which also counts as an open',
+  'A reply from a person, matched to the thread it answers',
+  'A bounce or a spam complaint',
+];
+const notCounted = [
+  'Apple Mail Privacy Protection fetching the image',
+  'A security gateway clicking every link at delivery',
+  'Out-of-office and other automatic replies',
+  'You reading the email inside Pegasusbound',
+];
+
+const faq: [string, string][] = [
+  ['Why is my open rate lower than in other tools?', 'Because Pegasusbound only counts people. Privacy proxies, security scanners and instant machine opens are kept as proof of delivery and shown separately, but they never inflate the rate or fire an opened branch.'],
+  ['What counts as a reply?', 'A human reply, matched to the email it answers, even when the person writes back from a different address. Out-of-office notices and autoresponders never count and never stop a sequence.'],
+  ['Do I need tracking turned on?', 'For opens and clicks, yes. Sends, replies, bounces and complaints are counted either way. You can track on your own domain per mailbox, or use the shared host.'],
+  ['When does an A/B test have a winner?', 'Pegasusbound ranks variants by reply rate by default, or by opens or clicks if you choose, and waits for the leader to reach a minimum sample, 30 sends by default, before it reports a winner with medium confidence.'],
+  ['Is the dashboard live?', 'Yes. Opens, clicks, replies and bounces appear in the activity feed as they happen, and the totals follow within seconds.'],
+];
+
+const rowTitle = 'mt-5 text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.05] text-slate-900';
+const rowText = 'mt-4 max-w-xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500';
+const rowNum = 'text-[14px] text-slate-500';
+const bentoTitle = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const bentoText = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+---
+<Layout
+  title="Cold Email Analytics That Count People, Not Bots | Pegasusbound"
+  description="Cold email analytics that count people only: opens, clicks, replies, bounces and complaints by campaign and mailbox, with bot and privacy-proxy opens filtered out and A/B winners called with confidence."
+>
+  <!-- HERO: the claim, then the whole Analytics page under it. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="max-w-4xl">
+      <div class="text-[14px] text-slate-500">Analytics</div>
+      <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+        Numbers you can make decisions with.
+      </h1>
+      <p class="mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+        Pegasusbound counts people, not machines. Privacy proxies, link scanners and autoreplies are filtered out, so an open rate means someone opened it and a reply means someone wrote back.
+      </p>
+      <div class="mt-9 flex flex-wrap items-center gap-3">
+        <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+          Start free <Icon name="arrowRight" size={14} />
+        </a>
+        <a href="https://docs.pegasusbound.com/guides/analytics/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+          What gets counted
+        </a>
+      </div>
+    </div>
+    <div class="mt-14 md:mt-20">
+      <AnalyticsHero />
+    </div>
+    <p class="mt-4 text-[13.5px] text-slate-400">Pick 7, 30 or 90 days, narrow it to some campaigns or a folder, and the feed at the bottom updates as people open, click and reply.</p>
+  </section>
+
+  <!-- COUNTED: the ledger, shown on a real campaign and a real contact. -->
+  <Rule class="mt-20 md:mt-28" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div>
+        <div class={rowNum}>What counts</div>
+        <h2 class={rowTitle}>Machines are recorded, never counted.</h2>
+        <p class={rowText}>Every request is kept as proof of delivery. Only the ones a person made move your numbers, fire a branch or trigger an automation. The rest stay on the contact's timeline with the rule that caught them.</p>
+        <div class="mt-8 grid max-w-xl gap-6 sm:grid-cols-2">
+          <div>
+            <div class="text-[13px] font-medium text-slate-900">Counted</div>
+            <ul class="mt-3 space-y-2.5">
+              {counted.map((c) => <li class="flex items-start gap-2.5 text-[14.5px] leading-[1.5] text-slate-600"><Icon name="check" size={14} class="mt-[3px] shrink-0 text-emerald-600" />{c}</li>)}
+            </ul>
+          </div>
+          <div>
+            <div class="text-[13px] font-medium text-slate-900">Logged, not counted</div>
+            <ul class="mt-3 space-y-2.5">
+              {notCounted.map((c) => <li class="flex items-start gap-2.5 text-[14.5px] leading-[1.5] text-slate-500"><span class="mt-[10px] h-px w-3 shrink-0 bg-slate-300"></span>{c}</li>)}
+            </ul>
+          </div>
+        </div>
+      </div>
+      <CountedScene />
+    </div>
+  </section>
+
+  <!-- PER CAMPAIGN: which touch pulls replies. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div class="lg:order-2">
+        <div class={rowNum}>Per campaign</div>
+        <h2 class={rowTitle}>See which step earns the replies.</h2>
+        <p class={rowText}>Every campaign breaks its sends, opens, clicks, replies, positive replies and bounces down by step. Each count carries that step's own rate, so a fourth touch that reached a few hundred people still compares fairly with the first.</p>
+        <p class="mt-4 max-w-xl text-[15px] leading-[1.6] text-slate-500">Pick 7, 30 or 90 days, all time or your own dates. A period counts the emails sent in it and every reply they earned, whenever it arrived.</p>
+      </div>
+      <div class="lg:order-1"><StepsScene /></div>
+    </div>
+  </section>
+
+  <!-- MAILBOX + DEVICES: two scenes side by side. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="Down to the inbox." title="Find the mailbox at fault, and see how each email was read." />
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2">
+      <article>
+        <MailboxScene />
+        <h3 class={bentoTitle}>The mailbox, not just the campaign</h3>
+        <p class={bentoText}>When bounces climb it is usually one mailbox. Each one carries its own health score, daily usage and warmup standing, with the reason written out, so you fix the sender instead of blaming the copy.</p>
+      </article>
+      <article>
+        <ReadScene />
+        <h3 class={bentoTitle}>Every open says what it was read on</h3>
+        <p class={bentoText}>iPhone in the Apple Mail app, Outlook on a Windows PC, webmail in Chrome. When Gmail or Apple's privacy relay hides the device, Pegasusbound says so instead of guessing.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- A/B: a wide scene under a split heading. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-2 lg:gap-16 lg:items-end">
+      <h2 class="text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.08]">
+        <span class="text-slate-400">A/B tests. </span><span class="text-slate-900">No winner on a handful of sends.</span>
+      </h2>
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">Split a step between the original and one or more variants. Pegasusbound ranks them by reply rate unless you choose opens or clicks, and only calls a winner once the leader has the minimum sample behind it, 30 sends by default, with the confidence next to it.</p>
+    </div>
+    <div class="mt-12 md:mt-16">
+      <ABScene />
+    </div>
+  </section>
+
+  <!-- SHARE: the branded image. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div>
+        <div class={rowNum}>Share a result</div>
+        <h2 class={rowTitle}>Turn any date range into a clean image.</h2>
+        <p class={rowText}>Export a branded card of your numbers for a weekly update, a client report or a post, in square, 3:2 or 16:9, without screenshots or spreadsheets.</p>
+      </div>
+      <ShareScene />
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Analytics, answered." />
+
+  <CTA photo="sheer-lavender" title="See what your outreach is really doing." description="Connect a mailbox and the numbers start the moment your first campaign sends." />
+</Layout>

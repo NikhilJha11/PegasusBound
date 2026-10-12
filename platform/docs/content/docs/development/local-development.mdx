@@ -1,0 +1,346 @@
+---
+title: Local development
+description: Run the full stack locally with Docker, hot reload, seeding, and native services.
+---
+
+The whole stack runs locally via a single `docker-compose.yml` at the repo root. Profiles let you opt into heavier setups for simulation testing.
+
+## Prerequisites
+
+- Docker (20.10+) and Docker Compose v2
+- Git
+- Go 1.25+
+- Node 22+ and pnpm (for web)
+
+Optional, only for the two auxiliary services when run natively:
+
+- Rust (for tracking)
+- Elixir 1.18+ (for realtime)
+
+## One command
+
+```bash
+make dev
+```
+
+This is the whole setup for a fresh clone. It brings up the no-cloud Docker infra
+(postgres, redis, nats, mailpit), waits until
+everything is actually ready, applies migrations, loads the seed fixtures,
+installs web dependencies on first run, starts the realtime and tracking
+services as containers, and then runs the backend, consumer, worker, dashboard,
+and admin panel together in your terminal.
+
+Open `http://localhost:5173` and log in with `dev@pegasusbound.com` / `password123`.
+
+<Callout type="warn" title="make dev shares its database with make up">
+Both pin the same compose project (`-p pegasusbound`), the same `pegasusbound_postgres_data` volume and the same `pegasusbound_dev` database, and `make dev` seeds nine fixture accounts by default, including `admin@pegasusbound.local` with every platform admin permission and a published password.
+
+Those accounts are your instance's accounts. Seeding therefore spends the first-run exemption permanently: a later `make up` finds a claimed instance, issues no setup link, and the sign-up form refuses you with `403 This server is invite only`. Recover with `pegasusboundctl user create --email you@example.com --admin`, or start over with `make reset`, which destroys the volumes holding the encryption keys.
+
+Use `make dev SEED=false` on a database you intend to self-host from. Full detail in [first run](/development/first-run/#if-the-instance-already-has-accounts).
+</Callout>
+
+The native dev stack keeps the emailed login code on (`AUTH_LOGIN_CODE=always`)
+so the flow stays exercised, and local mail goes to Mailpit rather than a real
+inbox. Open `http://localhost:18025`, read the newest "Your Login Code"
+message, and paste the code into the dashboard.
+
+A self-hosted install behaves differently: there the code is off by default, so
+signing in never depends on mail. See [accounts and access](/development/accounts-and-access/#login-codes).
+
+Ctrl-C stops the app services; the Docker infra stays up, so the next `make dev`
+skips straight to starting the app. The Go services run natively with `go run`,
+so a code change plus Ctrl-C and re-run recompiles in a second or two. Variants:
+
+```bash
+make dev SEED=false           # skip fixture seeding
+make dev AI_PROVIDER=ollama   # with the AI assistant on (see the AI provider section)
+```
+
+Tracking (`:3000`) and realtime (`:4000`) run as containers under `make dev`, so
+pixels, click redirects, and live dashboard updates work without the Rust or
+Elixir toolchains. The native `make tracking` / `make realtime` targets are for
+iterating on those services themselves.
+
+## Make targets
+
+Day-one:
+
+```bash
+make dev        # one command: infra + migrations + seed + backend/forms/consumer/worker + realtime + tracking + dashboard + admin
+make infra      # postgres, redis, nats, mailpit (leave running)
+make run        # backend + forms + consumer + worker (native, after make infra)
+make up         # the whole no-cloud stack in Docker (docker compose up --build)
+make gen-key    # print a KMS_LOCAL_MASTER_KEY for a real deployment
+make seed       # load rich fixtures (3 orgs, 6 mailboxes, a campaign)
+make sandbox    # fully working demo environment (see /development/sandbox/)
+make reset      # nuke everything including volumes, start over
+```
+
+The split lets multiple git worktrees share the stateful stuff. `make infra`
+is a "start once and forget"; every worktree uses the same project name
+(`-p pegasusbound`), so a second worktree's `make app` recreates the language
+containers in place against its source without touching infra.
+
+Iterating on code:
+
+```bash
+# Hot reload is on by default under `make app`:
+#   - Go saves       -> air rebuilds the binary in-container (~2-5s)
+#   - Rust saves     -> cargo-watch rebuilds (~2-10s debug build)
+#   - Elixir saves   -> Phoenix reloads modules in-process
+#   - Web saves      -> Vite HMR (browser updates instantly)
+#
+# So normally you don't restart anything manually.
+
+# Tail logs:
+make app-logs                      # all hot-reload services
+make logs                          # everything including infra
+make logs backend                  # one service
+make logs backend consumer         # multiple
+```
+
+If you're on the prod-image flow (`make up`) instead of `make app`,
+binaries are baked into the image and you need `make restart <svc>` /
+`make restart-go` / `make restart-all` to pick up code changes.
+
+All targets shell out to `docker compose -p pegasusbound`. If you don't have Make, the equivalents are:
+
+```bash
+docker compose -p pegasusbound up -d postgres redis nats mailpit          # infra
+docker compose -p pegasusbound -f docker-compose.yml -f docker-compose.dev.yml up -d --build \
+    backend consumer worker tracking realtime web admin              # app
+docker compose -p pegasusbound up -d dovecot                              # sandbox IMAP host
+docker compose -p pegasusbound --profile seed run --rm --build seed       # seed
+docker compose -p pegasusbound --profile seed --profile sandbox down -v   # reset
+```
+
+## What's running
+
+The no-cloud stack has no AWS, GCP, Stripe, or Kafka. After `make infra && make app`:
+
+- **postgres**, **redis**: relational store and cache / realtime bridge
+- **nats**: event bus (JetStream), a single small binary in place of Kafka + Zookeeper + Schema Registry
+- **mailpit**: SMTP catcher with a web UI
+- **dovecot**: real IMAP server hosting sandbox mailbox inboxes (`sandbox` profile, started by `make sandbox`)
+- **backend**, **consumer**, **tracking**, **realtime**, **web**, **admin**: app services
+- **worker**: one send/sync worker (scale with `docker compose up --scale worker=N`, or add machines via the SSH enrollment flow)
+
+Encryption, blob storage, and delayed tasks all run on local providers (`KMS_PROVIDER=local`, `BLOB_PROVIDER=filesystem`, `TASKS_PROVIDER=local`), so nothing external is needed. See the [self-hosting guide](/development/deployment-guide/) for the provider switches.
+
+## Service URLs
+
+Mostly standard ports. A few are offset because their defaults conflict too often: Postgres `15432`, Redis `16379`, NATS monitoring `8222`, Mailpit UI `18025` and SMTP `11025`. Everything else uses its natural port. Override locally in a `docker-compose.override.yml` if you still hit a conflict.
+
+| Service | URL |
+|---------|-----|
+| Backend API | `http://localhost:8080` |
+| Tracking | `http://localhost:3000` |
+| Realtime | `http://localhost:4000` |
+| Web (Vite dev) | `http://localhost:5173` |
+| Admin (Vite dev) | `http://localhost:5174` |
+| Mailpit | `http://localhost:18025` |
+| Dovecot IMAP / IMAPS | `localhost:10143` / `localhost:10993` |
+| NATS | `localhost:4222` (monitoring `http://localhost:8222`) |
+| Postgres | `localhost:15432` |
+| Redis | `localhost:16379` |
+
+## Database setup
+
+The backend runs migrations automatically on boot (`internal/infrastructure/db/migrate.go`), so there's no separate migrate step. Migrations live in `internal/infrastructure/db/migrations/`.
+
+### Adding a migration
+
+Each migration is a pair of files named `<version>_<name>.up.sql` and `<version>_<name>.down.sql`, where the version is six digits and the name is snake_case. Versions are contiguous, so a new migration takes the next number after the highest one on `main`.
+
+Pick that number against `main`, not against your branch. Two branches opened around the same time will otherwise both claim the same next version, and while each one migrates cleanly on its own, the collision on `main` makes golang-migrate refuse to build its source driver. The backend then exits at boot and restart-loops, taking every service that waits on it with it.
+
+Before pushing, run:
+
+```bash
+make check-migrations
+```
+
+It reports duplicate versions, gaps, an `.up.sql` with no `.down.sql`, and filenames golang-migrate cannot parse. `make lint` runs it too, and the Migrations job in CI runs it on every pull request that touches the directory.
+
+If a duplicate does reach `main`, renumber the migration that has **not** been released yet. Deployments in the wild have already recorded the other one in `schema_migrations`, and renumbering that one makes them try to apply it a second time.
+
+## Seeding fixtures
+
+`make seed` runs the seeder one-shot. It's idempotent, safe to re-run after schema changes.
+
+Baseline (always loads):
+
+| Field | Value |
+|-------|-------|
+| Email | `dev@pegasusbound.com` |
+| Password | `password123` |
+
+The dev user's org always loads as a mid-flight workspace, not an empty shell:
+
+- 4 warmed mailboxes on the shared worker, all in the premium warmup pool
+- Folders, tags, and labels with real bindings (mailbox tags, campaign folders, labels on contacts and inbox threads)
+- ~30 contacts with titles and companies, a few unsubscribed or suppressed
+- An active 3-step campaign with 24 leads spread across the funnel (sent, opened, replied, bounced, queued), plus a draft campaign
+- 14 days of stats history (campaign sends, warmup volume, per-mailbox counts), always including sends today
+- A unified inbox with reply chains, an objection, an out-of-office, a bounce, and a warmup-style exchange
+- A CRM pipeline with deals, tasks, and notes, reply templates, notifications, and an AI credit balance with transaction history
+
+All dates are computed relative to the current time, so the workspace looks active no matter when you seed.
+
+When `SEED_RICH=true` (set in `docker-compose.yml`, and by `make seed`), also loads:
+
+- 3 orgs (Acme free, Beta pro, Gamma enterprise) each with their own owner user (password `password123`)
+- 3 workers matching the `docker-compose.yml` hostnames (shared / premium / dedicated)
+- 6 email accounts spread across workers, joined to the right warmup pools
+- A Beta campaign with a 2-step sequence
+- 10 contacts, 2 of them unsubscribed (exercises suppression behaviour)
+
+## Encryption and storage
+
+The local stack needs no AWS. Envelope encryption uses a local AES master key (`KMS_PROVIDER=local`, `KMS_LOCAL_MASTER_KEY`, a fixed dev value in the Makefile), and blobs (avatars, logos) go to a directory (`BLOB_PROVIDER=filesystem`, `BLOB_FS_ROOT`). Flip `KMS_PROVIDER=aws` / `BLOB_PROVIDER=s3` to use AWS KMS and any S3-compatible store instead. See the [self-hosting guide](/development/deployment-guide/) for every provider switch.
+
+## Connecting psql / Redis CLI
+
+```bash
+docker compose exec postgres psql -U pegasusbound -d pegasusbound_dev
+docker compose exec redis redis-cli
+```
+
+External clients can use:
+
+- Postgres: `localhost:15432` user `pegasusbound` password `pegasusbound` db `pegasusbound_dev`
+- Redis: `localhost:16379`
+
+## Running services natively
+
+`make dev` already runs the Go services and the dashboard natively against the
+Docker infra. When you want them in separate terminals instead of one, each has
+its own target with the full dev environment pre-wired (no manual env exports):
+
+```bash
+make infra            # once: the backing services in Docker
+make backend          # API on :8080 (applies migrations on boot)
+make forms            # public forms service on :8090 (builds the forms/ app, then serves it)
+make forms-web        # Vite dev server for forms/ on :5175 when editing the app itself
+make consumer         # event consumer (NATS -> postgres)
+make worker           # send/sync worker (run more for parallelism)
+make run              # backend + forms + consumer + worker in one terminal
+make web              # dashboard dev server on :5173
+make admin            # admin app on :5174
+make site             # marketing site on :4321
+```
+
+Each target sets the same env you would otherwise export by hand (see the
+[configuration reference](/development/configuration/) for what each variable
+does, and `deploy/config/env.example` for the bare-binary template). Saving a Go file and
+re-running the target recompiles in a second or two against the warm build
+cache.
+
+### Tracking (Rust) and realtime (Elixir)
+
+`make dev` runs both as containers; `make run` does not include them. The native
+targets need their own toolchains (cargo, elixir + mix) and are for working on
+those services directly:
+
+```bash
+make tracking   # tracking pixel + click redirect service on :3000
+make realtime   # Phoenix websocket fanout on :4000
+```
+
+## AI provider
+
+The AI features (the dashboard assistant, reply drafts, contact research, and automation AI nodes) are off by default in local dev, so the assistant returns a clean `503` until you pick a provider. Pass `AI_PROVIDER` to the dev targets; the preset fills in the base URL, so you supply just a key and (optionally) a model.
+
+```bash
+# free local model, no key: install Ollama, pull a tool-capable model, run
+ollama pull llama3.1        # or qwen2.5
+make backend AI_PROVIDER=ollama
+make run     AI_PROVIDER=ollama AI_MODEL=qwen2.5
+
+# OpenRouter: one key fronts every vendor; switch models via AI_MODEL
+make backend AI_PROVIDER=openrouter AI_KEY=sk-or-... AI_MODEL=deepseek/deepseek-chat
+
+# Groq free tier (fast) or hosted OpenAI
+make backend AI_PROVIDER=groq   AI_KEY=gsk_... AI_MODEL=openai/gpt-oss-20b
+make backend AI_PROVIDER=openai AI_KEY=sk-...
+```
+
+`AI_PROVIDER=ollama` needs no key and marks the model free (`AI_FREE`), so AI credits are not charged and the assistant shows a "free model" notice. Local and free-tier models are less capable, but tool calls and the full agent loop work; use `llama3.1` (8B) or `qwen2.5`, not a 1B to 3B model. Leave `AI_PROVIDER` unset to keep AI off. See the [self-hosting guide](/development/deployment-guide/) for the full provider list.
+
+## Mailpit
+
+All outbound mail is captured by Mailpit. The dev targets set `MAIL_TRANSPORT=smtp` with `SMTP_SECURITY=none`, because a sink offers no STARTTLS and the platform transport refuses to send credentials over an unencrypted connection. Mailpit accepts SMTP AUTH with any credentials, so worker sends from sandbox mailboxes are captured too.
+
+Mailpit sits in the `sandbox` compose profile, so the self-host `make up` never starts it. `make dev`, `make infra` and `make sandbox` name it explicitly, which starts it regardless of the profile.
+
+- Web UI: `http://localhost:18025`
+- SMTP from inside docker: `mailpit:1025`
+- SMTP from host: `localhost:11025`
+
+Note: Mailpit speaks SMTP only, not IMAP. The worker's IMAP sync path is exercised through the Dovecot service instead; see the [sandbox](/development/sandbox/) for the full live-mail environment.
+
+## Email templates
+
+Email templates live in `internal/notify/templates/`. Render tests:
+
+```bash
+go test ./internal/notify/templates/ -v
+```
+
+To preview templates in a browser, dump them to disk:
+
+```bash
+go test ./internal/notify/templates/ -run TestPreview -v
+# Files land in the test temp dir, path printed in output
+```
+
+Or just trigger the auth flow in the running app and watch the email arrive in Mailpit.
+
+## Common tasks
+
+### Rebuild one service
+
+```bash
+make restart backend
+```
+
+### Reset Postgres only
+
+```bash
+docker compose stop postgres
+docker volume rm pegasusbound_postgres_data
+docker compose up -d postgres
+```
+
+### Inspect the event bus (NATS)
+
+NATS runs with JetStream and an HTTP monitoring endpoint:
+
+```bash
+curl http://localhost:8222/jsz | jq   # JetStream streams + message counts
+curl http://localhost:8222/varz | jq  # server info and connections
+```
+
+To tail subjects live, use the NATS CLI (`nats` from nats-io) against `nats://localhost:4222`, for example `nats sub 'pegasusbound.>'`. On the optional Kafka overlay, the event bus is Kafka instead; see the [self-hosting guide](/development/deployment-guide/).
+
+## Troubleshooting
+
+**Port already in use.** Use `lsof -i :5432` (or whichever) to find what's holding it. The compose ports are offset on purpose; if you have a local Postgres on 5432 it shouldn't clash.
+
+**Backend can't reach the event bus.** NATS starts in a second or two and healthchecks gate the dependent services, so `docker compose up` should handle ordering. If you brought services up out of order, `docker compose restart backend consumer`.
+
+**Scheduled sends never fire.** Delayed sends run through the in-process Postgres task poller (`TASKS_PROVIDER=local`), so the backend must be running. Check the backend log; the task reconcilers cancel and re-enqueue anything missed within a few minutes.
+
+## Testing the Pegasusbound Cloud link
+
+`make poollink-dev` boots two instances side by side so you can walk the self-hoster's path end to end: a prod-like cloud (`DEPLOYMENT_MODE=cloud`, Stripe billing gates on with placeholder keys, email verification through Mailpit, the Sunrise Labs sandbox org seeded into the warmup pool) on `:18301` / `:18401`, and a brand-new self-hosted instance with no accounts on `:18302` / `:18402`, with `PEGASUSBOUND_CLOUD_URL` pointing at the cloud. Both use the `make infra` containers with their own databases, so `make dev` keeps working next to them.
+
+The script prints a claim link for the self-hosted instance (`scripts/dev-poollink.sh setup-link` prints a fresh one). Connect a mailbox there with SMTP `localhost:11025` (Mailpit, no auth) and IMAP `localhost:10993` (Dovecot accepts any user with password `sandbox`), then follow Settings > Pegasusbound Cloud: the claimed account is the instance administrator, and linking needs it signed in with two-factor authentication, so turn on 2FA under Settings > Security and sign in again first. Register on the cloud dashboard, approve the code at `/connect`, and enroll the mailbox. The cloud workspace starts on a free trial, so the 10-mailbox allowance and the upgrade card behave like production; checkout itself needs real Stripe keys (`STRIPE_SECRET_KEY` and friends are read from the environment if set). `make poollink-dev-down` stops everything, `make poollink-dev-reset` also drops the databases. Product behavior is described in the [Pegasusbound Cloud guide](/guides/pegasusbound-cloud/).
+
+## Next steps
+
+- [Sandbox](/development/sandbox/): a fully working demo environment on this stack
+- [Architecture](/development/architecture/): control vs execution plane, encryption model
+- [Self-hosting](/development/deployment-guide/): running in production
+- [Event system](/development/events/): event bus and topic reference

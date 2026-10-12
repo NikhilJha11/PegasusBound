@@ -1,0 +1,1077 @@
+# Pegasusbound Agent Notes
+
+## Purpose
+
+Pegasusbound is an email warmup and cold outreach platform.
+
+At a product level, the app does four main things:
+
+- manages sender accounts and their assignment to workers
+- sends campaign and warmup mail through distributed workers
+- syncs mailbox state back into the platform
+- tracks opens, clicks, replies, suppression, and deliverability signals
+
+The backend API is the control plane. Workers are the execution plane.
+
+It ships as a hosted service and as a self-host, and the two are the same code.
+The front door for the self-host is one command,
+`curl -fsSL https://pegasusbound.com/install.sh | sh`, which pulls the published
+release images and needs no clone and no compiler. `--wizard` turns it into an
+interactive install that asks the data-control questions up front: where each
+store lives, what is kept and for how long, how it is backed up. The script is
+`site/public/install.sh` and it has its own rules below; the docs are
+`docs/content/docs/development/install.mdx` and `data-control.mdx`.
+
+## Working In This Repo
+
+CI is strict. `go build ./...` succeeding is not enough — `golangci-lint` runs `gofmt` as part of its checks, and a single unformatted import block or mis-indented doc comment will fail the PR even when the code compiles cleanly. Before declaring any Go change done:
+
+- run `gofmt -w` on every Go file you touched (or `gofmt -w internal/ cmd/` to be safe)
+- run `make lint` locally when the toolchain is installed, or at minimum `gofmt -l ./...` should print nothing
+- do not rely on `go build` as the "ship signal" — it ignores formatting and stylistic lint rules that CI enforces
+
+Other CI-touching rules:
+
+- the frontend trees (`admin/`, `web/`, `site/`, `qa/`) each have their own CI jobs; run `pnpm typecheck` in any tree you touched and `pnpm lint` when the rules are non-trivial
+- never push without first re-running the relevant `*build*` / `*typecheck*` / `*lint*` step on the affected tree
+- a `make lint` (or `gofmt -l`) failure is always a real CI failure; do not push hoping it will pass
+
+Migrations are numbered against `main`, not against your branch:
+
+- a new migration takes the next six-digit version after the highest one on `main`, with a matching `.up.sql` and `.down.sql`
+- two branches that each pick "the next number" independently are both green alone and collide once both merge; golang-migrate then refuses to build its source driver and the backend restart-loops at boot, so nothing deploys
+- run `make check-migrations` (also a prerequisite of `make lint`, and its own CI job) before pushing anything that adds a migration
+- if a duplicate does reach `main`, renumber the migration that has NOT been released yet. The other one is already recorded in deployments' `schema_migrations`, and renumbering it makes them re-apply it
+
+Docs stay in sync:
+
+- the customer docs site lives in `docs/` (Fumadocs, served at docs.pegasusbound.com); content is MDX under `docs/content/docs/` in three sections: `guides/` (product behavior), `learn/` (fundamentals), `api/` (API reference)
+- any change that alters user-visible behavior must update the matching docs page in the same change: a new or changed endpoint updates `api/endpoints.mdx` (scope map) and, where relevant, `api/authentication.mdx`; a new or changed API permission updates `api/permissions.mdx` including the permission table, presets, and all three language tabs in the constants section; a new or changed error code updates `api/error-codes.mdx`; a new or changed product feature, default, limit, or setting updates the relevant `guides/` page (or adds one, registered in `guides/meta.json` under the right section group)
+- removing or renaming a feature, endpoint, or permission means removing or updating its docs too; do not leave stale docs behind
+- self-hosting behavior has its own pages under `docs/content/docs/development/`: a change to the installer or to what it asks updates `install.mdx`; a change to where a store lives, how long something is kept, or how an instance is backed up or moved updates `data-control.mdx`; a new environment variable updates `configuration.mdx`, and a new database-backed setting updates its table there as well as the admin panel
+- follow the docs conventions: frontmatter `title` is the H1 (no `#` heading in the body), no decorative sidebar icons (pages and `meta.json` sections carry no `icon`; the source loader has the lucide icon plugin disabled, and code-sample tabs use the real language logo instead), sentence-case headings, no em dashes in prose, internal links use trailing slashes (`/guides/mailboxes/`)
+- verify with `pnpm types:check` and `pnpm lint` in `docs/` (the site is a fully static export; `pnpm build` writes `out/`)
+
+Commit hygiene:
+
+- when instructed to make a commit, use the subject format `feat: <explanation>`
+- one line, no body. Make the line long and specific (what changed and where), not a stub like `feat: fix docs`
+- no `Co-Authored-By:` or other AI/agent attribution footers; rewrite any commit that has one before opening or updating a PR
+
+Copy / writing style:
+
+- do not lean on em dashes (`—`). Use them sparingly, only when one is genuinely the clearest option; prefer a period, comma, colon, or parentheses instead. This applies to user-facing copy and microcopy in `site/` and `web/`, and to docs. Overusing em dashes reads as machine-written.
+
+Code comments:
+
+- keep them short: one line stating the non-obvious constraint or intent. No multi-line essays; if a comment needs a paragraph, the explanation belongs in docs or the PR description
+
+Data modeling / representation:
+
+- we are happiest with the most **type-safe** option, but the rule is: pick the **most effective option for the actual use case**, not type-safety for its own sake.
+- prefer real typed columns / enums when the data is fixed-shape, queried or filtered in SQL, or benefits from FK integrity.
+- a `jsonb` column is the right call when the data is a free-form, evolving, read-then-execute blob that isn't filtered in SQL (e.g. the `sequences.conditions` branching tree and `sequences.action` node config) — keep it type-safe at the app boundary with a Go struct + validation on write, and a DB `CHECK` on any discriminator column.
+
+### Workspace data stays portable
+
+A customer can export their whole organization to an archive and import it on another instance (`internal/app/orgtransfer`, Settings > Data, `pegasusboundctl org export|import`). That only keeps working if every new piece of org-owned data is added to it deliberately. Data that isn't in the registry is silently absent from every archive, and nobody finds out until a migration lands on the other side missing a feature's data.
+
+So: **a migration that adds an organization-scoped table is not done until that table is in `internal/app/orgtransfer/spec.go`.** Add it to `Tables` with its data group and scope, or to `ExcludedTables` with the reason it must not travel. There is no third option; leaving it out is the bug.
+
+When you add one, work through:
+
+- **Scope.** The `WHERE` fragment selecting that table's rows for one organization, with `$1` as the org id. Use a subquery against a parent when the table has no `organization_id` of its own.
+- **Order.** `Tables` is applied top to bottom on import, so a table must sit below everything it references.
+- **Group.** Which `models.OrgDataGroup` it belongs to. If a NOT NULL foreign key crosses a group boundary, add the dependency to `Requires` in `models.OrgDataGroupCatalog` — otherwise a user who deselects the target group gets an import that aborts on a constraint. Nullable crossings need nothing; the importer blanks them.
+- **Secrets.** Any column holding ciphertext needs a `SecretColumn` with the right `KeyDomain`. Pegasusbound has two and they are not interchangeable: `KeyDomainInstance` is `CREDENTIALS_ENCRYPTION_KEY` (mailbox credentials, which the worker reads without an org context), `KeyDomainOrgDEK` is the per-organization DEK (everything else). Getting this wrong produces mailboxes that authenticate against nothing.
+- **Instance-local columns.** Anything naming a worker, a queue handle, a Stripe object, or a sync checkpoint belongs in `ResetOnImport`, or the whole table in `ImportSkip` when it only means something on the instance that wrote it.
+- **Blobs.** A column holding an object-storage key needs a `BlobColumn` so the bytes travel with the rows.
+
+Rows move as `jsonb` in both directions, so adding a *column* to an existing table needs no code change: the exporter emits it and the importer intersects against the destination catalog. Only new tables need registering.
+
+The same applies to the customer-facing side of a feature: if it stores org data, its docs page and `docs/content/docs/guides/workspace-export-import.mdx` should agree about whether that data moves.
+
+### The installer is a published artifact
+
+`site/public/install.sh` is the one-command self-host installer, served
+verbatim from the static site at `https://pegasusbound.com/install.sh`. What is in
+the repo is byte for byte what a stranger pipes into their shell, which makes
+it the highest-consequence file here that is not Go.
+
+It is a wizard: an animated stepper, arrow-key and vim menus, live pull and
+health screens, a review pass, and a `--demo` mode that plays the whole thing
+while installing nothing. `docs/content/docs/development/install.mdx` documents
+it and `data-control.mdx` documents what its questions decide; the
+`pegasusbound-install` skill is the agent-facing version.
+
+Rules, all of them learned from breaking them:
+
+- **POSIX sh, not bash.** It runs under whatever `/bin/sh` the host has, which
+  on Debian and Ubuntu is dash. A `sh -n` that passes under your own shell
+  proves nothing about that; `make installer-check` runs `dash -n` and
+  `shellcheck -s sh`
+- **`set -eu`, everything in a function, `main "$@"` on the last line**, so a
+  truncated download executes nothing. Watch for `[ x ] && y` as a function's
+  LAST command: it returns non-zero when the test fails, and under `set -e`
+  that ends the run. Use an `if`, or end with `return 0`
+- **Nothing drawn inside a redraw loop may be wider than the terminal.** A
+  wrapped line is two physical rows while every `ESC[nA` counts logical ones,
+  so one long option hint makes the menu draw over itself and over whatever was
+  on screen before it. Everything in a loop goes through `fit`
+- **The screen is not ours.** It appends by default, `--clear` is opt-in, and
+  `ESC[3J` (erase scrollback) is never sent
+- **Regenerate the checksum.** `site/public/install.sh.sha256` is what makes
+  "download, verify, read, run" a real alternative to piping into a shell.
+  `make installer-sha`, and CI fails when the two disagree
+- **Every answer is a flag and a `PEGASUSBOUND_*` variable.** An install that can
+  only be driven by keyboard cannot be driven by Ansible, cloud-init or an
+  agent, and the wizard exists to be optional
+- **Idempotent.** A second run adopts the existing `.env`, never regenerates a
+  secret (a new `CREDENTIALS_ENCRYPTION_KEY` is permanent data loss) and never
+  moves an existing data root
+
+Run `make installer-check` before pushing a change to it (POSIX parse,
+shellcheck, `--help`, `--demo`, `--print-env`, a compose file per answer shape,
+a pty width regression test, and the checksum). `make installer-demo` is how
+you see a UI change without installing anything.
+
+`site/public/cli.sh` is the second published script, served at
+`https://pegasusbound.com/cli.sh`, and it installs the `pegasusbound` CLI rather than an
+instance. Every rule above applies to it, plus two of its own:
+
+- **It verifies what it downloads.** The release publishes `checksums.txt`
+  next to the archives, and a mismatch installs nothing rather than warning.
+  Never weaken that to a warning
+- **Release assets are named without the version**, so
+  `releases/latest/download/pegasusbound_<os>_<arch>.tar.gz` resolves with no
+  GitHub API call. The unauthenticated API is rate limited per IP, which is
+  what breaks a curl installer on a shared runner. `scripts/build-cli.sh` and
+  the platform list in `cli.sh` have to agree; `make cli-check` fails when they
+  do not
+
+`make cli-check` runs the whole thing (POSIX parse, shellcheck, `--help`,
+`--dry-run`, a real install from a local mirror, checksum tampering, uninstall,
+the PowerShell parse and the checksum), and `make cli-sha` regenerates the
+checksum after any edit. `site/public/cli.ps1` is the Windows half.
+
+### Verification: what to run, what to skip
+
+Keep the loop fast. The signals that matter are formatting, lint, and typecheck — not local builds or browser automation.
+
+Always, before calling a Go change done:
+
+- run `make fmt` (or `gofmt -w cmd internal`); `gofmt -l ./...` must print nothing
+- run `make lint` (golangci-lint, which first runs `make check-migrations`)
+
+For frontend changes, run `pnpm typecheck` and `pnpm lint` in any tree you touched.
+
+For a change to `site/public/install.sh`, run `make installer-check`; it is the
+same script CI runs and it regenerates nothing, so a stale checksum fails there
+exactly as it will in CI. For `site/public/cli.sh` or `cli.ps1`, the equivalent
+is `make cli-check` (and `make cli-sha` after any edit).
+
+Do not:
+
+- do not run `go build ./...`, `pnpm build`, or docker image builds as a "did it work" check. They are slow and are not what CI gates on. `go run` (via the make dev targets) already compiles; `make fmt` + `make lint` + `pnpm typecheck` are the real signals.
+- do not write Python or ad-hoc browser scripts, and do not drive the app step by step from screenshots or accessibility snapshots. Browser automation lives in `qa/` and only records proof for a PR (below); it is not a test gate, and manual verification against the native dev stack stays the user's job.
+- do not run the Go test suite as a default gate unless the task is specifically about those tests.
+- do not push hoping CI passes; a `gofmt -l` / `make lint` / `pnpm typecheck` failure is always a real CI failure.
+
+### Visual proof on pull requests
+
+Record proof only for a UI change a reviewer should actually see; most changes need none. `qa/` is the harness and `qa/README.md` is its playbook; read it before the first recording.
+
+- record for: a new page, dialog, drawer or multi-step flow; a redesigned or re-laid-out screen; a changed interaction (new controls, new states, a different path through a task); a visible bug fix where the before was visibly broken; or when the user asks for it
+- skip for: anything without a visible change (backend, API, migrations, workers, tests, CI, docs, refactors, dependency bumps) and small visual tweaks (copy, a label, an icon, spacing or colour nudges), which the PR text describes instead. When unsure, skip
+- a follow-up commit is re-recorded only when it changes what the proof shows
+
+- write a scripted flow in `qa/flows/` from the code you changed, run `pnpm proof <filter>` in `qa/`, and read only pass or the failing step. Never screenshot your way around the page; `pnpm aria <path>` prints the accessibility tree when you need a selector
+- record against this worktree's own stack (`pnpm stack up`, in the smallest of `lite`, `full`, `sandbox` the flow needs), never another session's and never anything but localhost: the repository is public and so is everything attached to its PRs
+- publish with `pnpm share` once the PR exists. The first publish goes into the PR description; every later one is a comment showing before/after of only the stills that changed. Record follow-ups with `pnpm proof:fresh` so the comparison starts from fresh seed data. Media reaches GitHub only through `gh --attach`, never an image host, a commit or another repository
+- keep shot names stable across commits, because follow-up comments diff stills by name
+- the machine is shared: record from the main agent, never from fanned-out subagents (a machine-wide lock runs one recording at a time, so they would only queue while each holds a context), and `pnpm stack down` once the proof is published
+
+## Security And Compliance Invariants
+
+Pegasusbound's Google OAuth client is assessed against **ADA CASA v2.1.1 at Assurance Level 1**, which maps to OWASP ASVS 4.0.3. The evidence pack is a claim about the code on `main`: a change that breaks one of the invariants below does not just introduce a bug, it makes a submitted statement untrue and puts the OAuth client's verification at risk. Treat them as constraints on every change, not as a checklist run before an audit.
+
+**The pack is not in this repository and must not be added to it.** It maps every control to the file that implements it and lists the advisories still open with the exact conditions under which each is reachable. That is a reconnaissance document for anyone attacking a self-hosted instance that has not updated, which is the same reason the disclosure rule below exists. It lives outside the tree, at `CASA_EVIDENCE_DIR` (default `~/pegasusbound-casa-private/casa`), and `make casa-evidence` refuses to write anywhere inside the repository.
+
+What stays here is this section: the invariants themselves, stated as what the code does rather than as what it would otherwise allow. When a change alters a control, update the pack in the same sitting, because nothing in CI can tell you the pack has gone stale.
+
+### Disclosure: this repository is public and the product self-hosts
+
+Every instance that has not updated yet runs the code an attacker can read here. So:
+
+- **describe the invariant, never the gap.** A comment, commit subject, PR body or doc that says what used to be possible is a working exploit for every unpatched instance. Write "every read of an organization's data is scoped by `organization_id`", not "before this, X could read Y"
+- do not add a before-and-after account of a security fix to the repository. Keep that out of tree
+- a security fix ships like any other change: a normal subject line naming what the code now does
+
+### Authentication
+
+- passwords are hashed with **Argon2id** and nothing else. No change may introduce a second scheme, weaken the parameters, or store a password in any reversible form
+- `crypt.CheckPassword` (`internal/pkg/crypt/validation.go`) is the only gate on a new or changed password, and it refuses anything on the embedded NCSC breached list (`internal/pkg/crypt/passwords/breached.txt`). Every path that accepts a password must call it: registration, reset, change, invitation acceptance, and any future one
+- every auth-sensitive entry point is behind CAPTCHA (`internal/pkg/captcha/turnstile.go`): login, registration, password reset. The login and registration code-confirmation steps take no second captcha: their signed, single-use session from the start step already proves it passed
+- TOTP verification records the step it consumed (`user_totp_settings.last_used_step`) and refuses a replay of it. Any new second factor needs equivalent single-use enforcement
+- **admin routes require a session that verified a second factor.** `middleware.AdminMiddleware` refuses `!session.MFAVerified` with `admin_mfa_required`, and `RequireAdminPermission` then checks the admin bit. Every admin route sits behind both; never add one outside them. The instance-wide Pegasusbound Cloud link is gated the same way, because it belongs to the instance, not to a workspace
+- an operation that changes who can get in, or moves money or ownership, requires a fresh authentication (`middleware.RequireFreshAuth`, `POST /v1/auth/reauth`). API-key and OAuth callers pass through, because they present a credential on every call and have no session to refresh
+- a federated identity (Google, Apple, OIDC) is bound to an account by `(issuer, subject)`. The email fallback that finds an existing account on a first sign-in attaches the identity to a password account only after that password is presented (`resolveFederatedUser` parks it as `link_required`, `SSOLinkConfirm` completes it through `finishLoginAs`). Only an account with no password links on the address alone
+
+### Sessions and tokens
+
+- **every token carries a purpose** and is verified against the one purpose its consumer accepts (`internal/app/token/config.go`: `access`, `refresh`, `ws`, `login`, `registration`, `reset`, `2fa`, `sso_link`). A token minted for one flow must never verify in another, and one with no purpose verifies for none. A new token type gets a new purpose constant, not a reused one
+- `VerifyToken` pins the algorithm to HS256 and requires an expiry. Do not relax either, and do not add a verification path that skips `token.VerifyToken`
+- `AUTH_SECRET` has a hard floor of `config.MinAuthSecretLength` (32 bytes) and the backend refuses to boot below it. The realtime service applies the same floor to `JWT_SECRET`, which is the same value. Neither check may become a warning
+- banning a user, changing a password and revoking a session all terminate the sessions they invalidate, and through `RevokeOtherSessions` close the user's realtime sockets. A new "lock this account" path must revoke too, or it locks nothing
+
+### Access control: the rule that is easiest to get wrong
+
+**The route's permission gate and the service's data scope must agree, and both must be the organization.** Mailboxes, contacts, campaigns, tokens and message content are organization assets; they are not owned by the member who created them.
+
+A route gated on an organization permission whose service then filters by `user_id` produces the worst kind of failure: the resource is listed, the caller passes the gate, and the write returns "not found". It reads as data corruption and it strands resources permanently when the member who created them leaves. Going the other way, a user-scoped gate with an organization-scoped query is a tenant leak.
+
+So, for anything organization-owned:
+
+- the SQL predicate is `organization_id = $1`. A helper that takes a "scope" fragment gets the organization one
+- the handler resolves the tenant with `middleware.GetOrganizationID(c)` and refuses when it is absent
+- ownership is checked against the caller's organization before any side effect is published, not after
+- `user_id` stays on the row as a record of who connected it, and is used for attribution and for addressing worker events. It is not an authorization key
+
+Everything else in section 3 of the evidence pack rests on this: no identifier from the request body may select a row without a tenant predicate, and a reference to another entity (a campaign, a contact, a task) is verified to belong to the same organization before it is accepted.
+
+### Communications
+
+- `middleware.SecurityHeaders` sets HSTS, `X-Content-Type-Options`, `X-Frame-Options`, a referrer policy and a default-deny CSP on every API response. Do not remove a header to make a page work; scope the exception
+- the realtime websocket checks the browser's `Origin` against `CHECK_ORIGIN_HOSTS`. Non-browser clients send no origin and are unaffected. Adding a first-party origin means adding it to that list in every environment
+- webhook targets stay HTTPS and HMAC-signed, and SSRF-prone destinations are refused. Only a self-hosted or development instance may opt out
+
+### Input that other people see
+
+Anything one person types that Pegasusbound later shows to someone else is content injection waiting to happen, and platform email is the worst case: a mail client turns anything shaped like an address into a live link, sent under Pegasusbound's own domain. `html/template` escaping stops markup, not that. So:
+
+- **every name a person chooses goes through `internal/pkg/displayname`**: first and last names, workspace names, and any new name-like field that can reach another person. It refuses links, web addresses, email addresses, hostnames and IPs (after folding full-width and ideographic dots), control, invisible and bidi characters, markup characters and stacked combining marks, and it bounds length by `Kind`. The refusal is `400 invalid_name`, documented in `api/error-codes.mdx`
+- **the server is the authority and the check sits at every write**, not only the one the dashboard uses: the handler or service behind registration, setup, onboarding, profile, org create and rename, the admin panel, `pegasusboundctl` and an org-transfer import. A new path that writes one of these fields calls the same package. `web/src/lib/displayName.ts` mirrors the rules so a form can explain a refusal before the request, and it is never the only check
+- **a value nobody can be asked to correct is cleaned, not refused**: a name from an identity provider or an email local part goes through `displayname.Clean`/`FromEmail`, which drops what fails, so a hostile IdP claim costs the user a name, not a sign-in
+- **a stored value is untrusted at render time too.** Rows written before a rule existed are still in the database, so anything interpolated into an email body or subject goes through `displayname.Displayable` (or `FullName`) with a neutral fallback ("A team member", "Your workspace")
+- **tighten a rule in both places and in the docs together**: Go package, `displayName.ts`, their tests, and the `invalid_name` section of `api/error-codes.mdx`
+
+### Errors, logging and data exposure
+
+- a server-class (`Internal`) error answers the caller with one fixed sentence and a request id. The real message is logged against that id. `errx.NewPublic` is the narrow exception, for a message an operator can act on, and never for one built from an underlying error
+- no secret, credential, token or full DSN may reach a log line, an error message or an analytics event. Errors sent to PostHog go through `internal/observability/errs`, and the database wrapper strips parameter values
+- ciphertext columns carry the right key domain. `KeyDomainInstance` is `CREDENTIALS_ENCRYPTION_KEY`, `KeyDomainOrgDEK` is the per-organization DEK. They are not interchangeable
+
+### Dependencies and configuration
+
+- `make casa-evidence` runs `govulncheck`, the Node, Rust and Elixir audits and a Trivy scan, writing outside the repository. A reachable vulnerability with an upstream fix is fixed; one without gets a written justification in the pack, not silence. Do not paste scanner output, an advisory id or a reachability note into this repository
+- no credential of any kind is committed. A node in the fleet holds no cloud credential: the privileged operations are brokered through the internal API
+- a new environment variable is documented in `docs/content/docs/development/configuration.mdx` in the same change
+
+## Local Development
+
+Event codec: `json` is the default the Makefile and docker-compose set, because it needs nothing. `avro` works too: the worker command and result envelopes carry an `any` body, and a schema is derived for each from the declared registry in `internal/models/event_variants.go` (see `event_schema.go`), so a new event type is not carried until it is added there. It is only compiled into the `-kafka` images and resolves every event against `SCHEMA_REGISTRY_URL`. `tracking-events` reads the same setting: the consumer decodes both of its topics with one codec, so the Rust publisher honours `CODEC_PROVIDER` on Kafka as well as on NATS. Avro there needs a Schema Registry and is refused at boot without one; JSON needs nothing.
+
+Infra runs in docker; the Go services and frontends run natively on the host for fast iteration — no docker image rebuilds when you change app code. Targets live in the `Makefile`.
+
+- `make dev` — the one-command stack: brings up the docker infra and waits for postgres, applies migrations, loads seed fixtures (skip with `SEED=false`), installs web + admin deps on first run, starts realtime and tracking as containers, then runs backend + forms + consumer + worker + dashboard + admin in one terminal. Login: dev@pegasusbound.com / password123, with the emailed login code in Mailpit at http://localhost:18025. Ctrl-C stops the app; infra stays up.
+- `make infra` — start the backing services in docker (postgres, redis, nats, mailpit). Run once; leave running. Kafka, Schema Registry, localstack, cloud-tasks, and stripe-mock are gone; the stack is no-cloud by default (NATS, local KMS, filesystem blobs, in-process tasks).
+- `make backend` — run the API natively on `:8080` (applies the embedded migrations on boot against the docker postgres).
+- `make consumer` / `make worker` — run those Go services natively, each in its own terminal. Both register themselves as fleet nodes on their first heartbeat, so they show up in `pegasusboundctl fleet list` without any enrolment step in dev. Workers are interchangeable, so one is enough; run a second `make worker WORKER_ID=<uuid>` in another terminal when you want to watch placement spread mailboxes across a fleet. The workers read encrypted DEKs through the backend's `/internal/dek` endpoint (the prod `http` provider, no worker DB), so `make backend` must be running and their `INTERNAL_API_TOKEN` must match (the targets are pre-wired to match).
+- `make run` — backend + forms + consumer + worker together in one terminal (Ctrl-C stops all).
+- `make forms` — the public forms service natively on `:8090` (`cmd/forms`): builds the `forms/` TanStack app, then serves it plus the embed loader and public submissions. No database; it resolves forms and forwards submissions through the backend's internal API, so `make backend` must be running and `INTERNAL_API_TOKEN` must match (pre-wired). The backend's `FORMS_DOMAIN=localhost:8090` makes dashboard share links point at it; `make forms FORMS_PORT=8091` (matched on `make backend`) moves it when worktrees share the machine. `make forms-web` runs the Vite dev server (:5175) for iterating on the app itself.
+- `make sandbox` — fully working demo environment: seeds the "Sunrise Labs" showcase org (live mailboxes: SMTP -> mailpit, IMAP -> dovecot, credentials sealed with `CREDENTIALS_ENCRYPTION_KEY`) and runs the simulator that plays the internet (delivers mail into dovecot inboxes, opens pixels, clicks tracked links, replies as contacts). Needs `make run` + `make tracking` alongside. Docs: `docs/content/docs/development/sandbox.mdx`.
+- `make tracking` / `make realtime` — the Rust tracking pixel service (:3000) and Elixir/Phoenix websocket fanout (:4000). Deliberately kept out of `make run`; start them only when needed, and only if you have the cargo / elixir toolchains on the host.
+- `make web` / `make admin` / `make site` — frontend dev servers (5173 / 5174 / 4321), pointed at the native backend.
+- `make seed` — load fixtures (after the backend has applied migrations).
+- `make fmt` / `make lint` — format and lint Go.
+- `make installer-demo` — walk the self-host installer's wizard with nothing installed: the real questions and review, a played pull and start. No Docker, no network, no file written. `PEGASUSBOUND_DEMO_FAST=1` collapses the animations while iterating on them.
+- `make installer-check` / `make installer-sha` — everything CI runs against `site/public/install.sh`, and the checksum regeneration that has to follow any edit to it.
+
+Prefer native `make backend` over rebuilding the docker backend image: docker rebuilds are slow because the image bakes in the migrations and the compiled binary, so a one-line change means a full image build + container recreate. The native targets skip all of that. The dockerized hot-reload flow (`make app`) and prod-image smoke test (`make up`) remain available when you specifically need containers.
+
+Dashboard realtime:
+
+- dashboard experiences should be realtime by default. When emails arrive, contacts are added, records change, or any dashboard-visible feature updates, the dashboard should reflect it live without requiring a manual refresh
+- aim for a responsive, Discord-like product feel: presence, counts, lists, detail panes, notifications, and workflow state should stay current across every dashboard feature where live updates are meaningful
+- when changing dashboard behavior, it is acceptable to safely change the API structure if a better solution exists. Before making an API shape change, ask the user how they want to handle it, especially when the current API may already be published or backwards compatibility might require a new API version
+
+Public API quality bar:
+
+- treat customer-facing API changes as contract changes. Prefer additive changes inside a version, and use a new API version for incompatible behavior once an endpoint is published
+- every API-key-capable route must have an explicit API permission gate and, for JWT callers, the matching organization permission gate
+- side-effectful POST/PATCH/PUT/DELETE endpoints should support `Idempotency-Key` or have a documented reason why retries are naturally safe
+- error responses should include stable machine-readable `code` and `request_id` fields in addition to human-readable text
+- list endpoints should use consistent `data` plus `pagination` shapes with opaque cursors; invalid cursors or limits should return `400` instead of being ignored
+- webhook endpoints must stay HMAC-signed, HTTPS by default, and protected against obvious SSRF targets. Only development/self-hosted environments should opt into unsafe webhook URLs
+
+## Dashboard UI Conventions (`web/`)
+
+Everything in the dashboard must use our own theme, not browser/library defaults.
+
+- Number fields: never ship a raw `<input type="number">` with the native spinner. Use the shared `NumberInput` from `@/components/ui/field` — it strips the native up/down arrows (`appearance:none`) and renders our own themed chevron steppers. Do not re-add the default stepper anywhere.
+- Inputs/labels: reuse `TextInput`, `SearchInput`, `Label`, `NumberInput` from `@/components/ui/field`; don't hand-roll raw `<input>`/`<select>` with ad-hoc classes when a primitive exists.
+- Checkboxes: never ship a visible native `<input type="checkbox">`, not even with `accent-*` classes; every browser draws it differently and some draw it badly. Use `Checkbox` from `@/components/ui/checkbox`, a real input with `appearance-none` under our square, so labels, keyboard, focus and click events stay native (`tone="slate"` for option toggles in forms and dialogs, the sky default for row selection; `className` styles the wrapper). A picker row that is itself the control uses the visual-only `CheckSquare`; a native input hidden behind custom visuals (`sr-only`) is fine.
+- Pickers: tag/category multi-selects share one visual language — bordered chip box + framer-motion dropdown with a search header + checkbox-square rows (see contacts `CategoryPicker` and `popup/select/TagSelector`). Reuse `useFlipPlacement` + `useClickOutside`.
+- Detail drawers + their tab bars share one pattern (see `emails/InboxDetails` and contacts `ContactEdit`): a `shrink-0 px-3 flex items-center gap-1 border-b border-slate-200` bar, each tab a `relative h-10 px-2.5 inline-flex items-center gap-1.5 text-[12.5px]` button with a lucide icon, active = `text-slate-900 font-medium` + a `bg-sky-600` underline span. A tab bar or chip row that can overflow goes inside `ScrollStrip` (`@/components/ui/scroll-strip`), which fades the cut-off edge, scrolls on the wheel and keeps the `data-active` child in view; never let it clip silently.
+- Theme tokens: slate borders (`border-slate-200`), sky accents (`focus:border-sky-400 focus:ring-sky-100`, `bg-sky-50 text-sky-700`), `rounded-md`, `text-[12.5px]` base, `h-7` controls, `10px uppercase tracking-[0.14em]` section labels.
+- Multi-select tables: when rows are selected, show a floating bottom-center selection bar with the count + bulk actions (mirror `SelectionBar` in contacts `ContactsTable.tsx`).
+- Row actions must be reachable on touch: never hide the only affordance behind `opacity-0 group-hover` with no mobile fallback. Use `opacity-100 md:opacity-0 md:group-hover:opacity-100`, or surface actions in the detail drawer.
+- Confirmations: never use the native `window.confirm` / `alert` / `prompt`. Use the in-app confirm: `const confirm = useConfirm()` (from `@/hooks/context/confirm`), then `confirm.show(text, onSubmit)`. `onSubmit` is awaited and the provider renders its own loading spinner, so pass an `async` callback (prefer `mutateAsync` over callback-style `mutate`). For the synchronous `if (!window.confirm(x)) return; act()` pattern, restructure to `confirm.show(x, act)`; for close-while-dirty guards, route every close path (Escape handler, backdrop `onMouseDown`, close button) through one `requestClose()` that calls `confirm.show(...)` when dirty. ConfirmProvider is mounted in `app/app/layout.tsx`, so `useConfirm()` works anywhere under `/app`.
+- Row interactions: list rows behave like the campaigns list — clicking anywhere on a row opens that item's detail (drawer or page); right-side action buttons (3-dots / "More") either open a relevant detail/tab or drop a short menu of the actions for that row (the mailbox 3-dots menus Settings and Disconnect). A destructive action belongs in that menu as a `danger` item as well as in the detail's own danger zone, because the selection bar is not where anyone looks to remove one row. Inner interactive controls (checkbox, dropdown trigger, action buttons) must `e.stopPropagation()` so they don't also fire the row's open handler.
+- Prefer realtime over polling: subscribe to the socket and `queryClient.invalidateQueries(...)` on the relevant event instead of `refetchInterval` where an event exists (see `useRealtimeEvents` / `RealtimeManager`).
+- Interaction details are part of "done". Before calling a dashboard change finished, walk the small things a user hits in the first minute, because these are what make the product feel broken even when the data flow is right:
+  - every dropdown / popover / picker closes on click-away and on Escape, including when it sits inside a dialog or drawer. Dialog cards stop `mousedown` propagation so the backdrop does not close them; React's `stopPropagation` also stops the native event, so never hand-roll a click-outside listener: every floating layer closes through `useClickOutside` (`@/hooks/useClickOutside`, which `PopoverMenu` uses too). It listens for `pointerdown` in the capture phase, treats a `[data-floating]` layer it opened as inside but the floating panel or dialog holding it as outside, closes on focus moving into an iframe or a tap landing in a same-origin one (a phone moves no focus), and takes Escape for the innermost layer only, stopping it there and handing focus back to the trigger. A dialog's own Escape handler still bails out while a `[data-floating]` popover or the `[role="alertdialog"]` confirm is on screen
+  - toggles are the shared `Toggle` (sky pill, 32x18) from `campaigns/preferences/components/CampaignPreferenceBoolBox`; never hand-roll a switch. If a whole row toggles on click, the switch itself must `stopPropagation` so it does not toggle twice, and a `<label htmlFor>` pointing at the switch would double-fire too, so use a plain element for the row title
+  - **a page is not shipped until it is routed, linked and titled.** The route table is `web/src/router.tsx` (TanStack Router, code-based): a route carries its tab title in `staticData.title`, and a dashboard page is a lazy chunk listed in `dashboardPages`. A literal `<Link to>` or `navigate({ to })` to a path with no route fails typecheck, so write links as typed paths (`to="/app/campaigns/$id" params={{ id }}`, `search={{ tab: "x" }}`), never template literals. Nav config holds plain strings (`AppNav`, `settings/layout.tsx`), which nothing checks, so after a merge that touched routing check the nav against `router.tsx`. A link to a route with optional params (`/app/unibox/{-$scope}/{-$threadId}`, `/app/settings/billing/{-$tab}`) must set every optional param, `undefined` to drop one, or it inherits the current page's value
+  - **a page opens with its data already there.** Its route loader in `web/src/routeLoaders.ts` prefetches the queries it draws first, through the same `queryOptions` factory its hook uses, and links preload on hover, so a new list page adds both. The dashboard boot (`web/src/lib/boot.ts`) resolves the session, workspace, user and plan before the first paint; nothing under `/app` should gate its first render on those again
+  - **a predictable action is optimistic.** A toggle, rename, label change or row removal patches the cache in `onMutate`, restores the snapshot in `onError` and invalidates in `onSettled`. Anything the server decides (sending, launching, billing, permissions) waits for the answer
+  - every detail page reachable from a list has a way back on all viewports: a "← Section" link above the title (see `campaigns/[id]/layout.tsx`) or a back arrow in its header (see `AutomationFlow`); the header breadcrumb is desktop-only and its crumbs must stay clickable, so it does not count as the only route back
+  - multi-step flows animate between steps (directional slide via `AnimatePresence`, see `NewCampaignDialog`), explain why a step cannot be left instead of only disabling the button, refuse to skip ahead past an incomplete step, and confirm before discarding a dirty draft
+  - a control that does nothing is worse than no control: never ship a checkbox or button whose action cannot succeed (for example "launch after create" when start requires contacts). Remove it or wire it to something that works
+
+## Realtime Collaboration And Presence
+
+The dashboard is collaborative: org members see each other's activity live. Keep these patterns intact when extending features.
+
+### The audit spine
+
+Every `h.auditOrg` / `AuditService.LogAction` call publishes an org-scoped `AUDIT_CREATED` realtime event carrying `action`, `entity_type`, and `entity_id`. The web client maps `entity_type` to react-query invalidations (the `spine` map in `web/src/hooks/useRealtimeEvents.ts`), so every audited mutation refreshes every teammate's lists without a bespoke emit site.
+
+Consequences:
+
+- keeping audit coverage complete IS keeping the dashboard live. A new mutating handler gets org-wide realtime for free by calling `auditOrg` with a proper entity type
+- a new audit entity type needs a matching entry in the frontend spine map
+- dedicated realtime events only exist for non-audited consumer/scheduler flows: `EMAIL_SENT` (campaign send success), `EMAIL_REPLIED` (human replies only, via `WireRealtime` in both backend and consumer mains), `EMAIL_DELETED`, inbox arrivals, tracking opens/clicks, account health transitions
+
+### Org-scoped events
+
+The Elixir subscriber routes on the event BODY: `user_id` -> `user:<id>`, `org_id`/`organization_id` -> `org:<id>`, plus `campaign_id`/`email_account_id`/`operation_id` entity topics. To make an event visible to the whole team, set the `OrgID` field on the specific event struct (do NOT add OrgID to `BaseEvent`; several event structs declare their own `org_id` JSON key and embedding would conflict).
+
+`OrgChannel.can_see_event?` gates org-broadcast events by member permission after normalizing the event type (upcased, separators collapsed): inbox -> `access_unibox`, campaign/task/send/open/click/reply -> `view_campaigns`, contact -> `view_contacts`, account/warmup -> `manage_emails`, member/invitation -> `manage_team`, settings -> `manage_settings`, billing -> `manage_billing`. `AUDIT_CREATED` is deliberately default-allowed (payload is non-sensitive ids; the spine needs all members to receive it). New org-scoped event families must be added to this table.
+
+### Presence
+
+`RealtimeWeb.Presence` (Phoenix.Presence) tracks JWT members on the org channel; API-key (developer) sockets receive events but are never tracked. Clients push `presence:update` with `{page, resource, action}` where action is `viewing | editing | replying | idle` (rate-limited by the existing `ws_event` limiter, strings sanitized and capped).
+
+Web conventions:
+
+- `PresenceProvider` (mounted inside `RealtimeManager`) syncs `presence_state`/`presence_diff` into the zustand `presenceSlice` and pushes route changes automatically
+- detail panes/editors claim a record with `usePresenceResource(resource, action)`; resource strings are `thread:<id>`, `automation:<id>`, `campaign:<id>`, `contact:<id>` — follow this naming for new surfaces
+- show other viewers with `<ResourceViewers resource={...} />` (amber for editing/replying, emerald for viewing); the header avatar stack is `PresenceAvatars`
+- `useRealtimeEvents` early-returns on `PRESENCE*` / `RATE_LIMITED` events; never let presence diffs reach the default invalidation branch
+- `OrgChannel` has a no-op `handle_info(%Phoenix.Socket.Broadcast{}, ...)` clause because its manual PubSub subscription duplicates presence broadcasts to the channel process; removing it crashes the channel on the first presence diff
+
+### Developer WebSocket
+
+API keys with the `REALTIME_SUBSCRIBE` permission (bit 11) can connect to the same socket, presenting the key (or a `wmat_` OAuth token) in the `x-pegasusbound-token` header; the query-string form for them is deprecated and kept only for existing clients, while the 10-minute ws ticket rides the query string. Connection spam is bounded by per-user concurrent-connection caps (plan-based, default 10), per-IP (50), a global cap, join rate limits, and per-key IP restrictions. Documented in `docs/content/docs/api/realtime.mdx` — keep that page in sync with channel/limit changes.
+
+## System Shape
+
+- `cmd/backend`: API and business orchestration
+- `cmd/consumer`: consumes Kafka events and updates platform state
+- `cmd/worker`: execution worker for send/sync operations
+- `cmd/cli`: the `pegasusbound` CLI, the customer-facing one. A signed-in, multi-host client of the public REST API (`internal/cli/*` holds its config, HTTP client and renderers). It never serves HTTP and never touches Postgres; `cmd/pegasusboundctl` is the operator's CLI and keeps the database half. The directory is `cli` and the binary is `pegasusbound`, so every build target names its output explicitly (`-o pegasusbound`), and `go install` needs the rename documented in `docs/content/docs/api/cli.mdx`
+- `cmd/forms`: the public face of hosted lead-capture forms (`internal/formserver`): serves the built `forms/` app, per-form page shells (with the per-form embed CSP), the embed loader and public submissions on their own origin (`FORMS_DOMAIN`). No database; the backend's internal API is its only dependency, like the tracking service
+- `forms/`: the public form page app (React + TanStack Router/Query/Form, Vite CSR build). Renders a published form from the same-origin `/api/forms/:publicID`, submits to `/api/forms/:publicID/submit`; the Go forms service hosts the build
+- `tracking/`: open and click tracking service
+- `realtime/`: websocket fanout service
+- `web/`: in-product frontend (dashboard). Customer-facing only: it holds no platform-admin screens, and operator tooling must not be added back here
+- `admin/`: platform admin panel (:5174), the single operator surface. Workers, users, orgs, warmup, campaigns, analytics, audit. Every route sits behind `RequireAdmin` and the backend's `RequireAdminPermission` gates
+- `qa/`: the proof harness (scripted Playwright flows recording 1080p walkthroughs and stills for pull requests, published with `gh --attach`). Its own package; see `qa/README.md`
+- `site/`: public marketing site (Astro 5 + Tailwind v4). `site/public/install.sh` is the self-host installer served at pegasusbound.com/install.sh and `site/public/cli.sh` is the CLI installer served at pegasusbound.com/cli.sh (with `cli.ps1` for Windows), each with its checksum next to it; see the rules above before touching either
+- `deploy/`: production deploy manifests, infrastructure, and runtime config. `deploy/split-cloud/` is the three-provider shape (control plane on a container host, bus + cache + fleet on machines you own, database + root key + object store in a cloud region), documented at `docs/content/docs/development/split-deployment.mdx`
+- `docs/`: documentation site (docs.pegasusbound.com); product guides, API reference, and self-hosting/engineering docs under `content/docs/development/`
+- `scripts/`: one-off tooling (codegen, migrations, installer checks, local dev utilities)
+- `skills/`: agent playbooks shipped with the repo (`pegasusbound-cli` for the `pegasusbound` CLI, `pegasusbound-api` for the same product surface through `pegasusboundctl`, `pegasusbound-ops` for instance administration, `pegasusbound-install` for standing an instance up and moving it). A command an operator can run is not usable by an agent until it is in one of these
+
+## Worker Topology
+
+Workers are intended to run distributed across many machines, with one worker process per machine.
+
+**There is one kind of worker.** No tier, no type, no risk pool, no egress category. You stand a worker up, it heartbeats, and the control plane decides what runs on it. The only thing an operator may set is an optional free-form `WORKER_REGION` label, and leaving it blank is fine.
+
+Do not reintroduce a worker category. The four that used to exist (`free_tier`, `worker_type`, `risk_pool`, `egress_kind`) were removed in migration `000140` because they all rested on a premise that is false for this architecture: that the worker's IP is the sending identity.
+
+It is not. A worker never talks to a recipient's MX. It authenticates to the customer's own mailbox provider, and that provider delivers from its own outbound pool. So:
+
+- **the worker IP is invisible to recipient spam filtering.** Google strips the submitting client's IP; Microsoft dropped `X-Originating-IP` years ago. A spam-prone mailbox therefore cannot contaminate a healthy neighbour on the same machine, which is why hard risk segregation of workers bought nothing
+- **the worker IP is very visible to the mailbox provider**, where it drives sign-in risk challenges, per-IP auth throttles (`454 4.7.0`) and per-IP rate limits (`421 4.7.28`). Exchange Online also caps SMTP AUTH at ~3 concurrent connections and ~30 msg/min per mailbox, and IMAP at ~8 concurrent sessions
+
+The practical inversion: **IP stability per mailbox beats IP diversity.** Moving a mailbox changes the client address its provider sees and buys a security challenge for nothing, so a migration is a cost, not a win. A fleet where nothing rotates is a healthy fleet.
+
+In production, workers are treated as individually addressable executors:
+
+- each worker has its own `worker_id`
+- email accounts are assigned to a specific worker
+- worker events are delivered through worker-specific Kafka topics
+- the platform can rebalance or migrate accounts between workers, reluctantly
+
+Placement is a score, never a filter (`internal/app/worker/placement.go`). Hard constraints cover only whether the work can be done: heartbeating and health in `healthy`/`watch`. Everything else is a preference term: capacity headroom (projected, so the incoming mailbox's own weight counts), incumbency (weighted highest), region match, tenant blast radius, per-provider crowding on one address, node youth, and foreign tenants for orgs entitled to isolated egress.
+
+Capacity is a target, not a ceiling, and nothing refuses a placement for being over it. Over-target costs more score than any bonus a candidate can earn, so stickiness alone can never keep a mailbox on an over-target worker; it does not outweigh the penalty terms, so a worker with room but crowded with foreign tenants can still lose. When nothing has room the least-overloaded wins with every other preference applied. The target deliberately excludes the age ramp (`Capacity.Target`, not `Effective`): age damping collapses `Effective` to its floor for a new node's first hours, and dividing by that made a one-hour-old worker look overloaded after one mailbox, so joining a worker could not relieve a full fleet. Youth is a small score term instead. The isolated-egress override in `assignment.go` skips scoring entirely, so it checks `OverTarget` explicitly; `Eligible` no longer bounds it. Do not put capacity back into `Eligible`: `base_capacity` is a flat `16` for every worker regardless of the machine, so refusing on it refuses on a guess, and it refused precisely when the fleet was full, dropping assignment into `selectFallback` (first healthy worker, no region, no blast radius, no provider crowding).
+
+Capacity is one number for every worker in cold-mailbox equivalents, because each mailbox declares its own cost through `MailboxWeight`: `smtp_imap` = 1.0, `gmail`/`outlook` = 0.05, warmup-only = 0.4. Those are the `email_provider` enum values as stored; do not invent provider strings for them.
+
+Rotation is gated separately (`internal/app/worker/rotation.go`) and is deliberately reluctant:
+
+| Urgency | Trigger | Residency floor | Destination bar |
+|---|---|---|---|
+| Immediate | worker inactive, not heartbeating, blocked, quarantined | none | anything eligible |
+| Elevated | worker throttled | 6h | anything eligible |
+| Opportunistic | worker over 85% utilization, isolated-egress drift | 72h | must beat the incumbent by `RotationMinScoreGain` |
+
+Isolated egress (the entitlement `plan.IsolatedEgress()`, still stored in `plans.dedicated_workers`) binds an org to a worker through `dedicated_worker_assignments`. It is a strong placement preference, not a pin: the worker carries no marking, so a reserved worker going down never strands the customer.
+
+The relevant code paths are in:
+
+- `internal/app/fleetnode/service.go` (enrolment, heartbeat, desired version)
+- `internal/app/worker/placement.go` (the score)
+- `internal/app/worker/rotation.go` (when a move is allowed)
+- `internal/app/worker/assignment.go` (the service that commits placements)
+- `internal/app/fleet/rebalance.go` (the rotation loop)
+- `internal/repository/pg_worker_placement.go`
+- `internal/infrastructure/db/migrations/000140_worker_decategorization.up.sql`
+
+## The Fleet Is Pull-Based
+
+Every Pegasusbound process that runs on a machine you own is a **node**: `worker` (sends and syncs mail) or `consumer` (processes events). Both share one lifecycle and one registry.
+
+A node joins by running one command with the instance join token, then heartbeats forever. **Nothing is ever pushed to a node.** Everything the control plane wants it to do comes back in the heartbeat reply, which today is exactly one instruction: what version to be running.
+
+Do not reintroduce a push path. Migration `000142` deleted the whole of it — the Hetzner provider, `provisioning_templates`/`_jobs`/`_policy`, `worker_profiles`, `aws_credentials`, the SSH orchestrator and every `workers.ssh_*` column — because onboarding a machine you already own does not need a cloud API or a keypair, and an update does not need someone to shell in and run it.
+
+Shape:
+
+- `fleet_nodes` is the registry every role shares: identity, region, address, version, liveness, resource usage. `workers` is the placement extension and holds only `account_count`, `health_state`, `load_score`; `workers.id` IS the node id, enforced by a foreign key
+- a node is created by enrolling, never by an admin form. `EnsureWorkerRow` adds the placement half when a node declares itself a worker
+- liveness lives on `fleet_nodes.last_seen_at` and nowhere else. `models.Worker` is a flat view over `workers JOIN fleet_nodes`, so read it through `workerSelect` rather than adding a second source of truth
+- `models.NodeLivenessWindow` is the one definition of live. The node paces its own beat at a third of it, from the value the server returns
+
+Auto-update:
+
+- `internal/app/releases` resolves the head of the configured channel from GitHub Releases and writes the tag to `admin_settings` under `fleet.release`. It updates nothing itself
+- the heartbeat reply carries `desired_version`; the node writes it to a file and a systemd timer (`pegasusbound-node-update`, installed by the join script) pulls and restarts. The process being replaced is never the process doing the replacing
+- an empty `desired_version` means "no opinion" and must never be read as "downgrade to nothing". A node that cannot be told what to run keeps running what it has
+- a per-node `pinned_version` overrides the fleet target, for canarying or holding a machine back
+- **the version names the build, not just the release.** The default images are CGO-free and carry no librdkafka, so a node running one cannot speak Kafka: it would take `EVENTBUS_PROVIDER=kafka` from its rendered env and fail at boot. `imageVariant` in `internal/app/fleetnode/service.go` appends `-kafka` to every version an instance on Kafka hands out, pins included, because the control plane is the only side that knows which bus it runs. The node needs no change for this: `join.sh` writes the resolved version to `PEGASUSBOUND_VERSION`, the node reports that back, and the updater compares against it, so the suffix stays consistent through join, heartbeat and self-update. `FLEET_IMAGE_VARIANT` overrides it, and set-and-empty disables it
+- **the backend is deliberately excluded.** It is what tells everyone else their version; a self-update that goes wrong leaves nothing to recover with
+
+The join script is `internal/api/handler/nodescript/join.sh`, embedded and served at `GET /join.sh` by the instance itself, so a self-hosted fleet never depends on a vendor host and always gets a script matching its backend. There is exactly one copy: do not add a mirror under `scripts/` or `site/public/`. All the POSIX-sh rules for published scripts apply to it (`sh -n`, `shellcheck -s sh`, everything in a function, `main "$@"` last).
+
+Run `make join-check` before pushing a change to it; it is a prerequisite of `make lint`. It asserts on what `join.sh --print-unit` *renders*; an earlier version compared a heredoc copied into the checker itself and stayed green when the original bug was put back. It exists because nothing covered the script and three separate defects shipped into the branch as a result: a systemd unit built with `$(cat ...)`, which systemd never expands, so the machine restart-looped while the script printed "Done"; a missing bind mount, so the node wrote its update target inside the container and auto-update silently never ran; and an env file assembled by picking a multi-line value back out of JSON with sed, which appended a stray fragment. Assert on what the shell *renders*, not on the source text: every one of those parsed fine. The two invariants that leave no trace in the rendered unit (that `main` validates before writing anything, and that `install_units` prepares the blob root) are checked at their call sites instead, matched on the first field, which a mention inside a string or a comment cannot satisfy. That does mean those calls have to stay standalone statements, which `join.sh` notes above each set of asserted calls; a looser regex was tried and turned out to be satisfied by the name appearing inside a `warn` message, which is a far worse failure than a reformat that reports itself. Every assertion there was mutation-tested: the bug it guards was reintroduced and the check was watched to fail.
+
+Two rules that follow from those:
+
+- **systemd runs no shell.** No `$(...)`, no globbing, no word splitting in a unit. A value that has to vary comes from an `EnvironmentFile` as `${VAR}`, which expands to exactly one argument
+- **What the node may write and what root reads are different directories.** The container runs as uid 1000; it gets `/var/lib/pegasusbound/node` and nothing else. `image-ref` lives one level up, root-owned, because systemd feeds it to a root `docker run --network host` and a node that could rewrite it would choose the image root executes
+
+The env the join endpoint hands a node is rendered from the backend's own environment (`nodeEnvKeys` in `internal/api/handler/fleet_nodes.go`). Three things are decided rather than copied:
+
+- **`PRIMARY_DB` reaches a consumer and never a worker.** A worker gets relational data through the internal API and nothing else; a consumer opens Postgres itself and cannot boot without the DSN. Role is known at render time, so the exclusion lives exactly where it belongs
+- **The crypto and blob providers are translated, not copied** (`nodeProviders`), so no machine in the fleet carries a cloud credential
+- **Every name sent must be one the node's own code reads.** `S3_BUCKET` and `KMS_KEY_ID` were sent for a while and read by nothing, against a storage layer reading `BLOB_BUCKET` and a KMS factory reading `KMS_AWS_KEY_ID`, so an AWS-backed node silently used the default bucket and the default key alias. `internal/api/handler/fleet_nodes_test.go` asserts on the rendered file
+
+`/etc/pegasusbound/node.local.env` is the operator's half: created once by `join.sh`, never rewritten, and passed to the container after `node.env` so it wins. That is where a value the control plane cannot know belongs, and it is why nothing needs to be hand-edited into a file the next join replaces.
+
+Operator surface: `pegasusboundctl fleet` (join-token, list, show, remove, pin, version, channel) and the admin panel's Fleet section. There is no install, restart, logs or reboot action anywhere, because nothing reaches into a machine.
+
+## Warmup Pool Model
+
+Warmup traffic is also separated by pool:
+
+- `free`
+- `premium`
+
+This is modeled in:
+
+- `internal/infrastructure/db/migrations/000001_baseline.up.sql` (the `warmup_pools` and `warmup_pool_participants` tables)
+- `internal/infrastructure/db/migrations/000156_seed_warmup_pools.up.sql`
+- `internal/repository/pg_warmup.go`
+- `internal/tasks/email_task.go`
+
+Migration 000156 guarantees exactly one pool per type on every instance, under `models.WarmupPoolFreeID` and `models.WarmupPoolPremiumID` (`warmup_pools_pool_type_key` makes it structural, and the migration moves any pre-existing pool onto those ids). Nothing else may insert into `warmup_pools`: not the sandbox, not the dev scripts, not a test fixture.
+
+Crossing tiers is an exchange and lives in one place: `WarmupPartnerCandidates` in `pg_warmup.go` returns a sender's own tier plus, when the sender has fewer recipients outside its own workspace than `max(WarmupPoolTierFallbackFloor, warmup_max)`, that many proven free mailboxes from other workspaces (healthy, never blocked, members for `WarmupPoolFallbackMinAgeDays`, workspace not restricted or suspended), best first (Google or Microsoft, then members for `WarmupPoolBorrowSeasonedDays`, then actively sending; random within a rank), and for a free sender that meets the same bar, the premium mailboxes that verifiably wrote to it within `WarmupPoolReturnVisitDays`. Siblings never count toward the floor: a customer with many mailboxes and few premium peers otherwise never borrows and warms against itself. `models.WarmupPoolBorrowsFrom` and `models.WarmupPoolReturnsTo` are the two directions and mirror each other, so nothing unsolicited from the free tier reaches a paying inbox: the paying side always opens the exchange. Before this half existed a thin premium tier sent into the free tier and received almost nothing (#633). Every candidate carries the pool it was drawn from (`PoolType`) and how it got there (`Origin`); the selector and the scheduler both read that one method, so they cannot disagree about who is reachable. A routing rule of weight 0 is an exclusion, not a weight: the candidate is dropped before the draw (and refused on the reply-back path), so a pool of one cannot smuggle it back, and a tick with nothing left ends in `errAllPartnersExcluded` rather than mailing an excluded address (#501). The selector draws its own tier's fresh partners before a borrowed one, but a return visit ranks with the own tier, or a free mailbox with a hundred fresh siblings would never pay a paying inbox back. Every candidate is gated with `CanParticipate` pinned to the pool it was drawn from; gating a borrowed recipient against the sender's pool is what made borrowing dead for months (#495). The reply-back (`directedWarmupPartner`) crosses tiers on the same terms and is refused when the free workspace is restricted.
+
+Reciprocity is a weight and a cap, both read off the candidate. Each carries its verified sends and arrivals over seven days; `Starvation` (how far behind an inbox is on what it sent) multiplies its draw weight by up to `1 + reciprocityBoostK`, fading to nothing at parity, so the pool's traffic flows to whoever is owed the most and settles there instead of overshooting. `InboundDailyCap` (`WarmupInboundDailyMultiple` times daily sends, between `WarmupInboundDailyFloor` and `WarmupInboundDailyCeiling`) is applied inside `WarmupPartnerCandidates`, and a free sender sees every inbox as full at `WarmupFreeInboundSharePercent` of it, so the rest of each inbox's day is kept for premium senders. A recipient at its cap is offered to nobody for the rest of the day and the scheduler's per-day volume cap (`min(target, len(candidates))`) sees the same set. A sender with nobody left to write to sends nothing that tick and rechecks later; do not add a fallback that mails somebody anyway.
+
+Keep this separation intact. Free-tier accounts should not silently mix into premium warmup traffic, and dedicated-worker accounts should still follow the intended warmup pool policy explicitly rather than by accident.
+
+## Worker Networking Rules
+
+The worker should stay operationally lightweight because there can be a lot of them.
+
+Design intent:
+
+- workers should not depend on PostgreSQL or other direct SQL access
+- workers should receive commands from Kafka
+- workers should publish results back through Kafka
+- workers may talk to infrastructure-style services that scale independently, such as S3, KMS, and cache layers
+- relational data the worker needs (encrypted DEKs, the messageId→internal-email map) is reached over the backend's internal HTTP API (`/api/v1/internal/...`), never via direct SQL
+- worker-local state should be minimal and disposable
+- **a node holds no cloud credential.** The two privileged operations it needs are brokered through the internal API: `KMS_PROVIDER=brokered` posts sealed keys to `/api/v1/internal/dek/decrypt` and `BLOB_PROVIDER=brokered` asks `/api/v1/internal/blobs/presign` to sign one operation on one key. `renderNodeEnv` translates `aws`/`s3` into these automatically when rendering a node's env, so an IAM key never reaches a machine in the fleet. Blob bytes still travel node↔store directly; only the signature comes from the control plane
+- every route only a node calls (those two brokers, data keys, the message map, sync lookups, worker config, the fleet heartbeat) takes `NODE_BROKER_TOKEN` (falling back to `INTERNAL_API_TOKEN`), never the token the internet-facing tracking and forms services carry; the edge token reaches only tracked links, domain redirects, page hits and forms. A new internal route goes in the group matching who calls it. Presign refuses any key outside `nodeKeyPrefixes`; extend that list when a node starts touching a new prefix, because a signed URL is the whole authorisation
+
+Current code matches that intent in `cmd/worker/main.go`: the worker boots Kafka, Redis cache, KMS, and S3 clients, and reaches DEKs + the email message map through the backend's internal API, but does not open a PostgreSQL connection.
+
+When changing worker behavior, preserve that boundary unless there is a very strong reason not to.
+
+## Mail Servers Are Dialects
+
+A customer can connect any IMAP/SMTP server, and every one of them reads the RFCs a little differently. Production already syncs well over a hundred distinct hosts: Gmail, Zoho (each region its own host), Dovecot behind OVH, Hostinger, GoDaddy and most shared hosting, Infomaniak, Seznam, Lark, and a long tail of one-company servers. Supporting "every mailbox" means a server's quirk may cost us efficiency, never the mailbox.
+
+What makes this sharp is that go-imap closes the whole session on any reply it cannot decode. One unparseable line in an optional extension's answer surfaces as `SERVER_UNREACHABLE` on every pass, forever, on a server that is up and accepting the login. `unreadableReply` in `internal/client/smtpimap/imap/err.go` tells that apart from a dead network (an io failure keeps its own error; a grammar mismatch is `imapwire: ...`), and the worker logs `imap: server sent a reply that could not be read` with the host and the reply. That line is the only place the real cause shows.
+
+Rules:
+
+- **ask in the form the most clients exercise.** A server's mainstream path is the one Thunderbird, Apple Mail and Outlook hit every minute; its rarely used corners are where the bugs are. The CONDSTORE incremental set is `UID FETCH 1:* (UID) (CHANGEDSINCE n)` for that reason, not `SEARCH MODSEQ`: Dovecot answers the ESEARCH form with a parenthesised `(MODSEQ n)` go-imap cannot read, and Zoho answers an empty plain one with a double space
+- **an optional capability degrades, it never fails the mailbox.** When a server's answer to one form cannot be read, the client steps down to the next form for good and says so once (`changedSinceMode` in `client.go`; `sinceRefused` is the same pattern for dated SEARCH). The state lives on the `Client`, so it outlives a reconnect, and the last rung is the plain UIDNEXT path every server supports. Step down only on evidence about the dialect: an unreadable reply, or a refusal of the form against a folder that stayed selected, which leaves the session usable so the next form is asked in the same pass. Never on a network error or a transient NO (`UNAVAILABLE`, `INUSE`, `SERVERBUG`, a bare `UID FETCH failed`)
+- **read capabilities while the session is healthy.** A session the server's reply just closed reports none, so anything the ladder needs (`eSearch`, `condStore`) is recorded at connect
+- **a fix for one provider must not move the others.** #858 fixed Zoho by moving every server onto ESEARCH, which stalled every OVH mailbox for days. Add the provider's real reply to the dialect table in `search_modseq_test.go` (or its equivalent for the command you touch) and keep the whole table green, rather than writing a test that only knows the one server
+- **check a change to what the sync sends against real servers before it ships.** The cheap version: one login per distinct host, from the worker each mailbox already sits on (a new client IP can earn a provider security challenge), running the changed command and reporting only per-host results. Never print a credential or message content while doing it
+- **keep the server's words.** An `[ALERT]` reaches the owner verbatim through `imapErrDetail` (Zoho's `The server details you are using seems incorrect` is how they learn the account lives in another Zoho region). Map one in `classifyAlert` only when it is a known throttle or credentials case
+
+## Encryption Model
+
+Pegasusbound uses envelope encryption for application secrets and sensitive payloads.
+
+High-level flow:
+
+- AWS KMS is the root of trust
+- each organization gets a data encryption key (DEK)
+- the plaintext DEK is used for application-layer encryption and decryption
+- the encrypted DEK is stored, not the plaintext DEK
+- decrypted DEKs are cached for reuse
+
+Current implementation:
+
+- KMS generates a 32-byte DEK for AES-256
+- the encrypted DEK blob is base64-encoded and stored via the pluggable `encryptedkeys.Store` (the `postgres` backend writes the `organization_encrypted_keys` table; workers use the `http` backend, which proxies to the backend's `/api/v1/internal/dek` endpoint)
+- the plaintext DEK is cached in Redis with a TTL
+- encrypted fields are sealed with AES-GCM and then base64-encoded
+
+Main code paths:
+
+- `internal/app/cipher/cipher.go`
+- `internal/app/cipher/encrypt.go`
+- `internal/app/cipher/decrypt.go`
+- `internal/app/cipher/cache.go`
+- `internal/infrastructure/kms/encryption.go`
+- `internal/infrastructure/kms/decryption.go`
+- `internal/infrastructure/encryptedkeys/` (`store.go`, `factory.go`, `postgres.go`, `http.go`)
+- `internal/infrastructure/kms/brokered.go` (the node-side provider that holds no key material)
+- `internal/infrastructure/storage/brokered.go` (the node-side blob store that holds no bucket credential)
+- `internal/api/handler/internal_dek.go` (the worker-facing DEK proxy endpoint, and the decrypt broker)
+- `internal/api/handler/internal_blobs.go` (the blob presign broker)
+
+Operational guidance:
+
+- do not introduce plaintext storage of secrets or message content where the current design expects encrypted values
+- DEKs are per-organization and live in the `organization_encrypted_keys` Postgres table behind the `encryptedkeys.Store` interface (provider selected by `ENCRYPTED_KEYS_PROVIDER`: `postgres` for backend/consumer, `http` for workers). DynamoDB is no longer used anywhere; do not reintroduce it. Losing a DEK is unrecoverable, so any change to DEK storage needs a migration plan. Do not reintroduce per-user DEKs: mailboxes, integration tokens, and message content are organization assets, and keying them by user breaks when that user is offboarded
+- if workers need access to encrypted payloads, prefer passing encrypted material plus access to KMS-backed decryption primitives, or an internal backend API, rather than introducing direct SQL dependencies
+- be explicit about which fields are encrypted at rest in app code versus stored in infrastructure services like S3
+
+## Sending Safety Policy
+
+Cold email safety should be mailbox-first, not worker-first.
+
+Do not think of a worker as having one flat global send limit. A worker's safe outbound volume should be the sum of the budgets of the mailboxes assigned to it, with volume spread across many mailboxes and many worker IPs instead of concentrated through one runtime.
+
+### Hard product defaults in this repo
+
+These are the current built-in defaults and guardrails:
+
+- default cold campaign cap per mailbox: `50` emails/day
+- default minimum gap per mailbox: `600` seconds between sends
+- default warmup start per mailbox: `10` emails/day
+- default warmup ceiling per mailbox: `40` emails/day
+- default warmup ramp: `+1` email/day
+- `campaign_limit` updates are validated up to `config.LimitMax` (`5000`); the dashboard warns above `100`
+
+Relevant code:
+
+- `internal/config/constants.go`
+- `internal/models/email.go`
+- `internal/repository/pg_email.go`
+- `internal/scheduler/campaign_scheduler.go`
+- `internal/scheduler/email_scheduler.go`
+- `internal/scheduler/warmup_scheduler.go`
+
+### Recommended operational posture
+
+Treat these as operational heuristics, not protocol guarantees:
+
+- for a fresh or recently connected mailbox, start cold outreach around `10-20/day`
+- ramp slowly until the mailbox proves stable
+- use `30-50/day` as the normal safe band for most cold outreach mailboxes
+- do not raise a mailbox above the default `50/day` casually
+- anything above `50/day` per cold mailbox should require positive reputation signals, low complaint rates, and explicit review
+- never jump a new mailbox directly to high volume
+- preserve spacing between emails; avoid bursty send patterns from the same mailbox
+
+Warmup posture:
+
+- start around the repo default of `10/day`
+- ramp gradually instead of doubling volume abruptly
+- keep warmup and cold outreach budgets separate in reasoning
+
+### Worker-level distribution rule
+
+Distribute by mailbox budget, not by a per-worker sending target. Note what this rule is and is not for: spreading mailboxes across workers does **not** improve recipient-side deliverability, because the worker is not the sending identity (see Worker Topology). It limits blast radius and keeps any one address from crowding one provider's auth rate limits.
+
+- no worker should become a concentration point for a large fraction of one customer's mailboxes, because losing it stops that fraction of their sending
+- keep a worker's total planned volume equal to the sum of its mailboxes' caps, not an independent higher target
+- avoid piling many mailboxes of the same provider onto one worker; that is the combination that earns a per-IP auth throttle (`providerSoftCap` in `placement.go`)
+- prefer adding workers over increasing per-worker density, but do not churn existing mailboxes to achieve it
+
+Increases in volume should come from more healthy mailboxes, never from forcing a small number of inboxes to send too much.
+
+### Internet research constraints
+
+Current external guidance reinforces conservative limits:
+
+- Google bulk sender guidance requires SPF, DKIM, DMARC alignment, one-click unsubscribe for marketing/subscribed mail, and says to keep spam rate below `0.10%` and avoid reaching `0.30%`
+- Microsoft Exchange Online documents platform send limits, but also explicitly says customers sending legitimate bulk commercial email should use specialized third-party providers rather than treating Exchange Online as bulk-mail infrastructure
+
+That means Pegasusbound should stay conservative by default:
+
+- low complaint rate matters more than chasing maximum throughput
+- low spam rate matters more than open-rate screenshots
+- gradual warmup and distributed sending matter more than maximizing one mailbox or one worker
+
+## Warmup Process
+
+Warmup exists to build and maintain sender reputation by sending low-risk traffic gradually, spacing it out over time, and generating normal mailbox activity patterns instead of sudden bulk spikes.
+
+### Current product behavior
+
+Warmup is currently a paid-only feature at the product layer.
+
+This is enforced in:
+
+- `internal/app/feature/gate.go`
+- `internal/tasks/email_task.go`
+
+Important nuance:
+
+- the database and repository model still support `free` and `premium` warmup pools
+- the task flow currently blocks non-paid organizations from using warmup
+- so the architecture supports pool separation, but product access is effectively premium-only right now
+
+Treat that as the current truth unless product requirements change.
+
+### How warmup works in this codebase
+
+The warmup task flow currently does the following:
+
+- checks that the mailbox's organization is allowed to use warmup
+- chooses a partner mailbox from the configured warmup pool
+- avoids selecting the same partner too frequently
+- sometimes replies to an existing warmup thread based on `warmup_reply_rate`
+- otherwise sends a new plaintext warmup message
+- creates a warmup verification token
+- sends the email through the assigned worker
+- increments daily warmup stats
+- schedules the next warmup task using gradual volume progression
+
+Relevant code:
+
+- `internal/tasks/email_task.go`
+- `internal/scheduler/warmup_scheduler.go`
+- `internal/repository/pg_warmup.go`
+- `internal/infrastructure/db/migrations/000156_seed_warmup_pools.up.sql`
+
+### Pool behavior
+
+Warmup pools are mailbox pools, not campaign lists.
+
+The intent is:
+
+- only other participating mailboxes are used as warmup recipients
+- recipients can be blocked from the pool if their placement and complaint rates or their treatment of received warmup mail look bad
+- repeated pairings should be reduced
+- warmup should look like low-volume natural traffic, not repetitive synthetic blasting
+
+Pool safety signals in code include:
+
+- recent-partner avoidance
+- warmup token validation
+- single-use, recipient-bound tokens, so warmup mail cannot be replayed or redirected
+- spam-score tracking
+- auto-blocking from pools
+
+### Recommended paid-pool policy
+
+For paid warmup pools:
+
+- only use warmed, valid, monitored mailboxes as participants
+- do not mix in trial, temporary, or low-quality inboxes just to inflate pool size
+- keep volume gradual and spaced
+- maintain conversational behavior, including some replies, instead of only one-way sends
+- keep warmup running even after campaigns begin, rather than stopping immediately once a mailbox is "ready"
+
+### Internet research summary
+
+Current provider guidance and deliverability references support the same shape:
+
+- warmup means gradual volume growth over days or weeks, not instant scale
+- start with low volume, then increase only while performance stays healthy
+- use authenticated domains and keep complaint/spam signals low
+- shared pools can help smaller senders, while higher sustained volume may justify dedicated IPs or dedicated pools
+
+Concrete external guidance:
+
+- Postmark describes domain warmup as slowly and steadily increasing volume over a period of weeks, often reaching stable behavior in `3-6 weeks`
+- Mailgun describes IP warmup as gradually increasing email volume from an IP to let mailbox providers observe behavior and build reputation
+- Mailgun also notes that shared IPs do not need dedicated IP warmup in the same way, while dedicated IPs do
+
+### Practical interpretation for Pegasusbound
+
+For Pegasusbound, the safest interpretation is:
+
+- warmup should be gradual per mailbox
+- pool quality matters more than pool size
+- paid warmup pools should remain isolated from lower-trust traffic
+- dedicated-worker customers may still participate in premium warmup logic, but their sending reputation should be evaluated mailbox-by-mailbox, not assumed safe just because they have isolated infrastructure
+
+## Fraud And Abuse Detection
+
+Pegasusbound does not currently appear to rely on one centralized ML fraud engine.
+
+Instead, the codebase uses layered abuse controls and trust signals across auth, API usage, warmup behavior, tracking, and mailbox sync.
+
+### Main anti-abuse layers
+
+- CAPTCHA on auth-sensitive entry points
+- per-user API rate limiting
+- WebSocket rate limiting
+- warmup-token verification (single-use, recipient-bound)
+- warmup spam-score tracking and auto-blocking from pools
+- tracking-event deduplication and replay resistance
+- deliverability-event idempotency and suppression lists
+- worker-side sync fair use (the sync governor: lanes, deferral, flood and chronic-overage escalation)
+- admin ban and manual override controls
+
+### Auth and signup protection
+
+Authentication flows use Cloudflare Turnstile:
+
+- login
+- registration
+- password reset and its confirmation
+
+Login and registration code confirmation are covered by the captcha on the start step: the signed, single-use session it issues is what the confirm step accepts.
+
+The Turnstile verifier also checks:
+
+- remote IP format
+- optional expected hostname
+- challenge freshness to reduce replay risk
+
+Relevant code:
+
+- `internal/pkg/captcha/turnstile.go`
+- `internal/app/auth/login.go`
+- `internal/app/auth/registration.go`
+- `internal/app/auth/reset_password.go`
+
+### API and realtime throttling
+
+The backend applies user-level rate limiting by category, backed by Redis and plan/user limits.
+
+The realtime service separately rate-limits:
+
+- websocket joins
+- websocket messages
+- websocket events
+
+This is not just performance protection; it is also an anti-abuse boundary against automated flooding and noisy clients.
+
+Relevant code:
+
+- `internal/api/middleware/ratelimit.go`
+- `internal/app/ratelimit/service.go`
+- `realtime/lib/realtime/rate_limiter.ex`
+
+### Warmup fraud detection
+
+Warmup has the clearest explicit abuse-detection path in the repo.
+
+Signals used:
+
+- every warmup email carries a verification token, minted by the platform, single-use, bound to its recipient
+- no inbound token is evidence against the mailbox that received it. It did not present the token; its worker synced whatever landed in its inbox, and inbound mail is attacker-controlled: every pool member holds tokens naming itself and a partner, and forwarding three to another member used to block that member for 30 days. The recipient check already makes a token worthless anywhere but its own destination, so nothing is charged on that path (#468, #481). Do not reintroduce a charge there, whether gated by a window, a folder check, a clock or by which pair the token names; each of those was tried and each was a way to be wrong (#477, #480)
+- tampering with warmup mail a mailbox verifiably received (deleting it, flagging it as spam) is attributed to that mailbox, because only its owner can do it. It is a ladder, not a first-strike ban: `evaluateMetrics` counts a deletion and a spam move as one strike each over the seven-day window, and warns at one, quarantines at two and blocks at four. No provider names who moved a message into spam (Microsoft's ZAP, Workspace post-delivery scanning and client junk filters look exactly like a user's report), so a spam move is never charged on sight. A spam label on mail that arrived in spam is the filter's (`warmup_received.landed_spam`; Gmail can report it as a later label change) and is not even held. Any other move is held in `warmup_spam_moves` and `attributeSpamMove` (`internal/app/consumer/warmup_spam_attribution.go`) decides it after `config.WarmupSpamMoveSettleMinutes`: provider when the same sender was junked in another workspace within a day (which also withdraws owner verdicts it explains) or the move came straight after arrival with nobody there; owner when `mailbox_owner_activity` shows the owner at the mailbox around it, or a mailbox in use keeps junking many senders nobody else does; nobody otherwise. Owner activity is only a read, unread or star change the provider reported that our store did not already hold, on mail past its arrival grace, so Pegasusbound's own echoes and a filter finishing delivery never count. Only an owner verdict strikes the recipient and files a complaint against the sender; the rest are placement (`tampering*Strikes` in `internal/app/warmup/service.go`). One deletion is someone tidying the folder by hand until proven otherwise (#635). `RecordTampering` only records the event and re-evaluates, so a sweep reaches the same answer; a tampering block carries a term like every other band and never requires review
+- a deletion is a strike only inside `config.WarmupDeletionStrikeHours` of arrival (`warmupDeletionCounts` in `internal/app/consumer/event_remove_email.go`), and never for a receipt the retention sweep has retired. The engagement a message earns happens in its first hours; after that the platform deletes it itself (#637), so a later removal, whichever of the owner, Gmail's Trash purge, a server retention rule or our own sweep did it, is housekeeping. Gmail's Delete arrives as the `TRASH` label and is judged there on the same rule, because the `messagesDeleted` history record only comes when Trash is emptied, weeks later and in a burst. Do not widen the window or count a removal past it: every mailbox on a fixed quota has to be able to clear the folder
+- a removal is never a strike on its own. Graph reports a move exactly like a delete, and a provider's filter, a mailbox rule, another Pegasusbound instance syncing the same mailbox (a self-hosted instance warming in Pegasusbound Cloud) or our own filing can all move warmup mail. A fresh removal publishes a `verify_removal` warmup action; the worker searches the whole mailbox by Message-ID (`internal/app/worker/event_warmup_verify.go`) and answers `WARMUP_REMOVAL_CHECKED`, and `HandleWarmupRemovalChecked` (`internal/app/consumer/warmup_removal_check.go`) records a strike only for a message in the trash or gone. Found anywhere else withdraws any strike for it (`WithdrawTampering`), and a tampering pause or block is re-decided on the strikes left in the seven days before it was imposed (never on today's window, which old strikes have aged out of), then lowered, shortened from its original decision time, or lifted. The revision lands on the pool row, or on the address's ledger row when no mailbox with the address is in a pool, the one write to `warmup_reputation_ledger` outside its trigger, so a withdrawn hold is not seeded back on rejoin. A search that fails or cannot tell (IMAP only sees synced folders) charges nothing. `warmup_tampering_events.verified_at` is NULL only on strikes from before the search; `StartWarmupTamperingRecheck` asks for those (`Recheck`), stamps `verify_requested_at` and asks again after six hours while unanswered. A recheck never adds a strike: present or retired-by-retention withdraws it, anything else stamps `verified_at` and it stands. Tampering events are kept at least `config.WarmupTamperingKeepDays` so the strikes behind a live hold are there to re-decide it. Gmail's `TRASH` label needs no search, since it is the message entering the trash. Do not add another path that records a deletion without the search; the self-move marker is only a shortcut that skips it for our own filing
+- warmup mail is retained by the platform, not the owner: `StartWarmupMailRetention` (`internal/app/consumer/warmup_mail_retention.go`) retires every received copy and every sender's copy past the mailbox's window (`email_accounts.warmup_retention_days`, else `retention.warmup_mail_days`) and publishes `WarmupActionDelete` to the worker, which trashes it on Gmail, deletes it on Graph, expunges it on IMAP and drops the stored body. The row is retired only after the action is on the bus, so a failed publish is re-offered. The same loop prunes tokens, receipts, tampering events and spam reports past `retention.warmup_event_days`; `warmup_statistics` carries the analytics and is never pruned
+- accounts can be auto-blocked from warmup pools
+
+Current auto-block thresholds in code:
+
+- there is no accumulating spam score. It was a ratchet fed +5 a placement and +10 a complaint with no denominator, so a busy healthy mailbox and a small struggling one reached the same number and no threshold could separate them; nothing ever read it and it is gone (#491, migration 000157). The bands that act are placement, complaint, bounce and tampering, each with a sample floor, and `last_health_score` carries the severity they decided
+
+Relevant code:
+
+- `internal/app/consumer/event_new_email.go`
+- `internal/repository/pg_warmup.go`
+- `internal/infrastructure/db/migrations/000156_seed_warmup_pools.up.sql`
+
+### Paid pool protection policy
+
+Protecting shared paid-pool reputation is more important than maximizing access for one risky mailbox.
+
+Do not wait for an inbox to reach an extreme failure state before acting.
+
+Important:
+
+- complaints, bounces and tampering are things a mailbox does to other people, and they act early
+- spam placement is a reading of reputation, not misconduct, and warming is how it recovers, so it only ever slows a mailbox down: watch at `10%`, throttled (half volume, warmup keeps running) at `20%`, and nothing past that. It never quarantines, blocks or needs an appeal. Do not add a placement band above throttled
+- a band a mailbox is already in lifts only below `0.75` of the line that set it (`spamPlacementExitFactor`), so a mailbox near a line is not flipped and announced on every delivery
+
+How placement is read (`WarmupPlacementEvidence` in `internal/models/warmup_deliverability.go`, `placementEvidenceSQL` in `internal/repository/warmup_placement_sql.go`, the one definition behind the health bands and the advisor):
+
+- over verified deliveries (`warmup_received`), not over sends
+- only Google, Microsoft and Yahoo recipients judge a sender. They filter on sender reputation, which is what cold mail is judged on; a small host runs its own filter, so its spam folder is not evidence of spam and is never held against a sender, in the bands, the ramps (`majorRecipientSQL`) or the advisor. A host that junks half of everything once froze the ramp permanently and quarantined healthy mailboxes
+- the headline inbox rate (`WarmupPlacementWindow.Rate`) and the daily rolling rate are taken at the same three providers only; a mailbox whose mail reached only small hosts has no rate, never one built from them
+- partner selection draws a small-host recipient whose own filter junks what it receives less often (`FilterJunkRate`, `recipientFilterPenaltyK`), never excludes it, and never reads this at the big three, where a junk verdict is the senders' reputation
+
+Use separate metrics for separate failure modes:
+
+- user complaint rate: recipients explicitly mark mail as spam
+- spam-folder placement rate: warmup or seed observations indicate messages are landing in junk/spam
+- bounce rate: especially hard bounces
+- mailbox-sync abuse and provider throttling
+
+Recommended internal policy for shared paid pools:
+
+- start evaluating after a minimum sample size
+- sample floor for spam placement: at least `20` verified warmup deliveries in the last `7 days`
+- suggested sample floor for complaints: at least `100` delivered emails in the last `30 days`
+
+Suggested automatic actions:
+
+- warning band:
+  spam placement at the big three `>= 10%` over the last `20+` verified warmup deliveries there
+  or complaint rate `>= 0.03%`
+  Action: lower warmup volume, increase spacing, increase monitoring
+
+- throttle band:
+  spam placement at the big three `>= 20%`
+  Action: warmup keeps running at half volume and double spacing; cold volume halved; lifts on its own
+
+- quarantine band:
+  complaint rate `>= 0.10%`
+  or bounce rate `>= 5%`
+  or repeated tampering with received warmup mail
+  Action: immediately remove mailbox from the shared paid warmup pool for `7 days`; cold sending paused
+
+- hard block band:
+  complaint rate `>= 0.30%`
+  or bounce rate `>= 10%`
+  or clear abuse indicators such as repeated spam flags on received warmup mail
+  Action: block mailbox from shared paid pool for `30 days`
+
+The complaint and bounce thresholds are intentionally stricter than the point where large providers start penalizing senders, because shared warmup pools should act before provider-level enforcement hits the IP reputation.
+
+### What should happen when a paid-pool mailbox is quarantined
+
+When a mailbox breaches the quarantine or hard-block band:
+
+- it should not be selected as a warmup sender
+- it should not be selected as a warmup recipient
+- it should not continue using the shared paid warmup pool
+- campaign sending should be throttled or paused if the same mailbox is also used for cold outreach
+
+Best option:
+
+- move it to a separate recovery state or recovery pool that is isolated from the main paid pool
+
+If a recovery pool does not exist yet:
+
+- block warmup access entirely until the cooldown expires and the mailbox requalifies
+
+### Re-entry requirements
+
+Do not automatically restore a blocked mailbox just because time elapsed.
+
+Two mechanisms make the sentence real, and both are easy to undo by accident:
+
+- a quarantine or block holds until `blocked_until` whatever fresh metrics say. The floor is inside `UpdateParticipantHealth`'s SQL (`internal/repository/pg_warmup.go`), decided against the row at write time, so it is compare-and-swap and an admin unblock landing mid-sweep is not overwritten by the block the sweep read earlier. Equal severity keeps the later end (a 30-day block is not cut to 7 by a milder reading); throttled is not floored because the docs promise it lifts on recovery. The bands read windows shorter than the terms they hand out (seven days of placement against a 30-day block), so without this every block cleared within a week, and a re-added mailbox with no history on the next sweep
+- the standing follows the address within the workspace: `warmup_reputation_ledger` is a mirror of the address's worst live standing, written only by the `warmup_reputation_mirror` trigger (the one exception is `ReviseWarmupHold` lowering a withdrawn tampering hold for an address with no mailbox in any pool) on `warmup_pool_participants` (migration 000152, scoped to the standing columns by 000156 so a pool move does not restart the retention window), so every path that writes a standing keeps it current and no caller can bypass it. The pool row dies on paths that never touch the mailbox (`LeaveAllPools` on an auth error, a lapsed plan, warmup toggled off) and on `HardDeleteUser`'s cascade, which is why a snapshot at mailbox deletion was not enough. `MoveToPool` seeds a new row from it and never consumes it; `Delete` and `LeaveAllPools` only restart its retention window (`config.WarmupReputationLedgerDays`, applied by the purge in `EvaluateAllParticipants`, never while a live row backs it). A review-required block (`blocked_until NULL`) never lapses. A mailbox in good standing has no row, and recovery clears it (#476)
+
+Require the mailbox to pass re-entry checks such as:
+
+- authentication still healthy: SPF, DKIM, DMARC, PTR where relevant
+- no recent provider complaints or hard-bounce spikes
+- no recent tampering with received warmup mail
+- spam-folder placement back below `10%` on a fresh probation sample
+- gradual re-entry with low volume, for example `5-10/day` warmup at first
+
+### External guidance behind these thresholds
+
+As of `April 3, 2026`, the strongest official guidance I found supports acting early:
+
+- Google says senders should keep user-reported spam rate below `0.1%` and avoid ever reaching `0.3%`
+- Amazon SES says for best results keep complaint rate below `0.1%`; at `0.1%` SES automatically places the account under review, and at `0.5%` SES may pause sending
+- Amazon SES also says to keep bounce rate below `5%`; at `5%` the account can be placed under review, and at `10%` sending may be paused
+
+That means a shared paid warmup pool should be stricter than mailbox-provider enforcement, not looser.
+
+### Recommended implementation shape
+
+For this repo, the most practical implementation is:
+
+- compute rolling mailbox health daily and on every relevant event
+- maintain a mailbox health state such as:
+  `healthy`, `watch`, `throttled`, `quarantined`, `blocked`
+- store `blocked_until`, `health_reason`, `last_health_score`, and `last_health_evaluated_at`
+- feed the score from:
+  warmup spam flags
+  deliverability complaints
+  bounce events
+  tampering with received warmup mail (deletion, spam flag)
+  provider rate-limit or abuse signals
+- make pool selection exclude any mailbox not in `healthy`
+- keep positive engagement as a weak positive signal only; it should not instantly offset complaints or spam placement
+
+### Best product decision
+
+If the main goal is protecting your IPs, the best default is:
+
+- shared paid pool: strict automatic quarantine
+- dedicated infrastructure: allow separate recovery handling if you want, but not on the shared paid pool
+- never let a risky mailbox continue warming in the same reputation surface that healthy paying customers depend on
+
+### Worker-side abuse detection: the sync governor
+
+Mailbox sync is governed by a per-mailbox fair-use engine in the worker (`internal/app/worker/wmail/governor.go`), not a flat cap. Keep its shape when touching sync:
+
+- three lanes, each with its own budget: `priority` (mail in a conversation this mailbox owns: a reply to a campaign task, a mapped message, or a stored unibox thread; resolved through `GET /api/v1/internal/sync/own-conversation`), `live` (new mail after connect) and `backfill` (the initial import of history, newest first, bounded by a window in days and a message cap)
+- budgets are Redis fixed windows shared across workers, so an organization budget holds even when its mailboxes sit on different machines; a Redis outage fails open
+- the policy (backfill days and cap, daily messages per mailbox and per organization) is resolved by the backend from the operator-editable instance settings and shipped inside `ADD_EMAIL`; the pacing constants (burst per 5 min, hourly, backfill per minute, flood threshold, chronic-overage days) live in `internal/config/constants.go`
+- over budget means deferred, never dropped: the provider cursor (IMAP HIGHESTMODSEQ, Gmail history id, Graph delta link) is held before the first deferred message and the mail is re-offered next pass; the mailbox reports itself throttled and the loop backs off up to five minutes
+- only two patterns deactivate a mailbox (via the existing `EMAIL_RATE_LIMITED` path in `internal/app/consumer/event_email_error.go`): a flood (more new live mail seen in one hour than `SyncFloodPerHour`) and chronic overage (per-mailbox daily budget exhausted on `SyncThrottleEscalationDays` of the last seven). A provider 429 during sync only backs off; it must never deactivate
+- sync state (backfill progress and cursor, throttle, last synced) is relayed as `SYNC_STATE`, persisted in `email_sync_state`, handed back on the next load so a replaced worker resumes, and shown in the mailbox drawer via `GET /emails/:id/sync`
+
+### Event replay and duplicate protection
+
+Several parts of the system defend against replayed or duplicated events:
+
+- tracking service keeps an in-memory dedupe cache keyed by task/IP or task/URL/IP
+- tracking consumer keeps a persistent dedupe table as a second line of defense
+- deliverability events use an idempotency key
+- Stripe webhooks also use idempotency logging
+
+Relevant code:
+
+- `tracking/src/handlers.rs`
+- `internal/repository/pg_tracking_dedupe.go`
+- `internal/app/consumer/event_tracking.go`
+
+### Tracking endpoint anti-abuse
+
+The tracking service additionally defends itself before any event reaches Kafka (`tracking/src/abuse.rs`):
+
+- per-source rate limiting: fixed 60s window per hashed IP, `TRACKING_RATE_LIMIT_PER_MIN` (default `300`), bounded cache. Over-budget pixels are still served (no broken images) but not counted; over-budget click redirects get `429`
+- prefetch/scanner filtering: `Sec-Purpose`/`Purpose`-style prefetch headers and a UA marker list (crawlers, CLI clients, chat-app link previews, email security gateways) are served but never counted. Gmail's image proxy is deliberately NOT filtered — it is the only open signal Gmail exposes
+- URL caps on click redirects: 4096 bytes raw / 2048 decoded
+- click links are server-side tickets, not signed URLs: `WrapLinksForTracking` mints a `tracked_links` row per link (migration 000041, batch CopyFrom; on write failure the email ships with original untracked links, never dead tickets) and the email carries only `https://<domain>/c/<uuid>`. The tracking service resolves tickets via `GET /api/v1/internal/tracked-links/:id` (INTERNAL_API_TOKEN, same pattern as the worker DEK proxy) — destinations never travel inside the URL, so there is no open-redirect surface and NO signing secret anywhere. Do not reintroduce `?url=`-style redirects
+- ticket-spray protection in `tracking/src/links.rs`: positive cache (24h), negative cache (60s), per-source miss budget (12 unknown-ticket lookups/min — real clickers never miss, probers get cut off before backend traffic), and a circuit breaker (5 consecutive backend failures opens for 15s; misses fail closed with 503/404, never an unverified redirect)
+- `internal/app/advanced/service.go`
+- `internal/repository/pg_advanced_outreach.go`
+- `internal/repository/pg_subscription.go`
+
+### Suppression as abuse containment
+
+Some fraud and abuse prevention is expressed as containment rather than user banning.
+
+Examples:
+
+- recipients are suppressed after bounce, complaint, or unsubscribe signals
+- suspicious warmup participants are blocked from pools
+- rate-limited mailboxes can be disabled
+- campaigns skip suppressed recipients automatically
+
+This is operationally important because the safest response is often to stop further traffic rather than keep sending and collect more negative signals.
+
+### Admin enforcement
+
+The admin surface supports manual enforcement and overrides:
+
+- ban user
+- unban user
+- inspect ban history
+- inspect and override rate limits
+
+Relevant code:
+
+- `internal/api/routes.go`
+- `internal/api/handler/admin.go`
+- `internal/app/admin/service.go`
+- `internal/infrastructure/db/migrations/000016_admin_system.up.sql`
+
+### Practical interpretation
+
+When extending anti-fraud logic in this repo:
+
+- prefer layered controls over one brittle gate
+- prefer idempotency and dedupe wherever external events arrive
+- prefer blocking or suppressing risky traffic early
+- keep worker-side abuse checks lightweight and infrastructure-backed
+- record enough structured evidence for admin review when a user or mailbox is blocked
+
+## Send Outcome Loop
+
+A campaign step is RESERVED before the `SEND_EMAIL` goes on the bus and stamped sent right after. `ReserveSend` (`internal/repository/pg_campaign_progress.go`) writes `campaign_contact_progress.dispatched_at` + `dispatch_task_id` and takes the day's counters in ONE transaction; the step's `sent_at` follows the dispatch and is the timing stamp follow-up pacing reads. Routing treats a step as attempted when EITHER is set, so a crash or a failed progress write between the two can no longer look like "never sent" and email the same person twice (issue #169).
+
+What resolves a reservation is the worker's per-task result on `jobs.worker-events`: every send is answered with exactly one `EMAIL_SENT` or `EMAIL_FAILED`. `HandleEmailSent` persists the Message-ID and repairs a missing `sent_at` (`StampDispatchedSend`); `HandleEmailFailed` walks the whole thing back (clears `sent_at` AND `dispatched_at`, counts the attempt, gives back the daily counters, logs to the campaign feed, reopens a campaign that completed meanwhile). Routing retries the step on the next tick and drops the lead as `failed` after `config.CampaignSendMaxAttempts`.
+
+Rules that follow from this:
+
+- never dispatch a send that is not reserved. A reservation that cannot be written means the task retries; a claim refused (`reserved == false`) means another tick already has that pair in flight, and the task ends `skipped_duplicate`
+- a pending `campaign` task is a chain wake-up, never a booked send: it re-picks its mailbox when it fires. Slot conflict resolution reads `GetBookedSendsForAccount`, which leaves them out; spacing around another campaign's parked wake-up throttled every campaign sharing that pool (issue #942). The per-mailbox gap across campaigns is held by `ClaimMailboxSend` (`email_accounts.send_claimed_at`), taken before the send is built and visible on the min-gap clock; a lost claim reschedules the pass within seconds and sends nothing
+- resolve every reservation exactly once: `RecordEmailSent` on a successful hand-off, `ReleaseSend` when the command PROVABLY never left (no worker, worker offline), `RecordSendFailure` on a worker failure. A failure of the publish call itself is ambiguous (`tasks.ErrSendDispatchUnknown`) and must NOT be released
+- a reservation nobody answers is resolved by `StartStuckSendReclaimer` in the consumer after `config.CampaignSendReclaimAfterMinutes`: it believes a task that carries a Message-ID (stamps it) and otherwise walks the step back as a failed attempt. Without it a dead worker parks a lead in flight forever
+- the day's counters belong to the reservation, not the stamp, so a lost stamp can never let the daily cap over-send
+- a worker must always answer a `SEND_EMAIL` it acked; a failure path that returns without producing `EMAIL_FAILED` leaves the lead at "processing" forever. Use `failSend` in `event_send_email.go`
+- the per-task result is always `EMAIL_FAILED`; the typed account events (`EMAIL_AUTH_ERROR` and friends) are raised in addition and carry an `EmailErrorEvent`, never a `SendEmailResult`
+- the backend refuses to publish a send to a worker that is not heartbeating (`tasks.NewWorkerLiveness`), because a command queued for a dead worker is never executed and never answered
+- the campaign wizard (and `POST /campaigns` with `steps`) connects steps in order at creation. Routing has no implicit "next position": a step with no outgoing connection ends the flow
+- the campaign task handler sends whatever pair `CalculateNextCampaignTime` returns, so the scheduler is the timing gate: when the step's hard constraints (the campaign's entry delay for a first step, wait_after, start date, sending windows, day capacity, mailbox min-gap) sit beyond `config.CampaignNotDueGraceSeconds`, it returns `ErrCampaignDeferred` with the slot instead of a pair, and the task reschedules without sending. Without this, any early tick (the successor task after a send, a duplicate chain, a moved slot) sends a "wait 3 days" follow-up seconds after step one
+- `campaigns.entry_delay_minutes` holds a contact's FIRST email that long after they entered the campaign, anchored on `campaign_leads.added_at` (nullable and deliberately unbackfilled; a NULL falls back to the campaign's `created_at`). It is applied in the router's due check (`route` in `pg_campaign_progress.go`) and floors the placer through `ContactSequencePair.NotBefore`. Follow-up spacing is still each step's own `wait_after`
+- schedule edits on an active campaign reschedule the parked wakeup (`rescheduleCampaignWakeup` in the campaign service): clearing or shortening a future start date takes effect immediately instead of when the old slot fires. PATCH `start_date`/`end_date` accept explicit `null` to clear (`models.NullableTime` distinguishes absent from null)
+
+## Control Plane vs Execution Plane
+
+Prefer this split:
+
+- backend/consumer own relational state and business workflows
+- workers execute side effects: send, sync, validate, heartbeat
+- assignment and migration decisions belong in the control plane
+- workers should remain replaceable and horizontally scalable
+
+If a new feature requires heavy joins, admin queries, billing checks, or complex campaign state transitions, it probably belongs in backend or consumer, not in the worker.
+
+## Practical Guidance
+
+- do not add direct Postgres usage to `cmd/worker` or `internal/app/worker` unless explicitly required
+- preserve worker-specific Kafka topic routing
+- do not reintroduce worker categories; placement is a score over live state
+- preserve separation between free and premium warmup pools
+- optimize for many-worker deployments, not a single giant worker
+- document any change that alters worker assignment, pool membership, or network boundaries
+
+## Source Anchors
+
+These files are the fastest way to rebuild context:
+
+- `README.md`
+- `docs/content/docs/development/architecture.mdx`
+- `docs/content/docs/development/install.mdx` and `data-control.mdx` (what a self-hoster is asked, and what each answer decides)
+- `site/public/install.sh` (the installer itself)
+- `cmd/worker/main.go`
+- `internal/app/worker/assignment.go`
+- `internal/tasks/email_task.go`
+- `internal/repository/pg_worker.go`
+- `internal/repository/pg_warmup.go`

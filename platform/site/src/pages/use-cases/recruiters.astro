@@ -1,0 +1,140 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Icon from '../../components/Icon.astro';
+import CTA from '../../components/CTA.astro';
+import SectionIntro from '../../components/page/SectionIntro.astro';
+import Rule from '../../components/page/Rule.astro';
+import Faq from '../../components/page/Faq.astro';
+import HeroLeads from '../../components/scenes/use-cases/recruiters/HeroLeads.astro';
+import CadenceFlow from '../../components/scenes/use-cases/recruiters/CadenceFlow.astro';
+import PlainPreview from '../../components/scenes/use-cases/recruiters/PlainPreview.astro';
+import RecruiterMailboxes from '../../components/scenes/use-cases/recruiters/RecruiterMailboxes.astro';
+import OptOuts from '../../components/scenes/use-cases/recruiters/OptOuts.astro';
+
+// Defaults from internal/config/constants.go; suppression and stop-on-reply
+// from the campaigns and contacts guides.
+
+const cadence = [
+  { day: 'Day 0', t: 'First message', d: 'A short, specific question about their work.' },
+  { day: 'Day 5', t: 'Follow-up', d: 'One line of context and an easy way out.' },
+  { day: 'Day 12', t: 'Last note', d: 'A final check-in, then the sequence stops.' },
+  { day: 'After that', t: 'Nothing', d: 'No fourth, fifth or sixth nudge.', end: true },
+];
+
+const leaveOut = [
+  ['A logo banner', 'reads as a newsletter'],
+  ['The job description as an image', 'link to the posting instead'],
+  ['A signature full of social icons', 'looks like marketing mail'],
+  ['Open tracking', 'adds an image and says little'],
+];
+
+const tileTitle = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const tileBody = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+
+const faq: [string, string][] = [
+  ['Should every recruiter have their own mailbox?', 'Yes. Reputation belongs to the mailbox, so one recruiter’s habits never affect another’s, and candidates reply to a real person instead of a careers address.'],
+  ['How many candidates can one recruiter contact a day?', 'Start around 30 a day per warmed mailbox. The default cap is 50, and more volume should come from more recruiters’ mailboxes rather than pushing one harder.'],
+  ['What happens when a candidate isn’t interested?', 'A reply stops the sequence for them. If they ask to be removed, or click unsubscribe, the address is suppressed across your whole workspace, so no other recruiter writes to them by mistake.'],
+  ['Can we track which roles get replies?', 'Yes. Use a campaign per role or a label per opening, and analytics shows sends, replies and meetings for each.'],
+  ['Do candidates see they are in a sequence?', 'They see a plain email from a named recruiter, with follow-ups as replies in the same thread, the way a person would write.'],
+];
+---
+<Layout
+  title="Cold Email for Recruiters: Candidate Outreach That Gets Replies | Pegasusbound"
+  description="Candidate outreach from each recruiter’s own warmed mailbox: plain-text messages, a short three-touch sequence that stops on reply, and opt-outs honoured across the whole agency."
+>
+  <!-- HERO: the role's Leads tab and the email a candidate reads, beside the pitch. -->
+  <section class="container-page pt-14 md:pt-24 pb-20 md:pb-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1.15fr_0.85fr] lg:gap-14">
+      <div class="lg:order-2">
+        <a href="/use-cases/" class="text-[14px] text-slate-500 hover:text-slate-900">Use cases · Recruiters</a>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[58px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">Candidate outreach that reads like a person wrote it.</h1>
+        <p class="mt-6 max-w-xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">Every recruiter sends from their own warmed mailbox, in plain text, with a short sequence that stops the moment a candidate answers.</p>
+        <div class="mt-9 flex flex-wrap items-center gap-3">
+          <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">Start free <Icon name="arrowRight" size={14} /></a>
+          <a href="#cadence" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">See the cadence</a>
+        </div>
+      </div>
+      <div class="lg:order-1">
+        <HeroLeads />
+      </div>
+    </div>
+  </section>
+
+  <!-- CADENCE: the three touches on the real sequence canvas. -->
+  <Rule />
+  <section id="cadence" class="container-page scroll-mt-28 py-20 md:py-28">
+    <div class="grid items-end gap-8 lg:grid-cols-[1.2fr_1fr] lg:gap-16">
+      <SectionIntro lead="The cadence." title="Three messages, then it stops." />
+      <p class="text-[16px] md:text-[18px] leading-[1.6] text-slate-500 lg:pb-2">Candidates are busy, not uninterested. Three short messages over twelve days is enough, and a reply at any point ends the sequence for them.</p>
+    </div>
+    <div class="mt-12 md:mt-14">
+      <CadenceFlow />
+    </div>
+    <ol class="mt-10 grid gap-8 sm:grid-cols-2 lg:grid-cols-4 lg:gap-6">
+      {cadence.map((c) => (
+        <li class={`border-t pt-5 ${c.end ? 'border-slate-200' : 'border-slate-900'}`}>
+          <div class="text-[13px] text-slate-400">{c.day}</div>
+          <h3 class={`mt-1 text-[18px] font-medium ${c.end ? 'text-slate-300' : 'text-slate-900'}`}>{c.t}</h3>
+          <p class={`mt-1.5 text-[15px] leading-[1.6] ${c.end ? 'text-slate-400' : 'text-slate-500'}`}>{c.d}</p>
+        </li>
+      ))}
+    </ol>
+  </section>
+
+  <!-- PLAIN TEXT: what to leave out, beside the email's preview. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="Plain text." title="What to leave out of a recruiting email." text="Anything that makes a message look designed makes it look sent in bulk. Write it the way you would write to one person." />
+        <ul class="mt-9 divide-y divide-slate-200 border-y border-slate-200">
+          {leaveOut.map(([k, v]) => (
+            <li class="flex items-baseline justify-between gap-6 py-4">
+              <span class="flex items-center gap-3 text-[16px] text-slate-900"><span class="h-px w-3 shrink-0 bg-rose-400"></span>{k}</span>
+              <span class="text-right text-[14.5px] text-slate-400">{v}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <PlainPreview />
+    </div>
+  </section>
+
+  <!-- MAILBOXES AND OPT-OUTS: one mailbox each, one list for everyone. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-end gap-10 lg:grid-cols-[1fr_1.1fr] lg:gap-16">
+      <SectionIntro lead="The team." title="A mailbox each, and one list of opt-outs for all of them." />
+      <dl class="grid grid-cols-3 gap-6">
+        {[
+          { v: '1 : 1', k: 'A mailbox per recruiter' },
+          { v: '~30', k: 'Candidates a day to start' },
+          { v: '1 list', k: 'For every opt-out' },
+        ].map((c) => (
+          <div class="border-t border-slate-200 pt-4">
+            <dt class="text-[32px] md:text-[40px] font-medium tracking-[-0.05em] leading-none text-slate-900">{c.v}</dt>
+            <dd class="mt-2 text-[14px] text-slate-500">{c.k}</dd>
+          </div>
+        ))}
+      </dl>
+    </div>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2">
+      <article>
+        <RecruiterMailboxes />
+        <h3 class={tileTitle}>Reputation stays with the person who earned it</h3>
+        <p class={tileBody}>Each recruiter sends from their own mailbox, starting around 30 candidates a day, below the default cap of 50.</p>
+      </article>
+      <article>
+        <OptOuts />
+        <h3 class={tileTitle}>An unsubscribe covers the whole agency</h3>
+        <p class={tileBody}>Whichever recruiter wrote, an opt-out lands on one workspace list, so nobody else writes to that candidate by mistake.</p>
+      </article>
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Recruiters, answered." />
+
+  <CTA photo="sheer-peach" title="Give every recruiter a mailbox candidates trust." description="Connect each recruiter’s mailbox, let warmup run, and send the first three-touch sequence." />
+</Layout>

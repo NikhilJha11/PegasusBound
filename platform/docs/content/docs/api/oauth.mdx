@@ -1,0 +1,451 @@
+---
+title: OAuth
+description: Let third-party apps act on behalf of a Pegasusbound workspace with the authorization-code flow.
+---
+
+API keys are for your own scripts. When you build an app that other people connect their Pegasusbound workspace to, use OAuth instead: the user grants your app scoped access on a consent screen, and you receive tokens that act on their behalf. You never see their password or API key.
+
+Pegasusbound implements the OAuth 2.1 authorization-code flow with PKCE. Confidential apps (registered in the dashboard) hold a client secret; public clients (native, mobile, and CLI apps, including MCP clients that self-register) use PKCE with no secret. The implicit and password grants are not supported.
+
+## Register your app
+
+In the dashboard, open **Settings -> OAuth apps** and register an application. You provide:
+
+- a **name**, optional description, logo, and website (shown on the consent screen). The name follows the [naming rules](/api/error-codes/#name-refusals) and cannot include Pegasusbound, spaced out or spelled with look-alike characters included, because people would take the app for Pegasusbound's own. An app that already had such a name keeps it until the name is changed,
+- one or more **redirect URIs** (where users are sent back after they approve), matched exactly and required to be HTTPS, except loopback URLs for native apps,
+- the **scopes** your app may request (any permission except `API_KEYS`, which stays with people and API keys),
+- optionally, **allowed webhook domains** (see below).
+
+Managing apps (`/oauth/applications/*` and `/oauth/application-logo`) is for a signed-in member or an API key. An OAuth access token is refused there with `403` `oauth_token_not_allowed`, so an app can never register apps, rotate secrets, or read webhook secrets.
+
+You receive a **client ID** and a **client secret**, shown only once. Keep the secret server-side and use it to authenticate the token exchange.
+
+### App logo
+
+The logo works like the workspace logo: upload it to the app, and Pegasusbound stores it and sets it.
+
+- `POST /oauth/applications/{id}/logo` takes a multipart `file`: PNG or JPG, at most 2 MB, between 32 and 1,024 pixels on each side. Pegasusbound decodes the image and stores a fresh copy of it, so nothing but the pixels is kept (no camera or location metadata, and no extra bytes after the image). The response is the updated app, and the previous logo is deleted.
+- `DELETE /oauth/applications/{id}/logo` removes it.
+
+Both need **Scope** `API_KEYS` and **org permission** `manage_api_keys`, like the rest of the app. A logo is shown to every workspace that sees the consent screen or the directory, so `logo_url` in the create and update bodies only accepts an address this instance issued for your workspace; any other address is refused with `400` `invalid_logo`. An update without `logo_url` keeps the current logo.
+
+### When an app is suspended or a workspace is blocked
+
+The instance's operators can **suspend** an app. A suspended app cannot sign anyone in, its tokens stop working (access and refresh alike), its webhook deliveries stop, and it leaves the [community directory](#publish-to-the-community-directory). The app's `suspended_at` and `suspended_reason` say so, and only an operator can lift it. An app you disable yourself behaves the same way until you enable it again.
+
+Operators can also **block** a workspace or a person from registering and publishing apps. `GET /oauth/applications` reports it in `developer_access` (`blocked`, `reason`), and registering or publishing then answers `403` `developer_access_blocked`. Apps the workspace already has keep working unless they were suspended too.
+
+## Public clients and dynamic registration
+
+Native apps, CLI tools, and MCP clients cannot safely hold a secret. They connect as public clients: no client secret, and PKCE is mandatory rather than optional. There are two ways to get a public `client_id`.
+
+Self-register at runtime with Dynamic Client Registration ([RFC 7591](https://www.rfc-editor.org/rfc/rfc7591)). This is the path MCP clients use, so a user connects with one command:
+
+```bash
+curl -X POST "https://api.pegasusbound.com/v1/oauth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_name": "My MCP client",
+    "redirect_uris": ["http://127.0.0.1:8080/callback"],
+    "token_endpoint_auth_method": "none",
+    "grant_types": ["authorization_code", "refresh_token"],
+    "response_types": ["code"]
+  }'
+```
+
+```json
+{
+  "client_id": "wmcid_...",
+  "client_id_issued_at": 1752624000,
+  "redirect_uris": ["http://127.0.0.1:8080/callback"],
+  "token_endpoint_auth_method": "none",
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "scope": "read_campaigns read_contacts ..."
+}
+```
+
+The registration endpoint is open (unauthenticated) and rate-limited per source IP. Registering grants no access on its own: a human still signs in and approves scopes at the consent screen. Redirect URIs may be HTTPS, loopback (`http://127.0.0.1` or `localhost`, any port), or a private-use scheme (`myapp://`), matched exactly at authorize and token time. Self-registered clients can never request `SEND_CAMPAIGNS` or `API_KEYS`.
+
+Nobody vouches for a self-registered client, so the consent screen shows only what Pegasusbound can stand behind. `client_uri` and `logo_uri` are ignored, so the screen shows no website or logo for it. Its `client_name` is cleaned rather than refused: a bracketed part that names Pegasusbound is dropped (`Claude Code (pegasusbound)` is shown as `Claude Code`), and a name that still names Pegasusbound, or breaks the naming rules, is shown as `MCP client`.
+
+For a public client the token exchange sends no `client_secret`, only the PKCE `code_verifier`. Everything else in the flow below is identical. If you are connecting an AI assistant, you do not run any of this by hand: see the [MCP server](/api/mcp/) page for the one-command setup.
+
+## Scopes
+
+OAuth scopes are the same permissions as API keys, lowercased (for example `read_campaigns`, `write_contacts`). See the [permission reference](/api/permissions/) for the full list. A token carries the intersection of three sets:
+
+- the scopes the app was registered with,
+- the scopes the authorize request asked for (all of the app's scopes when `scope` is empty),
+- the scopes the approving member's role covers, per the [role mapping](/api/permissions/#what-a-role-can-delegate). `api_keys` is never granted to an app.
+
+So an app asking a Viewer for `write_contacts` gets only the read scopes that Viewer holds. The consent screen lists what will be granted and, separately, what was asked for but is outside the member's role. The `scope` in the token response is the granted set, which may be narrower than what you asked for ([RFC 6749 section 3.3](https://www.rfc-editor.org/rfc/rfc6749#section-3.3)). When the member's role covers none of the requested scopes, the consent screen refuses with `access_denied`.
+
+The cap follows the member, not just the moment of consent. Every request with the token is checked against the member's role as it is now: demote them and the token loses what the new role does not cover; a call that needs a permission they no longer hold answers `403`. A refresh whose member holds none of the granted scopes answers `invalid_grant`.
+
+## The flow
+
+### 1. Send the user to the authorize page
+
+Redirect the user's browser to the consent page with the standard parameters. PKCE is optional but recommended: generate a `code_verifier` (a high-entropy random string) and send its S256 challenge.
+
+```
+code_challenge = base64url( sha256( code_verifier ) )
+```
+
+```
+https://app.pegasusbound.com/oauth/authorize
+  ?response_type=code
+  &client_id=wmcid_...
+  &redirect_uri=https://yourapp.com/oauth/callback
+  &scope=read_campaigns%20read_contacts
+  &state=<random-csrf-token>
+  &code_challenge=<challenge>
+  &code_challenge_method=S256
+```
+
+`state` is yours to verify on return (CSRF protection). The `code_challenge` and `code_challenge_method` are optional; if you include them, `code_challenge_method` must be `S256`.
+
+### 2. The user approves
+
+Pegasusbound shows the app, the workspace that will receive access, the scopes it will get, where approving sends access (the redirect URI's host, or an app on this device for a loopback or private-use redirect), and an authorize or deny choice. An app is marked **Unverified app** unless it is a registered (not self-registered) app the instance features in its [community directory](#publish-to-the-community-directory), and an unverified app also carries a **Not affiliated with Pegasusbound** notice that asks the member to approve only a connection they started themselves. Approving asks the member to confirm it is them when they have not signed in or re-authenticated in the last few minutes, because the approval hands your app a standing credential. On approval the browser is redirected back to your `redirect_uri` with a single-use code:
+
+```
+https://yourapp.com/oauth/callback?code=wmac_...&state=<your-state>
+```
+
+If the user denies, the redirect carries `?error=access_denied&state=...` instead.
+
+### 3. Exchange the code for tokens
+
+Verify `state` matches, then `POST` to the token endpoint. The request is `application/x-www-form-urlencoded`; send your `client_secret` (in the body or via HTTP Basic auth), plus the original `code_verifier` if you used PKCE. A public client omits `client_secret` and always sends `code_verifier`.
+
+```bash
+curl -X POST "https://api.pegasusbound.com/v1/oauth/token" \
+  -d grant_type=authorization_code \
+  -d code=wmac_... \
+  -d redirect_uri=https://yourapp.com/oauth/callback \
+  -d client_id=wmcid_... \
+  -d client_secret=wmcs_... \
+  -d code_verifier=<the-original-verifier>
+```
+
+```json
+{
+  "access_token": "wmat_...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "refresh_token": "wmrt_...",
+  "scope": "read_campaigns read_contacts"
+}
+```
+
+### 4. Call the API
+
+Use the access token exactly like an API key:
+
+```bash
+curl "https://api.pegasusbound.com/v1/campaigns" \
+  -H "Authorization: Bearer wmat_..."
+```
+
+### 5. Refresh when it expires
+
+Access tokens last one hour. Exchange the refresh token for a new pair before or after expiry. Refresh tokens **rotate**: the old one stops working the moment a new pair is issued, so always store the latest one. Presenting a refresh token that was already exchanged (two workers refreshing in parallel, a retry with the old token, or a replay) **revokes the grant**, so the user has to authorize again ([RFC 9700 section 4.14.2](https://www.rfc-editor.org/rfc/rfc9700#section-4.14.2)). Serialize refreshes per grant.
+
+```bash
+curl -X POST "https://api.pegasusbound.com/v1/oauth/token" \
+  -d grant_type=refresh_token \
+  -d refresh_token=wmrt_... \
+  -d client_id=wmcid_... \
+  -d client_secret=wmcs_...
+```
+
+### Revoke
+
+Revoke an access or refresh token (and the grant behind it) when the user disconnects:
+
+```bash
+curl -X POST "https://api.pegasusbound.com/v1/oauth/revoke" \
+  -d token=wmat_... \
+  -d client_id=wmcid_... \
+  -d client_secret=wmcs_...
+```
+
+Users can also revoke your app themselves, and members who manage the workspace's credentials (`manage_api_keys` or `manage_settings`) can revoke any member's authorization under **Settings -> OAuth apps -> Authorized apps**. Either invalidates every token that member's authorization issued. A user who is removed from a workspace loses every authorization they granted in it the same way, so expect `invalid_grant` on the next refresh.
+
+#### Workspace authorizations
+
+Session-only endpoints for the people who manage a workspace's credentials. Both need **org permission** `manage_api_keys` or `manage_settings`.
+
+- `GET /oauth/workspace-authorizations` returns `{"authorizations": [...]}`: one row per app and member, with `application_id`, `name`, `logo_url`, `website_url`, `user_id`, `user_email`, `user_name`, `scopes`, `authorized_at` and `last_used_at`. Only live grants are listed (not revoked, refresh token not expired).
+- `DELETE /oauth/workspace-authorizations/{application_id}/members/{user_id}` revokes that member's grants for the app and returns `{"revoked": true}`. It succeeds when there is nothing to revoke, so it is safe to retry.
+
+## Token lifetimes
+
+| Token | Lifetime | Notes |
+| --- | --- | --- |
+| Authorization code | 10 minutes | Single use, PKCE-bound |
+| Access token | 1 hour | Bearer, carries the granted scopes, capped by the member's current role |
+| Refresh token | 90 days | Rotates on every use; a reused one revokes the grant |
+
+A grant whose refresh token has expired no longer counts as an install: it does not receive app webhooks and is not counted in directory installs or listed among authorized apps.
+
+## Discovery
+
+Endpoint URLs and capabilities are published for automatic client configuration.
+
+Authorization-server metadata ([RFC 8414](https://www.rfc-editor.org/rfc/rfc8414)):
+
+```
+GET https://api.pegasusbound.com/.well-known/oauth-authorization-server
+```
+
+It lists the authorization, token, revocation, and registration endpoints, the supported scopes, `code` as the only response type, `authorization_code` and `refresh_token` grants, `S256` as the only PKCE method, and `none` (public), `client_secret_basic`, and `client_secret_post` as the client authentication methods.
+
+Protected-resource metadata for the MCP endpoint ([RFC 9728](https://www.rfc-editor.org/rfc/rfc9728)):
+
+```
+GET https://api.pegasusbound.com/.well-known/oauth-protected-resource
+```
+
+It names the resource and its authorization server, so an MCP client that gets a `401` with a `WWW-Authenticate` challenge from `/v1/mcp` can find where to authenticate. See the [MCP server](/api/mcp/) page.
+
+## Webhook domains for OAuth apps
+
+If your app registers webhook endpoints on behalf of its users, you must declare the domains those endpoints may use. Set `allowed_webhook_domains` on the app object (a string array) when creating or updating the app:
+
+```json
+{
+  "name": "My App",
+  "redirect_uris": ["https://yourapp.com/oauth/callback"],
+  "allowed_webhook_domains": [".acme.com", "hooks.partnersite.com"]
+}
+```
+
+Any webhook URL your app registers must have a host within this list. An empty list means the app cannot register webhook endpoints at all.
+
+**Matching rules:**
+
+- A bare entry (`acme.com`) matches that exact host only.
+- A leading-dot entry (`.acme.com`) matches the apex and any subdomain: `acme.com`, `hooks.acme.com`, `prod.hooks.acme.com`.
+
+The list is enforced at endpoint registration time and re-checked at delivery time. See the [webhooks reference](/api/reference/webhooks/) for the full endpoint verification and delivery flow.
+
+## Receiving events as an app (webhooks)
+
+Instead of holding one WebSocket connection per installed workspace, your app can declare a single webhook configuration and let Pegasusbound deliver events to it automatically for every org that authorizes the app. This is the GitHub/Slack-app model: configure once on the app, receive from all installs.
+
+### App webhook config
+
+Set `webhook_url` and `webhook_events` when creating or updating your app via `POST /oauth/applications` or `PATCH /oauth/applications/:id`.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `webhook_url` | string | The HTTPS URL events are delivered to. Its host must be within the app's `allowed_webhook_domains` (a 400 is returned otherwise). Set to empty to opt out of app-level webhook delivery. |
+| `webhook_events` | string[] | The event names the app subscribes to. An empty or omitted array subscribes to all non-firehose events permitted by the org's granted scopes. |
+
+The signing secret is server-generated and shared across the whole app: one secret, used to sign deliveries from every org install. It is stored encrypted under the instance's credential key, like each endpoint's own copy. Reveal or rotate it using the dedicated endpoints below.
+
+```json
+{
+  "name": "My App",
+  "redirect_uris": ["https://yourapp.com/oauth/callback"],
+  "allowed_webhook_domains": [".yourapp.com"],
+  "webhook_url": "https://hooks.yourapp.com/pegasusbound",
+  "webhook_events": ["campaign.reply_received", "meeting.booked", "contact.created"]
+}
+```
+
+### Automatic, scope-gated delivery
+
+When an org authorizes your app, Pegasusbound automatically creates a managed webhook endpoint for that org and starts delivering the subscribed events. When the org revokes the app, that endpoint is removed.
+
+Events are gated by the intersection of what your app declared in `webhook_events` and what the org's granted scopes permit. An event family is only delivered if both the app holds the matching scope and the org granted it. The scope-to-event mapping:
+
+| Events | Required scope |
+| --- | --- |
+| `inbox.*` | `READ_UNIBOX` |
+| `campaign.*`, `deliverability.*`, `meeting.*` | `READ_CAMPAIGNS` |
+| `email_account.*`, `warmup.*` | `READ_EMAILS` |
+| `contact.*`, `bulk_operation.*` | `READ_CONTACTS` |
+| `crm.*` | `READ_CRM` |
+| `automation.*` | `INTEGRATIONS` |
+| `team.*`, `role.*`, `settings.*`, `subscription.*` | `READ_AUDIT_LOGS` |
+| `custom.event` | `REALTIME_SUBSCRIBE` |
+
+Every delivery payload carries `organization_id` so you can tell which install the event came from. Delivery is signed, retried with the same backoff schedule as regular webhooks, and verifiable using the same `X-Pegasusbound-Signature` scheme. See [Webhooks: verifying signatures](/api/reference/webhooks/#verifying-signatures) for the verification algorithm.
+
+### App webhook management endpoints
+
+All four endpoints require **Scope** `API_KEYS` and **org permission** `manage_api_keys`.
+
+#### Reveal the webhook secret
+
+`GET /oauth/applications/{id}/webhook-secret`
+
+Returns the current signing secret. This is the `whsec_`-prefixed value used to verify all deliveries for this app, across every org install.
+
+```json
+{ "webhook_secret": "whsec_9f8e7d6c5b4a39281706f5e4d3c2b1a09f8e7d6c5b4a39281706f5e4d3c2b1a0" }
+```
+
+#### Rotate the webhook secret
+
+`POST /oauth/applications/{id}/webhook-secret/rotate`
+
+Issues a new signing secret and returns it once. Update your verification logic before in-flight deliveries settle against the old secret.
+
+```json
+{ "webhook_secret": "whsec_1a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f70819a2b3c4d5e6f7081" }
+```
+
+#### List per-org endpoints
+
+`GET /oauth/applications/{id}/webhook-endpoints`
+
+Returns the managed per-org endpoints that Pegasusbound materialized for this app, with their current health.
+
+```json
+{
+  "endpoints": [
+    {
+      "id": "a3f1c2e4-5b6d-7e8f-9a0b-1c2d3e4f5a6b",
+      "organization_id": "11111111-2222-3333-4444-555555555555",
+      "url": "https://hooks.yourapp.com/pegasusbound",
+      "enabled": true,
+      "verified_at": "2026-06-14T10:00:00Z",
+      "consecutive_failures": 0,
+      "last_success_at": "2026-06-14T10:05:00Z",
+      "last_failure_at": null
+    }
+  ]
+}
+```
+
+#### Cross-org delivery log
+
+`GET /oauth/applications/{id}/webhook-deliveries`
+
+Returns the delivery log across all org installs, newest first. Every attempt is included with its response code, error, payload, and retry state.
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `status` | query | string | Filter by status: `pending`, `in_flight`, `delivered`, `failed`, or `abandoned`. |
+| `event_type` | query | string | Filter by event type, for example `campaign.reply_received`. |
+| `limit` | query | integer | Max rows. Between 1 and 200, defaults to 50. Out-of-range values return `400`. |
+| `cursor` | query | string | Opaque pagination cursor from `pagination.next_cursor`. |
+
+Response uses the standard `data` + `pagination` envelope with opaque cursors. Each row includes `organization_id` so you can see which install each delivery belongs to.
+
+### Webhooks vs the realtime gateway
+
+The [realtime gateway](/api/realtime/) and app-level webhooks deliver the same event vocabulary. Choose based on your integration's needs:
+
+| | Realtime gateway | App-level webhooks |
+| --- | --- | --- |
+| Transport | WebSocket (persistent connection) | HTTP POST (stateless delivery) |
+| Best for | Live UI, presence, low-latency dashboards | Durable processing, pipelines, serverless receivers |
+| Connection model | One connection per install | No persistent connection; Pegasusbound pushes to your URL |
+| Delivery guarantees | Lossy on disconnect (resume/replay available) | Retried with exponential backoff, inspectable log |
+| Scope gating | Per-connection intents | Per-app scope, enforced per org grant |
+
+Both are equally valid depending on what you are building. A dashboard-like integration benefits from the WebSocket's low latency and presence features. A data-pipeline or serverless integration benefits from the webhook's durable, individually-inspectable HTTP deliveries without holding a connection open for every installed org.
+
+## Publish to the community directory
+
+Once your app works, publish it to the [community directory](/guides/integrations/#community-apps). Use **Publish** on the app under **Settings -> OAuth apps**, or the endpoints below.
+
+A published listing has a `status`:
+
+- `published`: link only. It opens at `/app/integrations/apps/{slug}` with a note that it is shared by link, and stays out of the directory, search and recommendations until it is installed in 25 workspaces other than the publisher's, each at least two weeks old.
+- `featured`: the instance's team picked it. It is listed with a Featured badge whatever its installs.
+- `hidden`: the team took it down. It is reachable nowhere, and `status_note` says why.
+
+Any change to the listing, or to the app's name, logo, website or scopes, returns a `featured` listing to `published`. A save that changes nothing keeps its status, and a `hidden` listing stays hidden when edited.
+
+Install in the directory opens your `install_url`. Start the authorization-code flow from there with your own `state`, so the user lands on Pegasusbound's consent screen the same way they would from your site.
+
+All three endpoints require **Scope** `API_KEYS` and **org permission** `manage_api_keys`.
+
+#### Get the listing
+
+`GET /oauth/applications/{id}/listing`
+
+Returns `{"listing": {...}}`, or `{"listing": null}` when the app is not published.
+
+#### Publish or edit the listing
+
+`PUT /oauth/applications/{id}/listing`
+
+Replaces the whole listing, so repeating the request is safe.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `slug` | string | The link. 3 to 48 lowercase letters, numbers or single dashes, starting and ending with a letter or number. Unique on the instance; the built-in integrations' names are reserved. |
+| `tagline` | string | One line, at most 120 characters. |
+| `description` | string | Optional, at most 2,000 characters. Line breaks are kept; markup is shown as text. |
+| `category` | string | One of `crm`, `automation`, `notifications`, `meetings`, `data`, `verification`, `ai`, `other`. |
+| `install_url` | string | Where Install takes people. Must be `https`. |
+| `support_url` | string | Optional `https` link. |
+| `privacy_url` | string | Optional `https` link. |
+
+```json
+{
+  "listing": {
+    "application_id": "5a8f0c1e-2b3d-4e5f-8a9b-0c1d2e3f4a5b",
+    "organization_id": "11111111-2222-3333-4444-555555555555",
+    "slug": "acme-sync",
+    "tagline": "Push positive replies into Acme as deals",
+    "description": "",
+    "category": "crm",
+    "install_url": "https://acme.com/pegasusbound/install",
+    "support_url": "https://acme.com/support",
+    "privacy_url": "",
+    "status": "published",
+    "submitted_at": "2026-10-03T09:00:00Z",
+    "created_at": "2026-10-03T09:00:00Z",
+    "updated_at": "2026-10-03T09:00:00Z"
+  }
+}
+```
+
+Refusals are `400` `invalid_listing` (the `message` names the field), `400` `app_not_listable` for a disabled or dynamically registered app, and `409` `listing_slug_taken`. See [error codes](/api/error-codes/#community-directory-refusals).
+
+#### Unpublish
+
+`DELETE /oauth/applications/{id}/listing`
+
+Removes the listing and its link. Workspaces that installed the app keep their grants until they revoke them. Succeeds when there is no listing, so it is safe to retry.
+
+#### Browsing the directory
+
+`GET /integrations/community` returns the listed apps (featured ones first, then those installed in at least 25 workspaces other than the publisher's, each at least two weeks old, most installed first), as `data` plus `pagination` (`limit` 1 to 200, default 100). `GET /integrations/community/{slug}` returns one published or featured listing, listed or not. Both need **Scope** `INTEGRATIONS`, and each listing reports `installs` (workspaces with an active grant) and `installed` (whether the caller's workspace has one). See [integrations](/api/reference/integrations/#list-community-apps).
+
+## Security notes
+
+- A token never acts beyond the approving member's current role, and never manages API keys or OAuth apps.
+- Redirect URIs are matched exactly, so register every callback you use.
+- Always send and verify `state`.
+- PKCE is required for public clients and recommended for confidential apps; when used, only `S256` is accepted.
+- Keep your client secret server-side. Native, mobile, and CLI apps should register as public clients and use PKCE rather than embedding a secret.
+- Dynamic registration is open and per-IP rate-limited; a self-registered client is public, cannot request `SEND_CAMPAIGNS` or `API_KEYS`, and grants no access until a human approves scopes at consent.
+- Set `allowed_webhook_domains` to the smallest set of domains your app needs. An overly broad list widens the surface for SSRF if a user tricks your app into registering an unexpected URL.
+- The app webhook secret is shared across all org installs. Rotate it if it is compromised, and update your receiver promptly: in-flight deliveries that were already signed continue to verify against the old secret until they settle.
+
+## Related
+
+<Cards>
+  <Card title="Permissions" href="/api/permissions/">
+    The scopes an OAuth app can request, shared with API keys.
+  </Card>
+  <Card title="Authentication" href="/api/authentication/">
+    Using bearer tokens (API keys and OAuth) on the API.
+  </Card>
+  <Card title="Webhooks" href="/api/reference/webhooks/">
+    Delivery mechanics, signature verification, and the full event catalog.
+  </Card>
+  <Card title="Realtime gateway" href="/api/realtime/">
+    WebSocket alternative for live, low-latency event streaming.
+  </Card>
+</Cards>

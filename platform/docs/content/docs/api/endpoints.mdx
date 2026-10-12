@@ -1,0 +1,1025 @@
+---
+title: Endpoint scope map
+description: Every endpoint, which auth types it accepts, and which permission it requires.
+---
+
+This page is the source of truth for what an API key can and cannot reach. Every route in the backend falls into one of three buckets:
+
+- **API key accepted**: works with both a JWT (dashboard user) and an API key with the listed permission.
+- **JWT only**: never reachable via an API key. Used for billing, governance, websocket bootstrap, danger-zone destruction, the OAuth onboarding flow, and admin tools.
+- **Public**: no auth required (webhooks with signature verification, health check, OAuth bouncer pages).
+
+When an endpoint says "JWT permission: X / API permission: Y", the dual-auth middleware checks the relevant one based on which credential the caller used.
+
+A member restricted to [selected resources](/guides/team-roles/#access-scope) is held to a short list of read routes whatever credential they use, and those routes filter to their grants: `GET /campaigns`, `/campaigns-overview`, `/campaigns/:id` with its `/logs`, `/steps` and `/ab-variants`, `GET /analytics/dashboard` (whose `campaign_ids` and `folder_ids` filters must name granted campaigns and folders), `/analytics/campaigns/compare`, `/analytics/campaigns/:id` with `/daily` and `/hourly`, `GET /analytics/accounts` and `/analytics/accounts/:id`, `GET /emails` and `/emails/:id`, and the unibox reads `GET /unibox`, `/unibox/count`, `/unibox/overview`, `/unibox/thread`, `/unibox/thread/labels`, `/unibox/scheduled` and `/unibox/:id` (which, for them, does not mark the message read). Their own account routes under `/auth/*`, `/me/*`, `GET /organization`, `/organization/current`, `/organization/switch/:id`, `/invitations`, `GET /subscription`, `/subscription/features`, `GET /timezones` and `POST /getaway` keep working. Every other route answers `403` `member_access_restricted`, and a campaign or mailbox outside their grants answers `404`. An API key's own mailbox allowlist still applies on top: the key reaches the mailboxes on both lists.
+
+All paths below are relative to the versioned base URL `https://api.pegasusbound.com/v1` (for example `/campaigns` is `https://api.pegasusbound.com/v1/campaigns`). See [versioning](/api/) for details.
+
+### Restricted response data and workspace policies
+
+- `GET /organization/current` returns a restricted summary: `total_campaigns` and `active_campaigns` count granted campaigns; `total_contacts` counts distinct contacts in those campaigns; `email_accounts` counts granted mailboxes; and `emails_sent_today` counts confirmed campaign sends in both granted campaigns and granted mailboxes. `member_count`, `product_description`, `icp_notes` and `voice_profile` are omitted. Unrestricted responses keep their workspace-wide shape.
+- `GET /analytics/dashboard` intersects campaign and folder filters with grants before returning `scope.campaign_count`.
+- `GET /campaigns/:id/logs` keeps pagination and campaign activity, but restricted responses use safe messages and explicitly selected metadata. Mailbox addresses, caps, cross-campaign sending state, warmup health and account IDs outside mailbox grants are removed. Tracking domains, raw provider errors, unknown fields and nested metadata are not exposed. Granting a campaign alone does not grant its senders.
+- `GET /auth/me` and `/unibox/overview` include only categories applied to messages in accessible mailboxes for restricted members. Unrestricted members keep the workspace category registry. Inbox access is mailbox-based: granting a shared mailbox exposes its conversations from other campaigns too.
+- `GET /unibox/thread/labels` checks for a message in the selected organization and effective mailbox allowlist before listing labels. Unknown, cross-workspace and inaccessible threads have the same `404`. An accessible thread with no labels returns an empty list.
+- `GET /emails` resolves a pagination cursor only inside the selected organization and effective mailbox allowlist. A cursor outside either boundary does not supply a timestamp for pagination.
+
+Workspace creation and limit-request routes are exceptions to the route-wide refusal described above: they authorize the account or target workspace in the service. `POST /organization` refuses accounts whose memberships are all restricted with `403` `member_access_restricted`, unless they are instance administrators. Accounts with no memberships or at least one unrestricted membership remain subject to the existing creation limits. Submitting or listing `/organization/:orgId/limit-requests`, and deleting `/limit-requests/:id`, requires an unrestricted membership in the request's target organization. Switching the selected workspace does not bypass these checks.
+
+Workspace notifications and owner-addressed realtime delivery also check current organization membership. Resource ownership alone does not authorize a workspace-wide event. Restricted, removed and unaccepted members are excluded from workspace notifications, including persisted feeds and deferred email/push delivery. Personal sign-in security notices remain available. See [realtime authorization and revocation](/api/realtime/#channels) for the 30-second refresh bound on open resource channels.
+
+These checks use existing grants on hosted and self-hosted instances and need no new migration or configuration. Existing unrestricted behavior is preserved.
+
+## API key accepted
+
+### Emails
+
+`PATCH /emails/:id` validates `warmup_start_time` and `warmup_end_time` together: the end must be later than the start on the same day. A partial time patch uses the other stored endpoint; an invalid pair returns `400`. Unrelated patches do not rewrite existing invalid hours. See [warmup hours](/guides/warmup/).
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/emails` | `READ_EMAILS` |
+| GET | `/emails/:id` | `READ_EMAILS` |
+| PATCH | `/emails/:id` | `WRITE_EMAILS` |
+| PATCH | `/emails/tags` | `WRITE_EMAILS` |
+| GET | `/emails/allowance` | `READ_EMAILS` |
+| GET | `/emails/:id/track` | `READ_EMAILS` |
+| PATCH | `/emails/:id/track` | `WRITE_EMAILS` |
+| POST | `/emails/:id/track/verify` | `WRITE_EMAILS` |
+| PATCH | `/emails/:id/direct-tracking` | `WRITE_EMAILS` |
+| GET | `/emails/:id/sync` | `READ_EMAILS` |
+| PUT | `/emails/:id/sync` | `WRITE_EMAILS` |
+| GET | `/emails/:id/identity` | `READ_EMAILS` |
+| POST | `/emails/:id/identity/refresh` | `WRITE_EMAILS` |
+| GET | `/emails/:id/auth-check` | `READ_EMAILS` |
+| POST | `/emails/:id/auth-check` | `WRITE_EMAILS` |
+| GET | `/emails/:id/behavior` | `READ_EMAILS` |
+| PUT | `/emails/:id/behavior` | `WRITE_EMAILS` |
+| GET | `/emails/:id/behavior/plan` | `READ_EMAILS` |
+| POST | `/emails/:id/hold` | `WRITE_EMAILS` |
+| POST | `/emails/:id/release` | `WRITE_EMAILS` |
+| DELETE | `/emails/:id` | `WRITE_EMAILS` |
+| POST | `/emails/:id/send` | `SEND_CAMPAIGNS` |
+
+### Campaigns and sequences
+
+Campaigns, steps and activity logs are scoped to the selected organization for session callers and the key's organization for API-key callers. Access depends on the permissions below, regardless of who created the campaign. Step updates and deletes also require the step to belong to the campaign in the URL. Campaign analytics, including daily, hourly and comparison endpoints, use this same organization boundary and require `READ_ANALYTICS` (or **View analytics** for session callers).
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/campaigns` | `READ_CAMPAIGNS` |
+| GET | `/campaigns-overview` | `READ_CAMPAIGNS` |
+| POST | `/campaigns-estimate` | `READ_CAMPAIGNS` |
+| POST | `/campaigns` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id` | `READ_CAMPAIGNS` |
+| PATCH | `/campaigns/:id` | `WRITE_CAMPAIGNS` |
+| DELETE | `/campaigns/:id` | `WRITE_CAMPAIGNS` |
+| POST | `/campaigns/:id/duplicate` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id/attachments` | `READ_CAMPAIGNS` |
+| POST | `/campaigns/:id/attachments` | `WRITE_CAMPAIGNS` |
+| DELETE | `/campaigns/:id/attachments/:attachmentId` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id/segments` | `READ_CAMPAIGNS` |
+| PUT | `/campaigns/:id/segments` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id/advanced` | `READ_CAMPAIGNS` |
+| PATCH | `/campaigns/:id/advanced` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id/ab-variants` | `READ_CAMPAIGNS` |
+| POST | `/campaigns/:id/ab-variants` | `WRITE_CAMPAIGNS` |
+| PATCH | `/campaigns/:id/ab-variants/:variantId` | `WRITE_CAMPAIGNS` |
+| DELETE | `/campaigns/:id/ab-variants/:variantId` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id/ab-analysis` | `READ_ANALYTICS` |
+| POST | `/campaigns/:id/preflight` | `SEND_CAMPAIGNS` |
+| POST | `/campaigns/:id/test-email` | `SEND_CAMPAIGNS` |
+| POST | `/campaigns/:id/start` | `SEND_CAMPAIGNS` |
+| POST | `/campaigns/:id/stop` | `SEND_CAMPAIGNS` |
+| GET | `/campaigns/:id/placement-monitor` | `READ_CAMPAIGNS` |
+| PUT | `/campaigns/:id/placement-monitor` | `SEND_CAMPAIGNS` |
+| DELETE | `/campaigns/:id/placement-monitor` | `SEND_CAMPAIGNS` |
+| GET | `/campaigns/:id/leads/:contactId/hold` | `READ_CAMPAIGNS` |
+| POST | `/campaigns/:id/leads/:contactId/pause` | `WRITE_CAMPAIGNS` |
+| POST | `/campaigns/:id/leads/:contactId/resume` | `WRITE_CAMPAIGNS` |
+| GET | `/campaigns/:id/leads/:contactId/cc` | `READ_CAMPAIGNS` + `READ_CONTACTS` |
+| PUT | `/campaigns/:id/leads/:contactId/cc` | `WRITE_CAMPAIGNS` + `READ_CONTACTS` |
+| GET | `/campaigns/:id/leads/:contactId/cc/suggestions` | `READ_CAMPAIGNS` + `READ_CONTACTS` |
+| GET | `/campaigns/:id/logs` | `READ_CAMPAIGNS` |
+| GET | `/campaigns/:id/send-plan` | `READ_CAMPAIGNS` |
+| GET | `/campaigns/:id/forms` | `READ_CAMPAIGNS` |
+| GET/POST/PATCH/DELETE | `/campaigns/:id/steps[/:sid]` | `READ_CAMPAIGNS` for GET, `WRITE_CAMPAIGNS` otherwise |
+| PATCH | `/campaigns/:id/step-layout` | `WRITE_CAMPAIGNS` |
+| POST | `/generation/write` | `WRITE_CAMPAIGNS` |
+| POST | `/generation/edit` | `WRITE_CAMPAIGNS` |
+| POST | `/generation/ai-variable` | `WRITE_CAMPAIGNS` |
+| GET | `/email-images` | `READ_CAMPAIGNS` |
+| POST | `/email-images` | `WRITE_CAMPAIGNS` |
+| DELETE | `/email-images/:id` | `WRITE_CAMPAIGNS` |
+
+The `hold`, `pause` and `resume` calls under `/campaigns/:id/leads/:contactId/` hold one contact's flow inside one campaign: an out-of-office auto-reply writes one automatically, and a member can write one by hand. The contact stays subscribed and stays a lead, so this is not an unsubscribe and not a suppression. Both writes state an absolute hold rather than applying a delta, and replacing a live hold keeps its original start, so a retry lands on the same row and neither needs an `Idempotency-Key`. See [pause a lead](/api/reference/campaigns/#pause-a-lead).
+
+The `cc` calls under the same path set the contacts copied on every email to one lead. Their answers carry contact names and addresses, so they need contact read access as well as the campaign scope. `PUT` sends the whole list, so a retry lands on the same state and needs no `Idempotency-Key`. See [set a lead's CC](/api/reference/campaigns/#set-a-leads-cc).
+
+`GET /campaigns/:id/forms` reports the forms this campaign links to and what its recipients did with them: personalized links handed out, who opened one, who started filling it in and who submitted. See the [forms guide](/guides/forms/).
+
+`GET /campaigns/:id/send-plan` returns today's sending plan: what the campaign is expected to send, and every limit that decided the number. For an active campaign the plan is computed in the background and served from a stored snapshot, so the read stays fast on a campaign of any size. `computed_at` is when that snapshot was walked, and `stale` is `true` when the campaign has since been edited, started, stopped, or has crossed into a new budget day and a refreshed plan is already being computed: the figures are the last good ones and a current plan follows within moments. A campaign that has no snapshot yet (a brand-new one) is computed on the request instead. See the [send plan guide](/guides/campaigns/#todays-sending-plan).
+
+`/email-images` is the workspace's image library for email bodies. `POST` takes a multipart `file` field (PNG, JPG, GIF or WebP, up to 5 MB) and returns the row with the public `url` you put in an `<img src>`; those bytes count against the same storage quota as campaign attachments. `GET` is keyset-paginated newest first (`?limit=` 1 to 100, `?cursor=` the opaque `pagination.next_cursor`). `DELETE` removes the object before the row and refuses with a `503` if storage will not take the delete, so a failed call changes nothing and can be retried; once it succeeds, an image in mail already sent stops loading.
+
+### Contacts
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| POST | `/contacts/search` | `READ_CONTACTS` |
+| GET | `/contacts/custom-fields` | `READ_CONTACTS` |
+| GET | `/contacts/lookup` | `READ_CONTACTS` (plus `READ_UNIBOX` with `thread_id`) |
+| POST | `/contacts` | `WRITE_CONTACTS` |
+| DELETE | `/contacts` | `BULK_CONTACTS` |
+| PATCH | `/contacts` | `BULK_CONTACTS` |
+| GET | `/contacts/verification` | `READ_CONTACTS` |
+| POST | `/contacts/verification` | `BULK_CONTACTS` |
+| GET | `/contacts/:id` | `READ_CONTACTS` |
+| PATCH | `/contacts/:id` | `WRITE_CONTACTS` |
+| DELETE | `/contacts/:id` | `WRITE_CONTACTS` |
+| GET | `/contacts/:id/emails` | `READ_CONTACTS` |
+| GET | `/contacts/:id/timeline` | `READ_CONTACTS` |
+| GET | `/contacts/:id/campaigns` | `READ_CONTACTS` |
+| GET | `/contacts/:id/segments` | `READ_CONTACTS` |
+| POST | `/contacts/export` | `READ_CONTACTS` |
+| POST | `/contacts/import/preview` | `WRITE_CONTACTS` |
+| POST | `/contacts/import/commit` | `BULK_CONTACTS` |
+| POST | `/contacts/imports` | `WRITE_CONTACTS` |
+| GET | `/contacts/imports` | `READ_CONTACTS` |
+| GET | `/contacts/imports/:id` | `READ_CONTACTS` |
+| PATCH | `/contacts/imports/:id` | `WRITE_CONTACTS` |
+| POST | `/contacts/imports/:id/analyze` | `WRITE_CONTACTS` |
+| POST | `/contacts/imports/:id/start` | `BULK_CONTACTS` |
+| POST | `/contacts/imports/:id/cancel` | `BULK_CONTACTS` |
+| GET | `/contacts/imports/:id/failed.csv` | `READ_CONTACTS` |
+| GET | `/contacts/:id/notes` | `READ_CONTACTS` |
+| POST | `/contacts/:id/notes` | `WRITE_CONTACTS` |
+| PATCH | `/contacts/:id/notes/:noteId` | `WRITE_CONTACTS` |
+| DELETE | `/contacts/:id/notes/:noteId` | `WRITE_CONTACTS` |
+| GET | `/contacts/:id/activities` | `READ_CONTACTS` |
+| GET | `/contacts/:id/deals` | `READ_CRM` |
+| POST | `/contacts/:id/research` | `AI_RESEARCH` |
+| GET | `/contacts/:id/research` | `AI_RESEARCH` |
+| POST | `/contacts/research/batch` | `AI_RESEARCH` |
+
+`GET /contacts/custom-fields` lists the distinct custom-field keys used across your contacts (frequency-ranked), for building personalization pickers and import column mappers. It returns a flat string array under `data`, capped at 200 keys.
+
+The import pair is two steps over the same file: preview parses it and suggests a column mapping (matching headers to your existing custom fields), commit applies the mapping you chose. Commit takes the stricter `BULK_CONTACTS` scope because one call writes up to 50,000 rows. A mapping problem, an unusable custom-field name or no `email` column, is a `400` on the whole request; see [contacts](/api/reference/contacts/).
+
+AI contact research charges credits (2 per run, billable even when it finds nothing) and only saves cited findings. See the [AI contact research](/guides/ai-contact-research/) guide. The batch endpoint accepts up to 500 contact ids and drains in the background.
+
+### Segments
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/segments` | `READ_CONTACTS` |
+| GET | `/segments/fields` | `READ_CONTACTS` |
+| POST | `/segments/preview` | `READ_CONTACTS` |
+| POST | `/segments` | `WRITE_CONTACTS` |
+| GET | `/segments/:id` | `READ_CONTACTS` |
+| PATCH | `/segments/:id` | `WRITE_CONTACTS` |
+| DELETE | `/segments/:id` | `WRITE_CONTACTS` |
+| POST | `/segments/:id/members` | `WRITE_CONTACTS` |
+| POST | `/segments/:id/members/lookup` | `READ_CONTACTS` |
+| GET | `/segments/:id/overrides` | `READ_CONTACTS` |
+| POST | `/segments/:id/add-to-campaign` | `WRITE_CAMPAIGNS` |
+
+Segments are saved contact audiences: a condition list plus per-contact manual overrides, evaluated live. Contact scopes cover them because a segment is a view over contacts; enrolling one into a campaign writes leads, so that call takes the campaign write scope, as does managing a campaign's linked segments (`/campaigns/:id/segments` above). `POST /contacts/search` and `POST /contacts/export` accept `segment_ids` to scope any contact query to a segment. See [contacts](/api/reference/contacts/#segments) for the condition format.
+
+### Forms
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/forms` | `READ_CONTACTS` |
+| GET | `/forms/config` | `READ_CONTACTS` |
+| POST | `/forms` | `WRITE_CONTACTS` |
+| GET | `/forms/:id` | `READ_CONTACTS` |
+| PATCH | `/forms/:id` | `WRITE_CONTACTS` |
+| DELETE | `/forms/:id` | `WRITE_CONTACTS` |
+| GET | `/forms/:id/submissions` | `READ_CONTACTS` |
+| DELETE | `/forms/:id/submissions/:sid` | `WRITE_CONTACTS` |
+| GET | `/forms/:id/stats` | `READ_CONTACTS` |
+| GET | `/forms/domain` | `READ_CONTACTS` |
+| PUT | `/forms/domain` | `WRITE_CONTACTS` |
+| POST | `/forms/domain/verify` | `WRITE_CONTACTS` |
+| GET | `/forms/:id/links/:contactID` | `WRITE_CONTACTS` |
+| POST | `/forms/:id/assets/:kind` | `WRITE_CONTACTS` |
+| DELETE | `/forms/:id/assets/:kind` | `WRITE_CONTACTS` |
+
+Hosted lead-capture forms; see the [forms guide](/guides/forms/). Contact scopes cover them because a form exists to create contacts. Minting a personalized link is a `GET` on top of an upsert, so retries always return the same token. The `/forms/domain` routes are the workspace-wide custom forms domain and additionally need the `manage_settings` organization permission for JWT callers; `PUT` resolves the record as part of saving, and only a verified domain is ever used to build a URL. The public page (`/f/:public_id`), its submit endpoint and the embed loader (`/forms.js`) are served by the standalone forms service on its own host (`FORMS_DOMAIN`), not the API origin, and take no authentication; the unguessable public id is the capability, and the JSON endpoints additionally require the render token the page shell carries.
+
+### Lead sync
+
+Saved Google Sheets sources that upsert contacts on demand. Gated under the contact write scope because a sync ultimately writes contacts. Nothing syncs on a timer: a source only runs when `/lead-sync/sources/:id/sync` is called.
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/lead-sync/google/connection` | `WRITE_CONTACTS` |
+| POST | `/lead-sync/google/spreadsheet` | `WRITE_CONTACTS` |
+| POST | `/lead-sync/google/preview` | `WRITE_CONTACTS` |
+| GET | `/lead-sync/sources`, `/lead-sync/sources/:id` | `WRITE_CONTACTS` |
+| POST | `/lead-sync/sources` | `WRITE_CONTACTS` |
+| PATCH | `/lead-sync/sources/:id` | `WRITE_CONTACTS` |
+| DELETE | `/lead-sync/sources/:id` | `WRITE_CONTACTS` |
+| POST | `/lead-sync/sources/:id/sync` | `WRITE_CONTACTS` |
+
+A source's `column_mapping` is validated when the source is written, not on its next sync, so a mapping with no `email` column or an unusable custom-field name is a `400` on create or update. See [integrations](/api/reference/integrations/).
+
+### Unibox
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/unibox` | `READ_UNIBOX` |
+| GET | `/unibox/count` | `READ_UNIBOX` |
+| GET | `/unibox/thread` | `READ_UNIBOX` |
+| GET | `/unibox/:id` | `READ_UNIBOX` |
+| PATCH | `/unibox/seen` | `WRITE_UNIBOX` |
+| PATCH | `/unibox/folder` | `WRITE_UNIBOX` |
+| POST | `/unibox/reply` | `WRITE_UNIBOX` (plus `READ_UNIBOX` with `forward_message_id`) |
+| POST | `/unibox/reply/draft` | `READ_UNIBOX` |
+| GET | `/unibox/compose/candidates` | `READ_UNIBOX` |
+| POST | `/unibox/compose` | `WRITE_UNIBOX` |
+| POST | `/unibox/compose/draft` | `READ_UNIBOX` |
+| GET | `/unibox/drafts` | `READ_UNIBOX` |
+| PUT | `/unibox/drafts/:id` | `WRITE_UNIBOX` |
+| DELETE | `/unibox/drafts/:id` | `WRITE_UNIBOX` |
+| GET | `/unibox/agent-drafts` | `READ_UNIBOX` |
+| POST | `/unibox/agent-drafts/:id/approve` | `WRITE_UNIBOX` |
+| POST | `/unibox/agent-drafts/:id/discard` | `WRITE_UNIBOX` |
+
+`PATCH /unibox/folder` re-files into `inbox`, `archive` or `trash`. Name the messages with `email_ids`, the conversations with `thread_ids`, or both; up to 500 of each. Prefer `thread_ids` when you have one: filing part of a conversation leaves it listed, because a thread shows wherever any message of it still sits. The move is then relayed to each mailbox with `relay_folder_moves` on (the default): the provider's copy is archived, moved to its trash, or put back in its inbox, after the response and best-effort, and the next sync will not undo a filing either way, because the provider's placement is tracked separately and followed only when the provider itself moves the message. `sent`, `drafts` and `spam` are placements a provider reaches rather than somewhere a person files mail, so they are rejected with a `400`. See [filing a conversation](/guides/unibox/#filing-a-conversation).
+
+`PATCH /unibox/seen` takes the same two forms: `email_ids` for individual messages, `thread_ids` for whole conversations. `folder` sweeps one folder instead and cannot be combined with either. Unread by conversation marks only its newest received message (preferring one outside spam and trash), or its newest sent copy if it has no received message; otherwise sent copies stay read. Drafts are never marked unread. Explicit `email_ids` and `folder` sweeps never mark sent or draft copies unread.
+
+`GET /unibox` lists every working folder by default. Spam, trash and archive stay out, so a conversation you file leaves every view rather than only the Inbox folder; pass `include_archived=true` for the All mail behaviour, or `folder=archive` to read the folder itself.
+
+`POST /unibox/snooze` accepts `thread_id` for one conversation or `thread_ids` for up to 500. The single form answers with the snooze row, as before; the bulk form answers with `data`. `DELETE /unibox/snooze?thread_id=` accepts a comma-separated list.
+
+`POST /unibox/reply` with `forward_message_id` forwards a stored message, which discloses it, so the key also needs `READ_UNIBOX` and, when it is restricted to certain mailboxes, the mailbox the message belongs to. See [Forwarding a message](/api/reference/unibox/#forwarding-a-message).
+
+`POST /unibox/reply/draft` returns an AI-drafted reply (it never sends) grounded in the thread, the contact, and your [voice profile](/guides/unibox/#ai-reply-drafts). It charges AI credits; see [AI credits](/guides/ai-credits/).
+
+`POST /unibox/compose/draft` returns a grounded AI draft for a new email (it never sends): the recipient's contact record, correspondence history, and the workspace voice profile feed the prompt, and the response carries either `text` or a clarifying `question` plus a `grounding` report. Charges AI credits like the reply draft; see [AI credits](/guides/ai-credits/).
+
+`POST /unibox/compose` sends a brand-new outbound email (not a reply). `body_html` goes out as written; with `body_plain` left empty, the plain-text part is rendered from it, which `POST /unibox/reply` does too. Omit `email_account_id` (or pass `"auto"`) and the backend picks the best mailbox for the first recipient; the response reports `account_id`, `account_email`, `auto`, and a `picked_reason`. Recipients on the workspace suppression list are rejected with a `400` before anything queues. `GET /unibox/compose/candidates?to=<address>` returns every active mailbox scored for that recipient (conversation history, remaining daily budget, domain-auth health) plus the resolved contact and suppression state; see [composing email](/guides/unibox/#composing-a-new-email).
+
+The `/unibox/drafts` endpoints hold autosaved compose drafts, scoped to the calling user within the organization. The draft id is client-generated, so `PUT` is idempotent (safe for debounced autosave and retries); deleting a missing draft is a no-op. A draft carries `body` (the plain text) and `body_html`, which is empty for a plain-text draft; each is capped at 100,000 characters.
+
+`GET /emails/:id/auth-check` runs a live SPF/DKIM/DMARC lookup on the mailbox's sending domain and reports it without changing anything. `POST /emails/:id/auth-check` runs the same lookup and records the verdict against every active mailbox on that domain, which is what clears the send gate after a DNS fix, so it needs `WRITE_EMAILS` rather than `READ_EMAILS`. The write takes no `Idempotency-Key`: it is derived entirely from public DNS with no request body, so repeating it converges on the same result. See [domain authentication](/guides/deliverability/#domain-authentication).
+
+`GET /emails/:id/track` reports the mailbox's stored tracking domain plus the `CNAME` value this deployment expects (`cname_target`, taken from its `TRACKING_DOMAIN`), and does no DNS work. `PATCH /emails/:id/track` sets the domain and resolves it once; `POST /emails/:id/track/verify` re-resolves the saved one and records the verdict, which is what makes a record that has finished propagating start being used. Both writes are derived from public DNS with no request body, so they take no `Idempotency-Key`. Only a verified domain is used at send time; until then opens and clicks go through the shared tracking host. See [custom tracking domain](/guides/mailboxes/#custom-tracking-domain).
+
+`POST /emails/:id/hold` keeps a mailbox out of campaign sending until `POST /emails/:id/release` puts it back; warmup is unaffected and the automatic rest logic never releases a hold. `release` is also the manual exit for a mailbox that is `resting` automatically. Both are bodyless and idempotent, so they take no `Idempotency-Key`. See [holding a mailbox yourself](/guides/mailboxes/#holding-a-mailbox-yourself).
+
+`GET /emails/allowance` reports how many mailboxes the workspace holds (`used`), how many it may hold (`allowance`, `null` for unlimited), `remaining`, and the `basis` of the number: `fair_use` (the plan's daily sends divided by `sends_per_mailbox`), `plan`, `override` (an approved request), `free`, or `unlimited`. `pending_request` is the open limit-increase request for mailboxes, if any. Every connect path refuses with `mailbox_allowance_reached` once `remaining` is `0`. See [mailbox allowance](/guides/mailboxes/#mailbox-allowance).
+
+`GET /emails/:id/identity` reports which addresses the mailbox's provider will let it send as, which one it uses, and whether its signature was imported or written here; it contacts no provider. `POST /emails/:id/identity/refresh` re-reads that list from the provider and stores it, and with `import_signature` also replaces the stored signature with the one configured at the provider. Storing the list is what a `send_as_email` choice is validated against, so the refresh needs `WRITE_EMAILS` rather than `READ_EMAILS`; it takes no `Idempotency-Key` because it writes exactly what the provider currently says. Gmail only. See [sending identity](/guides/mailboxes/#sending-identity).
+
+`GET /emails/:id/sync` reports, alongside the import state and budget, `skip_folders` (the folders the mailbox's sync leaves alone) and `folders` (what the worker last listed on the server, each with its `name` and the canonical `folder` it files under, INBOX first; empty for Gmail and Outlook). `PUT /emails/:id/sync` takes `{"skip_folders": [...]}` and replaces the list: names as the server lists them, matched without regard to case, each covering its subfolders. Mail already stored from a newly skipped folder is removed, the mailbox is re-shipped to its worker so the change applies on the next pass, and the response is the list as stored. It refuses `INBOX` and any sent, drafts, spam, trash or archive folder with `400 invalid_sync_folder`, as it does a list of more than `50` names or a mailbox that is not IMAP. The body is the desired state, so it takes no `Idempotency-Key`. See [folders you do not want synced](/guides/mailboxes/#folders-you-do-not-want-synced).
+
+`PATCH /emails/:id` accepts `save_to_sent` (boolean) on SMTP/IMAP mailboxes: when true, which is the default, the worker files a copy of each outbound message in the mailbox's Sent folder. It has no effect on Gmail and Outlook mailboxes, whose APIs file their own copy. See [keeping a copy of sent mail](/guides/mailboxes/#keeping-a-copy-of-sent-mail).
+
+`PATCH /emails/:id` also accepts `relay_folder_moves` (boolean, default true), on every provider: when true, filing a conversation with `PATCH /unibox/folder` moves it in the mailbox too. See [filing in the mailbox](/guides/mailboxes/#filing-in-the-mailbox).
+
+The same `WRITE_EMAILS` mailbox PATCH accepts `test_mode` (`diagnostic`, `off`, `legacy`), independent `test_send_enabled`/`test_receive_enabled`, positive `shared_daily_limit`/`rolling_recipient_limit`, and `send_recovery_resolution`. Repair resolution binds `held_task_id`/`held_reason` and requires either `authentication_repaired` with a newer definitive successful same-mailbox outbound `evidence_task_id`, or `operator_provider_confirmation` with a same-mailbox definitive applied `evidence_task_id` and non-empty `confirmation_reference`. Fresh inbox sync alone is not evidence. For `held_reason: "unknown"`, explicit provider confirmation accepts `operator_confirmed_sent` (requires `message_id`, optional `provider_msg_id`/`thread_id`) or `operator_confirmed_not_sent` (no message/thread handles), with a non-empty `confirmation_reference` and no `evidence_task_id`. This queues an audited normal send result, not an immediate hold reset. The consumer reconciles it before reopening admission; other unknown tasks remain held. A timeout or missing Sent copy never permits automatic retry. Existing NULL participation remains legacy; new mailboxes default off. See [send safety and exact resolution requirements](/development/send-safety/).
+
+`DELETE /emails/:id` releases the mailbox on Pegasusbound Cloud before removing the local mailbox. An enrolled mailbox's stored credential comes out of the pool, and a cloud-managed mirror's claim is released so the mailbox returns to the cloud workspace and can be adopted again. If the cloud cannot confirm the release, the delete returns `409 mailbox_cloud_unenroll_failed` and keeps the mailbox record so the request can be retried safely. Pegasusbound attempts to restore the mailbox onto its worker immediately, and the worker reconciler may restore it later if that attempt fails. See [mailboxes](/guides/mailboxes/).
+
+`GET /unibox` and `GET /unibox/thread` return message previews: each row carries `snippet`, a one-line summary, not the message body. Read a full message with `GET /unibox/:id`, which returns `body_plain` plus `body_html`. The HTML is sanitized before it leaves the API (scripts, event handlers, embedded frames, and unsafe URL schemes are removed), so it is safe to render, and links carry `target="_blank"` with `rel="noopener"`. Pegasusbound open-tracking pixels are also removed from this display copy, including quoted history, so rendering it does not record a campaign open. Stored and delivered copies keep their pixels. `body_truncated` is `true` on the rare message whose stored body could not be read, where `body_plain` falls back to the snippet. The same response carries the full envelope (`from`, `to`, `cc`, `bcc`, `ReplyTo`, `date`, `internal_date`, `message_id`, `in_reply_to`, `size`), the mailbox it belongs to (`email_id`) and its canonical `folder`.
+
+`GET /unibox` also accepts `address=<value>` (matches sender or recipient, for "every conversation with this person") and `direction=sent|received` (resolved against your own mailbox addresses).
+
+The `agent-drafts` endpoints back the [inbox agent](/guides/inbox-agent/): the agent drafts a suggested reply on an inbound human reply and holds it here for review. `GET` lists the pending drafts; `approve` sends one (optionally with an edited `body`) through the normal reply path and is safe to retry with an `Idempotency-Key`; `discard` dismisses it. Approving is the only path that sends.
+
+### Templates and CRM
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/templates`, `/templates/:id` | `READ_TEMPLATES` |
+| POST | `/templates/score` | `READ_TEMPLATES` |
+| POST | `/templates/analyze` | `WRITE_TEMPLATES` (it spends AI credits) |
+| POST/PATCH/DELETE | `/templates[/:id]` | `WRITE_TEMPLATES` |
+| GET | `/crm/pipelines`, `/crm/pipelines/:id` | `READ_CRM` |
+| POST/PATCH/DELETE | `/crm/pipelines[/:id][/stages[/:stageId]]` | `WRITE_CRM` |
+| GET | `/crm/deals`, `/crm/deals/:id` | `READ_CRM` |
+| POST/PATCH/DELETE | `/crm/deals[/:id]` | `WRITE_CRM` |
+| GET | `/crm/tasks`, `/crm/tasks/:id` | `READ_CRM` |
+| POST/PATCH/DELETE | `/crm/tasks[/:id]` | `WRITE_CRM` |
+| PATCH/DELETE | `/crm/tasks` (bulk, over an id list or a whole filter) | `WRITE_CRM` |
+| GET | `/crm/task-types` | `READ_CRM` |
+| POST/PATCH/DELETE | `/crm/task-types[/:id]` | `WRITE_CRM` |
+| GET | `/crm/settings`, `/crm/metadata`, `/crm/owners`, `/crm/sync` | `READ_CRM` |
+| PUT | `/crm/settings` | `INTEGRATIONS` |
+| PUT | `/crm/owners/:externalId` | `INTEGRATIONS` |
+| POST | `/crm/sync`, `/crm/sync/retry`, `/crm/sync/discard` | `INTEGRATIONS` |
+| GET/POST | `/crm/backfill` | `INTEGRATIONS` |
+| GET | `/crm/contacts/:id` | `READ_CRM` |
+| POST | `/crm/contacts/:id/refresh` | `READ_CRM` |
+| POST | `/crm/contacts/:id/link` | `WRITE_CRM` |
+| PATCH | `/crm/contacts/:id` | `WRITE_CRM` |
+| GET | `/crm/lists` | `READ_CRM` |
+| POST | `/crm/lists/preview`, `/crm/lists/import` | `WRITE_CONTACTS` |
+
+The `/crm/settings` through `/crm/lists` routes are CRM provider mode ([HubSpot](/guides/hubspot/) or [Pipedrive](/guides/pipedrive/)), and act on the CRM the workspace runs on. For a dashboard session they gate on `view_contacts` to read, `manage_contacts` to edit a contact's CRM record or import a list, and `manage_settings` to change the mode, match owners, run a sync or copy records. `POST /crm/sync/retry`, `POST /crm/sync/discard` and `POST /crm/backfill` are naturally safe to retry: a requeued job is not queued twice and a copied record is never copied again. While HubSpot or Pipedrive is the workspace's CRM, writes to pipelines, stages and task types answer `409 crm_managed_externally`. See [CRM](/api/reference/crm/#crm-provider-mode).
+
+### Analytics and audit
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/analytics/*` (dashboard, direct, inbox-tagging, deliverability, warmup, warmup/placement, campaigns, accounts, usage) | `READ_ANALYTICS` |
+| GET | `/audit-logs` | `READ_AUDIT_LOGS` |
+
+Analytics reads use the selected workspace for JWT callers and the key's workspace for API-key callers. This includes warmup and usage totals, so teammates see the same workspace history regardless of which member connected a mailbox or created a campaign.
+
+`GET /analytics/warmup` and `GET /analytics/warmup/placement` include detailed Cloud warmup reports for enrolled mailboxes on a linked self-hosted instance, alongside local warmup history. The optional `email_id` is always the local mailbox ID; workspace reports request only that workspace's enrollments. Cloud failures are returned as errors, not empty or partial reports. Daily warmup stats include `active`, whether that date had a warmup plan, so combining sources counts each active UTC date once.
+
+Cloud exposes `POST /pool-link/instance/analytics/warmup` and `POST /pool-link/instance/analytics/warmup/placement` for instance tokens only, not API keys. Both accept `{ "remote_ids": ["uuid"], "from": "YYYY-MM-DD", "to": "YYYY-MM-DD" }`, with 1 to 100 enrolled remote IDs and up to 366 inclusive UTC days. Invalid ranges or batch sizes return `400`; any ID not enrolled by the calling instance refuses the whole request with `pool_link_mailbox_not_found`. The first returns daily counts, including `active`; the second returns raw `daily`, `hosts`, `sent`, `unconfirmed` and `windows` counts with instance-side remote IDs. Daily placement includes the lookback before `from` needed for rolling rates, hosts and send counts cover the requested range, and windows cover the current trailing window.
+
+`GET /analytics/inbox-tagging` accepts `limit`, opaque `cursor`, and `needs_review` query parameters and returns `data`, aggregate `summary`, and `pagination`. Each row carries `actions`, the list of what the verdict was allowed to do (`hold`, `stop`, `task`, `suppress`), and `summary.acted` counts the rows that did anything. `return_date` (`YYYY-MM-DD`, or `null`) is the out-of-office return date the model was asked to confirm, with its answer under `answers.return_date`. Invalid cursors, limits, or booleans return `400`.
+
+`GET /analytics/accounts` returns account health and usage in the standard `data` plus `pagination` envelope with an opaque `cursor`. Pass `email_ids` (comma-separated, up to 200) to ask only for the mailboxes a page shows, or `limit` (`1`-`1000`, default `1000`) and `cursor` to walk the whole inventory. Per-mailbox reads are batched across the page, so a page's cost does not grow with the total inventory, and a workspace with more mailboxes than one page reaches the rest through `next_cursor` instead of having them silently dropped. Invalid cursors, limits, or ids return `400`.
+
+### Inbox placement tests
+
+A [placement test](/guides/placement-tests/) sends real mail from one of the workspace's mailboxes, so starting and cancelling one takes the same permission as starting a campaign, while reading results is an analytics read. Everything here is scoped to the workspace: a test, a sending mailbox, a campaign, a step and a contact are each checked to belong to it before anything is sent.
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/placement/overview` | `READ_ANALYTICS` |
+| GET | `/placement/tests` | `READ_ANALYTICS` |
+| GET | `/placement/tests/:id` | `READ_ANALYTICS` |
+| POST | `/placement/tests` | `SEND_CAMPAIGNS` |
+| POST | `/placement/tests/:id/cancel` | `SEND_CAMPAIGNS` |
+| GET | `/placement/seeds` | `READ_EMAILS` |
+| PUT | `/placement/seeds/:email_account_id` | `WRITE_EMAILS` |
+| GET | `/placement/batches` | `READ_ANALYTICS` |
+| GET | `/placement/batches/:id` | `READ_ANALYTICS` |
+| GET | `/placement/batches/:id/senders` | `READ_ANALYTICS` |
+| POST | `/placement/batches/preview` | `SEND_CAMPAIGNS` |
+| POST | `/placement/batches` | `SEND_CAMPAIGNS` |
+| POST | `/placement/batches/:id/cancel` | `SEND_CAMPAIGNS` |
+| GET | `/placement/coverage` | `READ_ANALYTICS` |
+
+For session callers the matching organization permissions are **View analytics** for the reads (tests, batches, a batch's senders and coverage), **Send campaigns** for starting, previewing and cancelling a test or a batch, **View campaigns** for listing seed inboxes and **Manage mailboxes** for marking one. The campaign's placement monitor (`/campaigns/:id/placement-monitor`, listed under campaigns above) is read with **View campaigns** and changed with **Send campaigns**.
+
+A key restricted to certain mailboxes can only start a test from one of them and only sees and marks those mailboxes as seeds. `POST /placement/tests` accepts an `Idempotency-Key`; `PUT /placement/seeds/:email_account_id` and `PUT /campaigns/:id/placement-monitor` state an absolute value, so a retry lands on the same state. `GET /placement/tests` takes `limit` (`1` to `100`, default `25`), an opaque `cursor` and an optional `campaign_id`, and returns `data` plus `pagination`; an invalid cursor or limit is a `400`. It leaves out the tests a batch started, which are read through their batch.
+
+A [placement batch](/guides/placement-tests/#testing-a-fleet-with-batches) runs the same test from many mailboxes. `POST /placement/batches` takes the copy, panel, tracking and pace a single test takes, plus exactly one of `sender_account_ids` or `sender_scope` (`{"type": "campaign", "campaign_id": ...}` or `{"type": "workspace"}`, with optional `providers`, `domains`, `tag_ids`, `include_inactive` and `untested_days`), an optional `sample`, `on_unavailable` (`defer` or `skip`) and `max_credits` for the whole batch. It answers `201` with the batch `queued` as soon as the senders are written down; the backend starts them a few at a time. `POST /placement/batches/preview` takes the same body and returns the counts it would come to (senders, tests, the most copies sent, free and paid tests, credits) without starting anything or writing a row. A key restricted to certain mailboxes can only name those in `sender_account_ids` (another is a `403`), and a server-side scope resolves to those alone. `POST /placement/batches` accepts an `Idempotency-Key`; cancelling states an end state, so a retry answers `placement_batch_not_running` and changes nothing. `GET /placement/batches` and `GET /placement/batches/:id/senders` take `limit` and `cursor` like the tests list; the senders list also takes `sort` (`worst`, the default, `best`, `email` or `status`), `status` and `q` (a substring of the address), and an unknown value of any of them is a `400`. See the [placement endpoint reference](/api/reference/placement/).
+
+### Advisor
+
+Recommendations about deliverability, mailbox configuration, warmup, campaign performance, copy, and list quality. See the [Advisor guide](/guides/advisor/).
+
+Reads are an analytics read of the workspace's sending posture. Applying or undoing a fix has no scope of its own: the change runs through the tool the fix actually uses and is refused if the caller lacks that tool's permission, so a key that can read recommendations cannot use them to make changes it could not make directly.
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/advisor/recommendations` | `READ_ANALYTICS` |
+| GET | `/advisor/summary` | `READ_ANALYTICS` |
+| GET | `/advisor/settings` | `READ_ANALYTICS` |
+| POST | `/advisor/refresh` | `READ_ANALYTICS` |
+| POST | `/advisor/recommendations/:id/snooze` | `READ_ANALYTICS` |
+| POST | `/advisor/recommendations/:id/dismiss` | `READ_ANALYTICS` |
+| POST | `/advisor/recommendations/:id/feedback` | `READ_ANALYTICS` |
+| POST | `/advisor/recommendations/:id/apply` | `READ_ANALYTICS`, plus the permission of the underlying change |
+| POST | `/advisor/recommendations/:id/undo` | `READ_ANALYTICS`, plus the permission of the underlying change |
+
+Apply and undo run the fix under the key's own scopes, and a key limited to certain mailboxes can only apply or undo a fix for one of them (`403` otherwise). Changing Advisor settings (`PATCH /advisor/settings`) is JWT only, alongside the rest of organization settings. Silencing checks for a whole workspace is governance, and no read scope should be able to do it. The same applies to `POST /advisor/recommendations/:id/agent-fix`, which is JWT only and needs `USE_AI`: it acts as a named member and spends credits, and no API scope should let a key rewrite a workspace's campaigns unattended.
+
+### API key self-service
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/api-keys` | `API_KEYS` |
+| POST | `/api-keys` | `API_KEYS`, not OAuth tokens |
+| GET | `/api-keys/permissions` | `API_KEYS` |
+| GET | `/api-keys/:id` | `API_KEYS` |
+| PATCH | `/api-keys/:id` | `API_KEYS`, not OAuth tokens |
+| DELETE | `/api-keys/:id` | `API_KEYS`, not OAuth tokens |
+| DELETE | `/api-keys/:id/permanent` | `API_KEYS`, not OAuth tokens |
+| DELETE | `/api-keys/self` | none |
+
+`DELETE /api-keys/:id/permanent` deletes a key that has already been revoked or has expired, taking its usage logs with it. A key that could still authenticate gets a `409`, because revoking is what records that a credential was ended and why. See [Ending a key](/api/authentication/).
+
+`POST /api-keys` requires a recent confirmation (`POST /auth/reauth`) when called from a signed-in session, because a key outlives the session that made it and a stolen browser token should not be able to leave one behind. An API key calling it is unaffected: it has no session and no second factor to present, it was itself minted from a confirmed session, and the `API_KEYS` scope is the explicit grant that governs it. Automation and the CLI keep working.
+
+Creating, editing, revoking and deleting keys is for a signed-in member or an API key; an OAuth app token gets `403` `oauth_token_not_allowed`. A new or edited key stays within its creator: a member cannot give it a permission their role does not cover, and an API key cannot give it a permission, mailbox or IP address the calling key does not have (`403` `api_key_permissions_exceed_caller`). See [what a role can delegate](/api/permissions/#what-a-role-can-delegate). `GET /api-keys/permissions` reports the caller's bound as `grantable`.
+
+`DELETE /api-keys/self` revokes the key the request was made with, and is the one route here that needs no scope. A credential must always be able to end itself: requiring `API_KEYS` to sign out would leave a read-only key on a laptop someone is handing back live, which is what [`pegasusbound auth logout`](/api/cli/) promises to prevent. A JWT caller gets a `400`: there is no key in that request to end, only a session, which `POST /auth/logout` ends.
+
+### OAuth apps
+
+Registering and managing the OAuth apps your workspace owns. The flow itself (authorize, token, revoke) is listed under JWT only and Public below. Every route here, and `POST /oauth/application-logo`, refuses an OAuth app token with `403` `oauth_token_not_allowed`.
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/oauth/applications` | `API_KEYS` |
+| POST | `/oauth/applications` | `API_KEYS` |
+| GET | `/oauth/applications/:id` | `API_KEYS` |
+| PATCH | `/oauth/applications/:id` | `API_KEYS` |
+| DELETE | `/oauth/applications/:id` | `API_KEYS` |
+| POST | `/oauth/applications/:id/rotate-secret` | `API_KEYS` |
+| POST | `/oauth/applications/:id/logo` | `API_KEYS` |
+| DELETE | `/oauth/applications/:id/logo` | `API_KEYS` |
+| GET | `/oauth/applications/:id/webhook-secret` | `API_KEYS` |
+| POST | `/oauth/applications/:id/webhook-secret/rotate` | `API_KEYS` |
+| GET | `/oauth/applications/:id/webhook-endpoints` | `API_KEYS` |
+| GET | `/oauth/applications/:id/webhook-deliveries` | `API_KEYS` |
+| GET | `/oauth/applications/:id/listing` | `API_KEYS` |
+| PUT | `/oauth/applications/:id/listing` | `API_KEYS` |
+| DELETE | `/oauth/applications/:id/listing` | `API_KEYS` |
+
+The `listing` routes publish an app to the [community directory](/api/oauth/#publish-to-the-community-directory). `PUT` replaces the whole listing and `DELETE` succeeds when there is nothing to remove, so both are safe to retry. Browsing the directory is `GET /integrations/community` and `GET /integrations/community/:slug`, under `/integrations/*` below.
+
+### Operations
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET/PATCH | `/outreach/settings` | `WRITE_CAMPAIGNS` |
+| POST | `/deliverability/events` | `WRITE_CAMPAIGNS` |
+| GET | `/suppressions` | `READ_CONTACTS` |
+| POST | `/suppressions` | `WRITE_CONTACTS` |
+| DELETE | `/suppressions/:id` | `WRITE_CONTACTS` |
+| GET | `/tasks/dlq` | `SEND_CAMPAIGNS` |
+| POST | `/tasks/dlq/:id/replay` | `SEND_CAMPAIGNS` |
+| GET/POST/PATCH/DELETE | `/webhooks[/:id]` | `WEBHOOKS` |
+| POST | `/webhooks/:id/rotate-secret` | `WEBHOOKS` |
+| POST | `/webhooks/:id/verify` | `WEBHOOKS` |
+| GET | `/webhooks/event-types` | `WEBHOOKS` |
+| GET | `/webhooks/deliveries` | `WEBHOOKS` |
+| GET | `/webhooks/:id/deliveries` | `WEBHOOKS` |
+| POST | `/webhooks/deliveries/:deliveryId/redeliver` | `WEBHOOKS` |
+| GET | `/webhooks/throttle-drops` | `WEBHOOKS` |
+| GET/POST/DELETE | `/integrations/*` (except `/integrations/slack/*`, which is [JWT only](#slack), and `/integrations/bookings`) | `INTEGRATIONS` |
+| GET | `/integrations/bookings` | `READ_CONTACTS` |
+| GET/PUT | `/integrations/salesforce/:id/settings` | `INTEGRATIONS` |
+| GET | `/integrations/salesforce/:id/overview`, `/metadata`, `/users`, `/list-views`, `/campaigns`, `/activity` | `INTEGRATIONS` |
+| POST | `/integrations/salesforce/:id/import/preview` | `INTEGRATIONS` |
+| GET/POST/PATCH/DELETE | `/integrations/salesforce/:id/import-sources[/:sourceId]` | `INTEGRATIONS` |
+| POST | `/integrations/salesforce/:id/import-sources/:sourceId/run` | `INTEGRATIONS` |
+| POST | `/integrations/salesforce/:id/activity/retry`, `/sync-now` | `INTEGRATIONS` |
+| GET | `/contacts/:id/salesforce` | `READ_CRM` |
+| POST | `/contacts/:id/salesforce/sync` | `INTEGRATIONS` |
+| DELETE | `/contacts/:id/salesforce/links/:linkId` | `INTEGRATIONS` |
+| GET | `/integrations/apollo/:id`, `/lists` | `INTEGRATIONS` |
+| PUT | `/integrations/apollo/:id/key` | `INTEGRATIONS` |
+| POST | `/integrations/apollo/:id/import/preview` | `INTEGRATIONS` |
+| GET/POST/PATCH/DELETE | `/integrations/apollo/:id/import-sources[/:sourceId]` | `INTEGRATIONS` |
+| POST | `/integrations/apollo/:id/import-sources/:sourceId/run` | `INTEGRATIONS` |
+| GET | `/integrations/apollo/:id/enrichments[/:runId]` | `INTEGRATIONS` |
+| POST | `/integrations/apollo/:id/enrichments` | `INTEGRATIONS` and `BULK_CONTACTS` |
+| GET/PATCH | `/integrations/clay/:id` | `INTEGRATIONS` |
+| GET/POST/PATCH/DELETE | `/automations[/:id]` | `INTEGRATIONS` |
+| PATCH | `/automations/:id/layout` | `INTEGRATIONS` |
+
+A signed-in member needs `manage_settings` to create, edit, enable or delete an automation, because a flow runs as the workspace; `use_integrations` is enough to list, open, test and read the run history.
+
+Starting an [Apollo](/guides/apollo/) enrichment writes contacts and spends the workspace's Apollo credits, so it needs `BULK_CONTACTS` as well as `INTEGRATIONS` (for a member, `use_integrations` and `manage_contacts`). Saving the key, imports and Clay settings need `manage_settings`; previewing and running an import need `use_integrations`. `POST /integrations/inbound/clay/:secret` is the URL a [Clay](/guides/clay/) table posts rows to. It takes no API key, because the secret in its path is the credential.
+| GET/POST/PATCH/DELETE | `/warmup/routing[/:id]` | `WARMUP_ROUTING` |
+
+### Retry safety
+
+Mutating API requests may include an `Idempotency-Key` header. Pegasusbound stores the completed response for 24 hours per organization and key. Reusing the same key with the same method, route, query, and body replays the original response with `X-Idempotent-Replayed: true`; reusing the key with a different request returns `409 Conflict`.
+
+### Identity
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/me` | (any authenticated key) |
+
+`GET /me` returns who the active credential belongs to: `user_id`, `email`, `name`, `organization_id`, `organization_name`, `auth_type` (`api_key`, `oauth`, or `jwt`), and the granted `scopes`. It requires no specific permission, so it is the right call for validating a connection and rendering a human-readable label. Unlike `/auth/me` (JWT only), it is reachable by API keys and OAuth tokens.
+
+### Labels
+
+Folders (on campaigns), tags (on mailboxes) and labels (on contacts, inbox conversations and forms, managed through the `/categories` endpoints) are three registries with the same shape. Each belongs to the **workspace**, not to whoever created it. Every member sees the same set, whoever created it, and reads it from `GET /auth/me`, which returns `folders`, `tags` and `categories` for the session's selected workspace; there is no separate list endpoint and no read scope of its own. Changing a registry is gated like the records it labels, so it takes the API permission in the table below, or the matching JWT permission `MANAGE_CAMPAIGNS`, `MANAGE_EMAILS` or `MANAGE_CONTACTS`. Membership alone is read-only.
+
+`position` is the order within its own registry, `0`-based and contiguous. A move returns the full new ordering. A registry holds at most `100` entries.
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| POST | `/folders` | `WRITE_CAMPAIGNS` |
+| PATCH | `/folders/:id` | `WRITE_CAMPAIGNS` |
+| PATCH | `/folders/:id/move` | `WRITE_CAMPAIGNS` |
+| DELETE | `/folders/:id` | `WRITE_CAMPAIGNS` |
+| POST | `/tags` | `WRITE_EMAILS` |
+| PATCH | `/tags/:id` | `WRITE_EMAILS` |
+| PATCH | `/tags/:id/move` | `WRITE_EMAILS` |
+| DELETE | `/tags/:id` | `WRITE_EMAILS` |
+| POST | `/categories` | `WRITE_CONTACTS` |
+| PATCH | `/categories/:id` | `WRITE_CONTACTS` |
+| PATCH | `/categories/:id/move` | `WRITE_CONTACTS` |
+| DELETE | `/categories/:id` | `WRITE_CONTACTS` |
+
+### Reference data
+
+| Method | Path | API Permission |
+|--------|------|----------------|
+| GET | `/plans` | (any authenticated key) |
+| GET | `/timezones` | (any authenticated key) |
+
+## JWT only
+
+These never accept an API key. They depend on a human-bound session: billing flows, governance, OAuth onboarding, websocket bootstrap, and operational destruction.
+
+With [multiple dashboards sharing a backend](/development/configuration/#google-sign-in-per-dashboard-deployment), password-reset and invitation emails, referral links and billing returns use the initiating browser's exact configured dashboard origin. Without a trusted origin they use the primary dashboard. Mailbox, administrator-grant, integration and Slack identity OAuth callbacks recover their target from live server-side state, never from callback query parameters. Expired or consumed routing state is not forwarded to another dashboard.
+
+- `POST /auth/login`, `/auth/login/confirm`, `/auth/register`, `/auth/register/confirm`, `/auth/refresh`, `/auth/reset-password`, `/auth/reset-password/confirm`
+- `POST /auth/reauth` (re-prove the account holder behind a live session, for the changes that require a recent confirmation)
+- `GET /auth/config` (public deployment capabilities: which sign-in methods this backend has enabled, whether a login code step follows, whether signups are open, whether the instance still needs claiming)
+- `GET /auth/instance` (JWT only: the running Pegasusbound version of a self-hosted instance and whether a newer release exists, for the dashboard's version pill; a hosted deployment answers `self_hosted: false` and nothing else)
+
+`POST /auth/register` accepts an optional `invite` field carrying an invitation token. On a deployment running `DISABLE_REGISTRATION=invite_only` it is what permits the signup, and the account is created inside the inviting organization rather than in a new one. The token must resolve to a live invitation whose email equals the submitted address, otherwise the request is refused with `invitation_invalid`. Omitting it on a closed deployment returns `registration_invite_only` or `registration_closed`. See [error codes](/api/error-codes/#registration-and-invitation-refusals).
+
+### Actions that need a recent confirmation
+
+These changes require the session to have confirmed the account holder within the last five minutes, over and above the permission they already need:
+
+| Action | Route |
+|--------|-------|
+| Create an API key | `POST /api-keys` |
+| Approve an app on the OAuth consent screen | `POST /oauth/authorize` |
+| Approve a CLI sign-in | `POST /auth/cli/codes/:code/approve` |
+| Add a passkey | `POST /auth/passkey/register/begin`, `/finish` |
+| Remove a passkey | `DELETE /auth/passkey/credentials/:id` |
+| Turn on two-factor authentication | `POST /auth/2fa/enroll/start`, `/confirm` (see below for accounts with no password) |
+| Transfer a workspace | `POST /organization/transfer-ownership` |
+| Invite a member, change a member's role or change their access scope | `POST /organization/members/invite`, `PATCH /organization/members/:id`, `PUT /organization/members/:id/access` |
+| Export or import a whole workspace | `POST /organization/current/export`, `POST /organization/current/import` |
+| Schedule a workspace or account for deletion | `POST /organization/current/danger-zone/delete`, `POST /me/danger-zone/delete` |
+| Approve a self-hosted instance's warmup pool link | `POST /pool-link/codes/:code/approve` |
+| Reveal or rotate a signing secret | `POST /webhooks/:id/rotate-secret`, `GET /integrations/connections/:id/webhook-secret`, `POST /oauth/applications/:id/rotate-secret`, `GET /oauth/applications/:id/webhook-secret`, `POST /oauth/applications/:id/webhook-secret/rotate` |
+| Record, use or remove an admin grant over a whole domain | `POST /emails/grants/google/finish`, `POST /emails/grants/microsoft/finish`, `POST /emails/grants/:id/connect`, `DELETE /emails/grants/:id` |
+| Admin panel: issue a fleet join token, grant admin permissions, export or import any workspace | `POST /admin/fleet/join-token`, `POST /admin/admins/:userId/grant`, `POST /admin/organizations/:id/exports`, `POST /admin/organizations/:id/imports` |
+
+Each either hands out a credential that outlives the session that created it, reveals a secret, changes who can get in, cannot be reversed by the person it was done to, or reaches a whole domain's mail. Without a confirmation they answer `403` with code `reauth_required`; confirm with `POST /auth/reauth` (password or a current two-factor code) and retry. See [error codes](/api/error-codes/#confirmation-required).
+
+This applies to session callers. An API key or OAuth token has no session to confirm and is not the threat here, so it passes straight through to the route's permission gate.
+
+A completed sign-in counts as a confirmation for the first five minutes of the session. An account with neither a password nor two-factor authentication has nothing else to confirm with, so after those five minutes `POST /auth/reauth` answers it `400` with code `reauth_no_factor` and it signs in again. Once 2FA is on, it confirms with an authenticator code like any other account.
+
+`GET /auth/config` gained two fields: `invites_required` (boolean, true when an invitation token is needed to create an account) and `docs_url` (string, the deployment's link to the accounts and access documentation, for a client to surface next to a refusal).
+
+`GET /auth/config` also carries `websocket_url` and `app_url` (both strings, each omitted when the instance has none). They are the realtime gateway a developer client connects to and the dashboard origin a client sends someone to. Both are served here because on a self-hosted instance the host layout is whatever the operator chose, and there is no other way to discover it: the [CLI](/api/cli/) reads them for `pegasusbound events tail` and `pegasusbound browse`.
+
+`POST /getaway` is session-only and mints a ten-minute WebSocket ticket. Its `url` remains the direct gateway; the optional `proxy_path` is resolved against `/v1` for browser connections. `GET /realtime/socket/websocket` upgrades a connection using that ticket, preserving the configured realtime service's origin checks and connection limits. It accepts no ordinary access tokens, API keys or OAuth tokens. See [Realtime WebSocket](/api/realtime/).
+
+Alongside them, `api_url` is this API's own public base (for a copyable example that names the right server), and `brand` is who the deployment says it is: `name`, and `website_url`, `website_label`, `terms_url`, `privacy_url` and `support_email`, each omitted when unset. On a self-hosted instance that configured no `EMAIL_BRAND_*` only `name` is present, and a client should render no link at all rather than substituting one of its own. See [configuration](/development/configuration/).
+
+`GET /auth/config` also carries `gmail_oauth_connect` (boolean): whether a new Gmail mailbox may be connected with Google sign-in. Both `BOX_GOOGLE_CLIENT_ID` and `BOX_GOOGLE_CLIENT_SECRET` are required. With them set, the capability defaults to `true`; explicit `BOX_GOOGLE_OAUTH_CONNECT=false` or an invalid value disables it. When `false`, offer the app-password route (`POST /emails/onboarding/smtp-imap` against Gmail's servers) rather than start an OAuth round trip that returns `mailbox_gmail_oauth_disabled`. The dashboard additionally requires its deployment-local [frontend opt-in](/development/configuration/#google-sign-in-per-dashboard-deployment) to show Google sign-in. Existing Google sign-in mailboxes are unaffected either way.
+
+`GET /auth/config` also carries `billing_enabled` (boolean). It is `false` when the deployment runs with `BILLING_PROVIDER=none`, which is the self-host default: every feature is unlocked server-side, so the dashboard shows the workspace as self-hosted instead of on a free trial and hides the billing and referral pages. `self_hosted` alone does not imply this, because a self-hosted install may still run Stripe.
+- `POST /auth/setup` (first-run claim: exchanges the one-time token printed at boot for the owner account. Refused once any account exists)
+- `GET /auth/providers`, `POST /auth/apple`, `POST /auth/google` (native-app social sign-in)
+- `POST /auth/oidc/begin`, `GET /auth/oidc/callback` (generic OpenID Connect sign-in)
+- `POST /auth/google/begin`, `GET /auth/google/callback`, `POST /auth/apple/begin`, `POST /auth/apple/callback` (browser Sign in with Google and Sign in with Apple)
+- `POST /auth/sso/exchange` (swaps the single-use handoff code from any of those callbacks for the session; `POST /auth/oidc/exchange` is the older name for the same endpoint)
+- `POST /auth/sso/link` (completes a provider sign-in that resolved to an existing password account: takes that account's password, attaches the identity and returns the session)
+- `POST /auth/logout`, `POST /auth/logout-all`, `GET /auth/me`, `PATCH /auth/me/onboarding`
+- `PUT /auth/me/product-tour` (records that the signed-in user finished or skipped the dashboard's product tour, answering `product_tour_completed_at`, which `GET /auth/me` also carries. Naturally retry-safe: a repeat keeps the first time, so it takes no `Idempotency-Key`)
+- `POST /auth/me/avatar`, `DELETE /auth/me/avatar`
+- `POST /emails/onboarding/oauth/start`, `POST /emails/onboarding/oauth/finish`, `POST /emails/onboarding/smtp-imap`. `oauth/start` accepts an optional `login_hint` (an email address) that preselects that mailbox in the provider's sign-in, which is how an import's **Sign in** rows open. For Google and Microsoft dashboard flows (`return: "web"`), the browser's `Origin` is validated against exact configured dashboard origins and bound to the OAuth state; an untrusted origin answers `400` `mailbox_oauth_return_origin`. Requests without an `Origin` retain primary-dashboard routing while their state is live
+- `POST /emails/onboarding/smtp-imap/bulk` (up to `50` SMTP/IMAP rows in `accounts`, answered `200` with a per-row `status` of `connected`, `skipped` or `failed` and a `code`; rows past the workspace's [mailbox allowance](/guides/mailboxes/#mailbox-allowance) fail with `mailbox_allowance_reached` before any credential is dialled. Naturally retry-safe: an already connected mailbox is `skipped`, so it takes no `Idempotency-Key`)
+- The [mailbox import](/guides/mailbox-import/) routes under `/emails/imports`, all with JWT permission `MANAGE_EMAILS`. They carry passwords, so like onboarding they never accept an API key:
+  - `POST /emails/imports/preview`: what an import of this input would do, row by row and domain by domain, without doing any of it
+  - `POST /emails/imports`: store the rows and connect them in the background; answers `201` with the import
+  - `GET /emails/imports`: the workspace's imports, newest first
+  - `GET /emails/imports/:id`: one import with its counts and its failures grouped by `cause`
+  - `GET /emails/imports/:id/rows`: an import's rows by line, filtered by `status` (comma-separated) and `cause`
+  - `PATCH /emails/imports/:id/rows/:line`: correct one failed row (`password`, `app_password`, `username`, `smtp`, `imap`) and queue it again
+  - `POST /emails/imports/:id/retry`: requeue failed rows, all of them or those with one `cause` or the listed `lines`, optionally with one new `password` for all
+  - `POST /emails/imports/:id/cancel`: stop the rows not yet started; rows already connecting finish
+  - `POST /emails/imports/:id/dismiss`: hide the import from `GET /emails/imports` for the workspace, stopping it first when it is still running. Its rows and history stay, and `GET /emails/imports/:id` still reads it. Answers `204`; a repeat changes nothing
+  - `GET /emails/imports/:id/failed.csv`: every row that did not connect, as uploaded minus passwords, with `status`, `problem` and `how_to_fix`
+
+  Preview and create take `multipart/form-data`: `file` (CSV, TSV or XLSX up to 10 MB) or `text` (a pasted list), `mapping` (a JSON object of column index to field, such as `{"0":"email","1":"password"}`; omit it to use the automatic mapping) and `options` (JSON: `has_header`, `shared_password`, `on_existing` of `update` or `skip`, `save_mapping`, and `settings` applied to every mailbox). One import takes up to 5,000 rows. The two lists answer `data` plus `pagination` with `next_cursor` and `has_more`; `limit` is at most `100` for imports and `200` for rows, and a cursor that is not one this API issued returns `400` with `invalid_cursor`. None of these takes an `Idempotency-Key`. Repeating a create makes a second import, whose rows find the first one's mailboxes already connected and update (or skip) them, so nothing is connected twice. A retry only requeues rows that failed, and a fix is refused for a row that is not failed, so repeating either connects nothing twice. Cancelling an import twice is a no-op. Progress is published as the realtime event `MAILBOX_IMPORT_PROGRESS`; see [realtime](/api/realtime/). Error codes are under [mailbox import refusals](/api/error-codes/#mailbox-import-refusals)
+- [Inbox vendor](/guides/mailbox-import/#import-from-an-inbox-vendor) connections under `/emails/vendors`, JWT permission `MANAGE_EMAILS`. The key is sealed on the server and no response ever returns it:
+  - `GET /emails/vendors/catalog`: the supported vendors, with each one's `fields` (key, label, secret, required, help) and `key_help_url`
+  - `GET /emails/vendors`: the workspace's vendor connections with `status`, `last_error` and mailbox count
+  - `POST /emails/vendors`: `vendor`, `label` and `fields`; the key is checked with the vendor first, answers `201`. Repeating it makes a second connection
+  - `PATCH /emails/vendors/:id`: rename, or replace `fields` after checking the new key with the vendor. Safe to repeat
+  - `DELETE /emails/vendors/:id`: forget the key; the mailboxes it brought in stay connected. A repeat is a `404`
+  - `GET /emails/vendors/:id/mailboxes`: the vendor account's mailboxes, each marked `connected` when already in the workspace
+  - `POST /emails/vendors/:id/import`: `mailbox_ids` or `all`, plus the same `options` as a file import; answers `201` with the import. Each call creates a new import; a repeat finds the first run's mailboxes connected and updates (or skips) them
+- [Admin grants](/guides/mailbox-import/#connect-a-whole-google-workspace-domain) under `/emails/grants`, JWT permission `MANAGE_EMAILS`. The four routes that record, use or remove a grant also need a [recent confirmation](#actions-that-need-a-recent-confirmation):
+  - `GET /emails/grants/config`: whether this instance takes Google and Microsoft grants, the Google `google_client_id` and `google_scopes` an administrator authorizes, and `google_missing` and `microsoft_missing`, the names of the instance settings still unset (empty when that provider is ready)
+  - `GET /emails/grants`, `GET /emails/grants/:id`: grants with their `provider`, `tenant`, covered `domains`, `status` and mailbox count
+  - `GET /emails/grants/migration`: the workspace's mailboxes on per-mailbox Google sign-in that can [optionally switch connection methods](/guides/mailboxes/#moving-off-per-mailbox-google-sign-in), grouped by domain: `data` is a list of `domain`, `kind` (`workspace`, which moves onto an admin grant, or `personal`, a shared address such as `gmail.com`, which moves to an app password), `grant_id` when the workspace has an active Google grant covering the domain, and `mailboxes` (`id`, `email`, `name`, `status`); `total` counts the mailboxes. Mailboxes whose sign-in Pegasusbound Cloud holds are not listed. Read only
+  - `POST /emails/grants/google/start`: `domain` and `admin_email` (on that domain). Answers how this workspace proves it controls the domain: `method` `signin` with a Google sign-in `url` and `state` (valid for 15 minutes) when the instance has a Google sign-in app, else `method` `dns`. Both carry `txt_name` (`_pegasusbound.<domain>`) and `txt_value` (`pegasusbound-verify=...`, unique to the workspace and domain), because the DNS proof always works. Safe to repeat
+  - `POST /emails/grants/google/finish` (recent confirmation): either `state` and `code` from the Google sign-in, which must be `admin_email` itself on that domain, or `domain` and `admin_email` once the `TXT` record is published. The directory must list `admin_email` as a super administrator. Answers `201`. A `state` is single-use; repeating a DNS finish re-verifies and updates the same grant, one per domain
+  - `POST /emails/grants/microsoft/start`: the admin consent `url` and `state` for a Global Administrator, valid for 15 minutes
+  - `POST /emails/grants/microsoft/finish` (recent confirmation): `state` and `code` from the consent callback; answers `201`. The organization recorded is the one the administrator consented for, as the redeemed sign-in reports it. The `state` is single-use, so a repeat is refused with `mailbox_grant_state_invalid`. One grant per tenant: consenting again updates the same grant
+  - `POST /emails/grants/:id/check`: verify now, and restart the grant's stopped mailboxes when it passes. Safe to repeat
+  - `DELETE /emails/grants/:id` (recent confirmation): remove the grant; every mailbox it connected stops. A repeat is a `404`
+  - `GET /emails/grants/:id/users`: the granted directory, each user marked `enabled` and `connected`, with `email_account_id` when connected. `upgrade` is `true` for a user whose mailbox is already here on its own sign-in with the same provider (Google or Microsoft, not held by Pegasusbound Cloud): connecting it moves that mailbox onto the grant in place
+  - `POST /emails/grants/:id/connect` (recent confirmation): `user_ids` or `all` (every enabled user not yet connected, plus every user marked `upgrade`), plus import `options`; answers `201` with the import. Each call creates a new import; a repeat finds the first run's mailboxes connected and updates (or skips) them. A user whose mailbox is already here as a delegated mailbox is relinked to this grant, and one on its own sign-in is converted onto the grant in place, keeping its history, campaigns and warmup, without counting against the mailbox allowance
+- [Sending domains](/guides/sending-domains/) under `/emails/domains`, JWT permission `MANAGE_EMAILS`. `:domain` is the bare domain:
+  - `GET /emails/domains`: every domain the workspace sends from, with mailbox count, mail hosts, SPF, DKIM and DMARC, tracking hosts in use and the redirect. When a connected [inbox vendor](/guides/sending-domains/#domains-held-by-an-inbox-vendor) account holds the domain, `vendor_domain` carries `vendor`, `connection_id`, the current `forwarding` when the vendor reports it, `can_forward`, `can_unforward`, `forwarding_reviewed` (a change is applied later by the vendor's staff), `can_dns` and `dns_types`
+  - `POST /emails/domains/bulk`: `domains` (1 to 100), `tracking_label` (one DNS label, such as `link`; each domain gets `<label>.<domain>`) and/or `redirect_url`, plus optional `tracking_hosts` and `redirect_urls` objects keyed by domain that give a listed domain its own host or website in place of the shared one. Each domain takes its vendor's path when the vendor's API can (writing the `CNAME`, forwarding the root) and is saved to wait for DNS otherwise. Optional `served_by` (`instance` or `cloud`) picks where a redirect no vendor forwards is served from; omitted keeps each domain's current choice. Answers `data`, one row per domain with `tracking` (`host`, `via` of `vendor` or `dns`, `verified`, `mailboxes`, `cname_target`, `note` when the vendor refused the record) and `redirect` (`target_url`, `via` of `vendor`, `dns` or `cloud`, `verified`, `reviewed`); a refused domain carries `error` and `code` on its row and never stops the others. Safe to retry: each setting is set, not added
+  - `GET /emails/domains/:domain/tracking-suggestion`: the tracking `host` to offer, its `status` (`active`, `found` or `suggested`), the `cname_target`, and `vendor_domain` when a connected vendor account holds the domain
+  - `PUT /emails/domains/:domain/tracking`: `host` for every mailbox on the domain (empty clears it); answers the verification result and the number of `mailboxes` changed. Idempotent
+  - `PUT /emails/domains/:domain/redirect`: `target_url`, optional `include_www` (default `true`) and optional `served_by` (`instance`, or `cloud` on a self-hosted instance [linked to Pegasusbound Cloud](/guides/sending-domains/#serve-it-from-pegasusbound-cloud); omitted keeps the current choice, and a new redirect is served by this instance). Checks it once and answers the redirect with its `records`, `served_by`, `serve_host` (the tracking host that answers, which a proxy routes the domain to) and, once DNS verifies, `reach`: the last visit to the domain, with `status` (`ok`, `not_reaching`, `https_error` or `unreachable`), `hint` (`not_routed`, `host_header`, `wrong_target`, `certificate`, `no_listener`, or `settling` while the tracking service picks up a redirect that has just verified), a `detail` sentence, the `proxy` that answered when it named itself, and `checked_at`. Idempotent: a repeat keeps the same ownership value, so the `TXT` record stays valid
+  - `POST /emails/domains/:domain/redirect/verify`: check DNS and visit the domain now; for a redirect Pegasusbound Cloud serves, Cloud checks and the answer is its verdict. Safe to repeat
+  - `DELETE /emails/domains/:domain/redirect`: stop serving it, on Pegasusbound Cloud too when Cloud serves it. A repeat is a `404`
+  - `PUT /emails/domains/:domain/vendor-forwarding`: `url`; the vendor account holding the domain forwards its root there. An empty `url` removes the forwarding where `can_unforward`. Answers the updated `vendor_domain`. Idempotent
+  - `POST /emails/domains/:domain/vendor-tracking`: `host`, a subdomain of the domain; the vendor writes its `CNAME` to this instance's tracking host, then every mailbox on the domain uses the host. Answers like `PUT .../tracking`. Safe to retry: the record is replaced, not added
+
+  None of these takes an `Idempotency-Key`; the retry behavior of each is stated above. Changes to vendor connections, grants and redirects publish `AUDIT_CREATED` with `entity_type` `mailbox_vendor`, `mailbox_grant` or `domain_redirect`. Error codes are under [mailbox source refusals](/api/error-codes/#mailbox-source-refusals)
+- `POST /emails/onboarding/oauth/reauth/:id`, `PUT /emails/onboarding/smtp-imap/:id` (reconnect an existing mailbox after a credential change; JWT permission `MANAGE_EMAILS`)
+- `POST /emails/onboarding/app-password/:id` (JWT permission `MANAGE_EMAILS`): move a mailbox off per-mailbox Google sign-in onto Gmail's IMAP and SMTP with `app_password`, a 16-letter Google app password (spaces are ignored). The password is checked against Gmail's servers before anything is stored, with the same refusals as an SMTP/IMAP connect; on success the mailbox becomes `smtp_imap` in place, keeps its imported mail, campaigns and warmup, and answers `200` with the mailbox. `409` `mailbox_not_google_signin` for any other mailbox, including one already switched, so a repeat changes nothing and takes no `Idempotency-Key`; `400` `app_password_invalid` when the value is not 16 letters. Publishes `AUDIT_CREATED` with `entity_type` `email_account`
+- `GET /oauth/authorize/details`, `POST /oauth/authorize` (the consent flow: a human approves a third-party app, and the grant carries only the scopes the member's role covers). `POST /oauth/authorize` requires a recent confirmation (`POST /auth/reauth`), like creating an API key
+- `GET /oauth/authorized-apps`, `DELETE /oauth/authorized-apps/:id` (apps the user has authorized)
+- `GET /oauth/workspace-authorizations`, `DELETE /oauth/workspace-authorizations/:id/members/:userId` (every member's authorized apps, and revoking one; JWT permission `MANAGE_API_KEYS` or `MANAGE_SETTINGS`). A revoke succeeds when there is nothing to revoke and publishes `AUDIT_CREATED` with `entity_type` `oauth_authorization`
+- `POST /getaway` (websocket bootstrap)
+- `GET /realtime/info`
+- `GET /me/danger-zone`, `POST /me/danger-zone/delete`, `DELETE /me/danger-zone/delete`
+- `GET /me/views/:view`, `PUT /me/views/:view`, `DELETE /me/views/:view` (the signed-in member's own column layout and sort for a dashboard list in the current workspace; `view` is `contacts` or `campaign_leads`, or `unibox_rail` for the unibox scope rail, which saves a `layout` of `favorites`, `hidden`, `order` and `section_order` instead of columns. Personal to the session, so no API scope reaches it)
+- `GET /invitations`, `POST /invitations/accept`
+- All of `/organization/*` (create, switch, members, invitations, transfer ownership, avatar, danger zone)
+  - `GET /organization/members` includes each member's `access_scope` (`workspace` or `restricted`) and `access` (`scope`, `campaign_folder_ids`, `campaign_ids`, `email_account_ids`); `GET /organization` carries the caller's own `access_scope` per workspace. `GET /organization/invitations` carries each invitation's `access`
+  - `GET /organization/members/:id/access` and `PUT /organization/members/:id/access` (JWT permission `MANAGE_TEAM`; the `PUT` also needs a recent confirmation). `:id` is the member's user id. The body is the whole scope, `{"scope": "restricted", "campaign_folder_ids": [], "campaign_ids": [], "email_account_ids": []}`, and replaces what was there, so a retry lands on the same state and takes no `Idempotency-Key`. `scope: "workspace"` clears the grants. Every id must belong to the workspace (`400` `invalid_access_resource`), at most 500 per list, the owner cannot be restricted (`403` `owner_access_unrestricted`), nobody can change their own access, and the caller must hold every permission the member's roles grant. Answers the member with `access`, and publishes `AUDIT_CREATED` with `entity_type` `organization_member`
+  - `POST /organization/members/invite` accepts the same object as `access`, so an invitee joins already restricted. Ids are checked on invite and again on acceptance, which drops grants on anything deleted in between
+  - `GET /organization/access/suggested-senders?campaign_ids=&campaign_folder_ids=` (JWT permission `MANAGE_TEAM`): the mailboxes those campaigns, and the campaigns in those folders, send from (explicit senders and sending-tag matches), each with the `campaign_ids` it sends for. A suggestion grants nothing
+- `GET /website-tracking/settings`, `PATCH /website-tracking/settings`, `POST /website-tracking/settings/rotate-key` (the [website tracking](/guides/website-tracking/) snippet's consent mode, location precision, allowed hosts and retention; JWT permission `MANAGE_SETTINGS`. The rotate is bodyless and safe to repeat, each call issues a new key)
+- All of `/subscription/*` (checkout, portal, cancel, change-plan, preview-change, enterprise-inquiry, discounts, referrals, etc.)
+- All of `/auth/cli/*` except the two handshake routes below (`GET /auth/cli/codes/:code`, `POST /auth/cli/codes/:code/approve`, `POST /auth/cli/codes/:code/deny`: the browser half of `pegasusbound auth login`, where a signed-in member reviews the code a CLI is showing and authorizes it. Approving mints an ordinary API key, so it requires the `MANAGE_API_KEYS` organization permission and a fresh authentication, is session-only (an API key must not be able to mint another one this way), and caps the key to the scopes the approver's role allows. `GET /auth/cli/codes/:code?organization_id=` adds `granted_scopes` and `granted_scope_names`: what approving into that workspace would grant)
+- All of `/pool-link/*` and `/cloud-link/*` (the self-hosted warmup pool link: approving an instance's code, listing and unlinking instances, reading the pool plan's price and opening its checkout, and on a self-hosted instance the connect flow and mailbox enrollment). `/cloud-link/*` exists only on a self-hosted instance. Connections belong to the selected local workspace, but linking and unlinking them (`/connect`, `/connect/poll`, `DELETE /cloud-link`) and the linked cloud workspace's mailboxes (`/workspace-mailboxes`, `.../adopt`) take a platform admin holding `manage_settings` whose session presented a second factor (`admin_mfa_required` otherwise). Reading the link and putting a workspace's own mailboxes on it (`GET /cloud-link`, `/mailboxes`, enroll, pause, resume and the Google and Microsoft sign-in under `/oauth/*`) take the workspace's `MANAGE_EMAILS`. `GET /cloud-link` includes `legacy_connected`; mailbox rows include `legacy` when they still use the old connection. A normal `DELETE /cloud-link` only disconnects the selected workspace's scoped link. `DELETE /cloud-link?legacy=true` explicitly disconnects the legacy link across all workspaces and uses the same platform-admin permission. New connections and enrollments require workspace scope, and a Cloud workspace accepts only one active link (legacy links count). `POST /pool-link/codes` requires `remote_organization_id` and returns `workspace_scoped: true` for supported clients. `POST /pool-link/codes` and `POST /pool-link/poll` are public and per-IP rate limited: they are the device-code handshake an instance uses before it has a token, and `/pool-link/instance/*` accepts only an instance token. `/pool-link/instance/oauth/*`, `/pool-link/instance/mailboxes/:id/token`, `/pool-link/instance/workspace-mailboxes` and `/pool-link/instance/mailboxes/adopt` are the cloud-managed mailbox surface (Google and Microsoft sign-in on Pegasusbound's OAuth apps, brokered access tokens); their instance-side counterparts are `/cloud-link/oauth/*` and `/cloud-link/workspace-mailboxes/*`. `/pool-link/instance/redirects` (list), and `GET`, `PUT`, `DELETE` and `POST .../verify` on `/pool-link/instance/redirects/:domain`, are the root redirects Pegasusbound Cloud serves for the calling instance; the instance drives them through `PUT /emails/domains/:domain/redirect` with `served_by: "cloud"`, and `GET /pool-link/instance` carries `redirects` (`available`, `host`, `limit`, `used`)
+- All of `/admin/*`. `DELETE /admin/instance/invitations/expired` requires platform admin `manage_organizations` and an MFA-verified session. It removes only expired invitation records across all workspaces, leaves active invitations and membership unchanged, records an admin audit entry, and returns `{ "cleaned": true }`. The admin panel confirms before calling it.
+  - `GET /admin/instance/health` requires `view_analytics` and an MFA-verified admin session. Returns configuration `checks`, `summary`, additive `execution_coverage` (currently `unreported`) and `operational_monitoring_path`. Empty findings do not establish execution coverage or operational health.
+  - Aggregate PostgreSQL monitoring sources, including sync and worker health samples, use one database reference for SQL thresholds, windows and source/metric observation clocks. That observation can be later than the snapshot's collection-start `checked_at`; cached snapshots keep their original clocks. Database observation is not provider recovery evidence.
+  - `GET /admin/instance/monitoring` requires `view_analytics` and an MFA-verified admin session, not an organization API-key scope. Returns the read-only version `"1"` snapshot with `checked_at`, `refresh_after`, `coverage` and permission-shaped `sources`; HTTP responses use `Cache-Control: no-store`, while the backend shares a bounded one-minute collection cache. Each source has availability, coverage, nullable observation/scope measurements and metrics with nullable counts, affected mailboxes/organizations, evidence clocks, conditions and optional investigation paths. Missing permissions return unavailable source placeholders with `permission_denied`, not private metrics. Source bits and interpretation are listed under [operational monitoring](/development/instance-health/#operational-monitoring). Unavailable is not zero or an outage; a positive broker lag/pending observation remains `unknown`/`info`, not proof of failed throughput. This route never subscribes, replays, reconnects, clears holds or changes broker offsets/assignments.
+  - `GET /admin/analytics/overview` requires `view_analytics`. `total_emails_sent` and `emails_sent_today` count confirmed warmup and other outbound sends, not dispatches. Today uses the UTC calendar day. A send-count database error fails the request instead of returning zero counters. See [platform admin send counters](/guides/analytics/#platform-admin-send-counters).
+  - `GET /admin/organizations` and `GET /admin/organizations/:id` require `view_organizations`. Their acquisition fields include the nullable `referrer_host` saved at signup, alongside UTM source, medium, campaign and landing path. The list accepts an exact `referrer_host` filter as well as its existing acquisition filters. An absent source is unknown, not proof of a direct visit. See [signup source attribution](/guides/analytics/#signup-source-attribution-platform-admins).
+  - `GET /admin/warmup-content/overview` includes effective generation controls and requires `view_warmup_pool`; `PUT /admin/warmup-content/settings` writes effective controls with `manage_settings`. These are platform-admin routes, not organization API-key scopes. See [effective generation policy and stopping](/development/warmup-generation/).
+  - `POST /admin/organizations/:id/sample-data`: `manage_testers` and an MFA-verified admin session. Adds the [reviewer sample dataset](/development/accounts-and-access/#adding-sample-data) only to an active dedicated Test workspace. No request body. Returns `200` with `organization_id`, `created` (false when already seeded) and `seeded_at`; retries preserve edits and deletions. An ordinary workspace, revoked or expired tester, or missing/expired managed Test grant returns `400`. Inserts and the admin audit marker commit together. No mailbox connection, email delivery, external request or credit spend occurs.
+  - `GET /admin/testers`: `view_users` and an MFA-verified admin session. Each tester in `data` may include `test_workspace_id` for its owned dedicated Test workspace and `sample_data_seeded_at` when populated. These fields are absent for a tester merely attached to an ordinary workspace.
+  - `GET /admin/mailboxes`: `view_users` and an MFA-verified admin session. Optional `mailbox_id` filters by exact UUID; `status=all` includes inactive mailboxes. Node evidence links use `/mailboxes?mailbox_id=UUID`, regardless of loaded worker assignments or earlier browse filters. Deleted identities return an empty result, not a substitute mailbox.
+
+`POST /subscription/checkout`, `POST /subscription/portal`, `POST /subscription/cancel`, `POST /subscription/change-plan` and `GET /subscription/preview-change` require the `MANAGE_BILLING` organization permission; reading the subscription, its limits, trial and features needs only membership. `POST /subscription/portal` requires an existing Stripe billing customer. A workspace without one receives `400` with code `bad_request` and a message to complete checkout first; free and operator-granted plans alone do not create a billing customer.
+
+### Internal execution and managed consent
+
+`PATCH /cloud-link/mailboxes/:id/participation` is self-hosted JWT-only with `MANAGE_EMAILS` and organization ownership. It accepts typed `mode` (`diagnostic` or `off`), `send`, `receive` and optional positive shared/rolling limits. Cloud mirrors it through instance-token-only `PATCH /pool-link/instance/mailboxes/:remoteId/participation`, scoped to the calling instance. These dedicated routes prevent an old Cloud silently ignoring additive consent fields; old state without participation is not explicit diagnostic consent. The existing native lifecycle routes select diagnostic send/receive on start/resume and complete off on stop while retaining history. See [participation and send safety](/development/send-safety/).
+
+Cloud-managed OAuth additionally exposes `POST /pool-link/instance/oauth/start-correlated`, `POST /pool-link/instance/oauth/finish-correlated` and `POST /pool-link/instance/mailboxes/adopt-correlated`, all instance-token only and requiring `protocol: 1`. The authenticated instance response advertises `managed_consent_protocol: 1`. Legacy routes remain unchanged; absence of the capability cannot be bypassed with fields an old replica might ignore. See [the Cloud route and recovery contract](/guides/pegasusbound-cloud/).
+
+`POST /internal/worker/warmup-dispatch` is an execution-plane internal-token route, not a public JWT/API-key scope. It inspects, begins and durably finishes a task/mailbox/worker/nonce-bound command. Start repeats authoritative policy checks; unknown or denied authority cannot permit native execution. Receipt/header/model text supplies no authorization.
+
+`POST /internal/email-message-map/arrival` uses the existing internal node token. Only `204` with `X-Pegasusbound-Arrival-Durable: 1` acknowledges durable admission. Authoritative absence of the exact mailbox/user ownership returns `503` with `X-Pegasusbound-Arrival-Ownership-Lost` containing the requested mailbox UUID and no durable acknowledgment. Updated workers retire only that mailbox generation; the failed arrival remains unacknowledged, its stored body is retained and its provider cursor is not advanced. Ordinary `503` responses, transport failures, database failures and encryption failures remain retryable. Older workers ignore the new marker and continue holding the arrival; an upgraded backend and worker are both required for retirement. This does not clear send holds, resend messages or alter Kafka offsets.
+
+`POST /internal/worker/outbound-dispatch`, `/internal/worker/warmup-actions`, and `/internal/worker/diagnostic-auth` use the existing execution-plane internal token, never customer API keys. They bind the current mailbox/worker and require protocol 2. Outbound start additionally rechecks task/organization/provider/nonce/recipients and current campaign or diagnostic policy. Diagnostic authorization/result submission binds one exact already-owned warmup receipt and short-lived nonce; it neither ingests unrelated inbox messages nor trusts event/header claims. No public scope or permission was added. Details and limits: [send safety](/development/send-safety/).
+
+Warmup actions for a deleted, unassigned or no-longer-authorized mailbox return no permitted actions. The worker treats that authoritative denial as a no-op without touching the provider. Database or authority failures still return `503` and retry; denial does not authorize a send, clear a send hold, or acknowledge an arrival.
+
+`POST /internal/worker/warmup-actions` optionally accepts `filing_id` for a filing-only action. `filing_pending: true` is returned only for permitted, pure filing work still durably queued for that exact mailbox and its current worker. On a failed filing, this proof lets an updated worker finish the command without a `WarmupFiled` completion event; the durable recovery queue remains responsible for retrying it. Missing proof or an older backend retains the existing command retries. Deploy the backend before workers to enable this behavior. Successful filing still requires a completion event, and publication failures remain retryable. No send, arrival or retention-delete authority is added.
+
+### Referrals and discounts
+
+The referral program and billing discount history are part of `/subscription/*`, so they are JWT only and never accept an API key. There is no API permission scope for them; browser callers are gated by the org permission below. The discount validation and checkout endpoints are listed under [Subscription and billing](/api/reference/account-org/) in the reference.
+
+| Method | Path | JWT permission |
+|--------|------|----------------|
+| GET | `/subscription/referral` | `manage_billing` |
+| POST | `/subscription/referral` | `manage_billing` |
+| GET | `/subscription/referral/attributions` | `manage_billing` |
+| GET | `/subscription/referral/earnings` | `manage_billing` |
+| GET | `/subscription/discounts` | `manage_billing` |
+
+### AI credits
+
+Credit balance, top-up purchases, and the transaction log are part of `/subscription/*`, so they are JWT only and never accept an API key. Purchases are fulfilled only in the Stripe webhook, never in the checkout call. See the [AI credits](/guides/ai-credits/) guide for what each action costs and the pack and reset rules. `GET /subscription/credits` carries `unlimited` (boolean): `true` on a deployment with `BILLING_PROVIDER=none`, where the ledger is bypassed and every balance and allowance field is zero and meaningless.
+
+| Method | Path | JWT permission |
+|--------|------|----------------|
+| GET | `/subscription/credits` | `manage_billing` |
+| GET | `/subscription/credits/transactions` | `manage_billing` |
+| POST | `/subscription/credits/checkout` | `manage_billing` |
+
+### AI assistant
+
+Remie, the dashboard AI assistant, is JWT only: sessions are private to the member who started them. The message and approval runs stream over Server-Sent Events. Each tool Remie runs is gated by the member's own organization permission bits, so Remie can never do more than the member could by hand. See the [Remie](/guides/ai-assistant/) guide. (API-key and OAuth callers reach the same tools through the [MCP server](/api/mcp/) or the [REST agent-tools surface](/api/agent-tools/), each tool gated by its own scope.)
+
+| Method | Path | JWT permission |
+|--------|------|----------------|
+| POST | `/ai/sessions` | organization member (use AI) |
+| GET | `/ai/sessions` | organization member (use AI) |
+| DELETE | `/ai/sessions` | organization member (use AI) |
+| DELETE | `/ai/sessions/:id` | organization member (use AI) |
+| GET | `/ai/sessions/:id/messages` | organization member (use AI) |
+| POST | `/ai/sessions/:id/messages` | organization member (use AI, SSE) |
+| POST | `/ai/sessions/:id/approve` | organization member (use AI, SSE) |
+| GET | `/ai/tool-policies` | `manage_settings` |
+| DELETE | `/ai/tool-policies/:tool` | `manage_settings` |
+
+`POST /ai/sessions/:id/approve` takes `{"decision": "approve" | "deny" | "always_allow", "tool_call_id": "..."}`. `tool_call_id` is required and must be the call the session is waiting on (the `tool_call_id` of its `approval_required` event, or `pending.tool_call_id` from `GET /ai/sessions/:id/messages`); any other answers `409` `approval_not_pending`, and so does a second decision on the same call. `always_allow` saves a workspace policy only for a member with `manage_settings` and only for a tool that may be always allowed; otherwise it approves this one call. The `approval_required` event and `pending` carry `arguments` (every argument as indented JSON with sorted keys, capped at 16 KiB, with `arguments_truncated`), `preview` for a send (`from`, `to`, `subject`, `body`, `body_html`), and `always_allow_offered`.
+
+`GET /ai/tool-policies` lists the tools the assistant runs without asking (`tool_name`, `created_by`, `created_by_name`, `created_at`); `DELETE /ai/tool-policies/:tool` revokes one. Both audit as `ai_tool_policy`.
+
+### AI skills
+
+Org playbooks the AI features follow (see the [AI skills](/guides/ai-skills/) guide). Gated on `manage_settings` for JWT callers, or the `AI_AGENT` scope for API keys. Creating, editing or deleting one with an API key also needs the member who created the key to hold `manage_settings`.
+
+| Method | Path | Permission |
+|--------|------|------------|
+| GET | `/ai/skills` | `manage_settings` / `AI_AGENT` |
+| POST | `/ai/skills` | `manage_settings` / `AI_AGENT` |
+| PATCH | `/ai/skills/:id` | `manage_settings` / `AI_AGENT` |
+| DELETE | `/ai/skills/:id` | `manage_settings` / `AI_AGENT` |
+
+### Agent tools (REST)
+
+The AI tool registry over plain HTTP for function-calling agents that do not speak MCP (see [Agent tools](/api/agent-tools/)). Like the MCP endpoint, it needs `AI_AGENT` (or `use_ai` for JWT callers); each tool then enforces its own permission, the list reflects only what the caller may use, and send-class tools are never exposed.
+
+| Method | Path | Permission |
+|--------|------|------------|
+| GET | `/ai/tools` | `use_ai` / `AI_AGENT`, then the permission of each listed tool |
+| POST | `/ai/tools/:name/call` | `use_ai` / `AI_AGENT`, then the permission of the tool being called |
+
+### Connected MCP servers
+
+External MCP servers whose tools the assistant can use (see [Connect MCP tools](/guides/connect-mcp-tools/)). JWT-only and `manage_settings`-gated; bearer tokens are sealed with the org key and never returned.
+
+| Method | Path | JWT permission |
+|--------|------|----------------|
+| GET | `/ai/connections` | `manage_settings` |
+| POST | `/ai/connections` | `manage_settings` |
+| PATCH | `/ai/connections/:id` | `manage_settings` |
+| DELETE | `/ai/connections/:id` | `manage_settings` |
+| POST | `/ai/connections/:id/refresh` | `manage_settings` |
+
+### Slack
+
+The [Slack](/guides/slack/) panel's routes. They are session-only: linking binds a Slack account to the signed-in person, and an API key has no person to bind. Settings changes and link removals publish `AUDIT_CREATED` with `entity_type` `integration`.
+
+| Method | Path | JWT permission |
+|--------|------|----------------|
+| GET | `/integrations/slack/status` | organization member. `app_configured`, `interactive_configured` and `my_link` (always the caller's own) for everyone; `connection`, `settings` and `missing_scopes` only for `manage_settings` or `use_integrations` (otherwise absent, `{}` and `[]`); `links` (every member's link) only for `manage_settings` |
+| GET | `/integrations/slack/channels` | `manage_settings` or `use_integrations`. Public channels and the private channels the bot is in, filtered by `q`, at most 200, as `data` plus `pagination` |
+| PUT | `/integrations/slack/settings` | `manage_settings`. Default `channel`, per-category `routes`, `assistant_disabled`, `assistant_dm_only`, `inbox_channel` (a channel id from the list; empty turns the [inbox channel](/guides/slack/#inbox-in-slack) off) and `inbox_scope` (`replies`, the default, or `all`). The inbox channel must be one the bot can see and not a Slack Connect channel, else `400`. Idempotent: the whole settings object is replaced |
+| GET | `/integrations/slack/link/:code` | signed in, any workspace. Previews the link a bot button carries: `organization_id`, `organization_name`, `is_member`, `slack_team_id`, `slack_team_name`, `slack_user_id`, `slack_user_name` and `slack_user_avatar` (as Slack reports them now; either may be empty), `user_email` (the caller's Pegasusbound email), `email_matches` (the Slack account's email is the caller's Pegasusbound email), `verify_available` (Sign in with Slack can confirm the link) and `expires_at`. An unknown or expired code is `404` `slack_link_invalid` |
+| POST | `/integrations/slack/link/verify` | signed in, member of the code's workspace (else `403` `forbidden`). `code` from the bot's button; answers `200` with `url`, a Sign in with Slack page for the code's Slack workspace. Slack returns to the integrations OAuth callback, which hands `code` and `state` to the opener. `503` `slack_verify_unavailable` when the Slack app has no client credentials |
+| POST | `/integrations/slack/link` | signed in, member of the code's workspace (else `403` `forbidden`). `code` from the bot's button, plus `slack_code` and `state` from Sign in with Slack when the caller's Pegasusbound email is not the email on the code's Slack account (without them that is `403` `slack_link_email_mismatch`, and the code stays usable). A Sign in with Slack result must be this caller's, for this code, and for the code's Slack account (`403` `slack_verify_failed` or `slack_verify_wrong_account`). Answers `201` with the link and replaces any earlier link of that Slack account. The code is single-use, so a repeat is refused with `404` `slack_link_invalid` |
+| PATCH | `/integrations/slack/link` | organization member, own link. `dm_notifications`. `404` `slack_not_linked` when the caller has no link in this workspace |
+| DELETE | `/integrations/slack/link` | organization member, own link. Answers `204`, also when there was no link, so a repeat is safe |
+| DELETE | `/integrations/slack/links/:id` | `manage_settings`. Removes any member's link. Answers `204` |
+
+The two `/integrations/slack/link` routes that take a code do not need a workspace selected, because the code names one. `GET /integrations/slack/status` reports `app_configured` (the instance has a Slack app) and `interactive_configured` (it also has the signing secret, so the assistant and buttons work), so a client can tell what is available before calling anything else. The settings and channel routes answer `404` `slack_not_connected` until the workspace connects Slack. Error codes are under [404](/api/error-codes/#404-not-found) and [503](/api/error-codes/#slack_not_configured).
+
+## MCP server
+
+`POST /v1/mcp` exposes the tool registry over the [Model Context Protocol](/api/mcp/) streamable-HTTP transport. It accepts an API key or an OAuth 2.1 access token holding `AI_AGENT` (an unauthenticated request gets the RFC 9728 discovery challenge). Each tool is gated by its scope, `tools/list` reflects only what the credential allows, and send-class tools are never exposed. Per-key rate limits apply.
+
+## Public
+
+The dashboard's display-only `POST /v1/dashboard-image` endpoint accepts a session JWT and `{"url":"https://..."}` and returns image bytes. It is not API-key-capable. It reads owned public blobs through the active store, or fetches a public HTTPS image without forwarding browser credentials, cookies or referrer. The read rate limit applies; the body is limited to 16 KiB, the URL to 8,192 characters, the image to 5 MiB, and the request to ten seconds. Non-images, non-public destinations, unsafe redirects and unsupported ports are refused. Nothing is stored or changed, so retries need no idempotency key. Saved and sent emails retain the original URLs.
+
+`POST /v1/dashboard-image/public` has the same body and image limits but accepts only this instance's owned public objects and the Slack sign-in avatar providers (`avatars.slack-edge.com` and `secure.gravatar.com/avatar/`). It is per-IP rate limited and cannot fetch arbitrary customer URLs anonymously.
+
+- `GET /health`
+- `POST /auth/cli/code`, `POST /auth/cli/poll` (the [CLI](/api/cli/) device-code handshake, per-IP rate limited. Public by necessity: the CLI has no credential until the flow completes. `POST /auth/cli/code` returns `device_code`, `user_code`, `verification_uri`, `verification_uri_complete`, `expires_in` and `interval`; polling returns `{"status":"pending"}` until a member decides, then `{"status":"approved"}` carrying the minted key exactly once, or `{"status":"denied"}`. An unknown or expired `device_code` is a `404`, so a poller cannot probe for live handshakes)
+- `POST /webhook/stripe` (Stripe signature)
+- `POST /api/v1/integrations/hubspot/webhooks` (HubSpot app webhooks, verified with the `X-HubSpot-Signature-v3` signature over the app's client secret and refused when older than five minutes. A delivery only makes the next read of the named record come sooner; see [HubSpot](/guides/hubspot/#self-hosting))
+- `POST /api/v1/integrations/pipedrive/webhooks/:connectionId` (Pipedrive webhooks Pegasusbound registers for one connection when a workspace switches to Pipedrive. Authenticated by HTTP Basic auth with a password derived from the connection and the app's client secret. A delivery only makes the next read of the named record come sooner; a connection no workspace runs its CRM on answers `410`. See [Pipedrive](/guides/pipedrive/#self-hosting))
+- `GET` and `POST /api/v1/integrations/pipedrive/app/panel`, `/app/enroll` and `/app/pause` (the Pegasusbound JSON panel on Pipedrive person and deal pages and its two JSON modals). Pipedrive signs each call with a JWT over the app's client secret, passed as the `token` query value and pinned to HS256; the user and company it names must match the `userId` and `companyId` query values, and a repeated value is refused. The company selects the one workspace in Pipedrive mode with a live connection to it, and each call acts as the member matched to that Pipedrive user, with its permissions. See [working from inside Pipedrive](/guides/pipedrive/#working-from-inside-pipedrive)
+- `POST /api/v1/integrations/hubspot/app/card`, `/app/enroll`, `/app/pause` (the Pegasusbound card on HubSpot contact records) and `POST /api/v1/integrations/hubspot/actions/enroll`, `/actions/campaigns` (the "Add to Pegasusbound campaign" workflow action). HubSpot signs each request with the app's client secret (`X-HubSpot-Signature-v3`, over the public backend URL). The card routes take the portal and HubSpot user from the query values HubSpot appends, exactly one of each, and act as that user's matched member with its permissions; the webhook and workflow action routes refuse a request carrying those values. The portal selects the one workspace in HubSpot mode with a live connection to it. See [working from inside HubSpot](/guides/hubspot/#working-from-inside-hubspot)
+- `POST /webhook/campaign`, `/webhook/email`, `/webhook/user-email` (Google OIDC token from Cloud Tasks)
+- `GET /addresses/google/callback`, `GET /addresses/outlook/callback` (OAuth bouncer pages)
+- `POST /oauth/token`, `POST /oauth/revoke` (OAuth token endpoints, authenticated by the client's id and secret, or PKCE for public clients)
+- `POST /oauth/register` (OAuth dynamic client registration, RFC 7591; open and per-IP rate-limited)
+- `GET /.well-known/oauth-authorization-server`, `GET /.well-known/oauth-protected-resource` (OAuth discovery metadata)
+
+On the backend's host but outside `/v1`, called by Slack and never by an API key or a session:
+
+- `POST /api/v1/integrations/slack/events`, `POST /api/v1/integrations/slack/interactivity` (Slack signature). Each request must carry a valid Slack `X-Slack-Signature` made with the instance's signing secret over a timestamp within five minutes, and its body is capped at 1 MiB. A bad signature is `401` `unauthorized`, and nothing in the body is parsed before the signature checks out. With no `SLACK_SIGNING_SECRET` set they answer `503` `slack_not_configured`. They answer Slack within its three-second limit and do the work afterwards. See [Slack app](/development/slack-app/)
+
+On the tracking service (the `TRACKING_DOMAIN` host, not the API), also public and rate-limited per source:
+
+- `GET /t/o/:task_id.png` (open pixel), `GET /c/:link_id` (click redirect)
+- `GET /tracking.js` (the website tracking snippet), `POST /p` (page-view ingest; JSON body up to 8 KB, `429` over budget, `204` otherwise. Nothing in the request can name a contact)
+- A visit to a [sending domain's root](/guides/sending-domains/#root-redirects) (or its `www`) that a workspace pointed here. On a verified domain every path except `/health` answers `302` to its website with `Cache-Control: public, max-age=300`, before any route above; an unknown host is a `404`. The forms service answers a verified redirect domain the same way
+
+## Scheduled jobs
+
+`GET /admin/jobs` requires admin `view_analytics` and returns registered loops
+and retained retired records in `data`. Each row includes its service, interval,
+last recorded status and error, execution counters and recorded schedule.
+`retired_at`, when present, is the timestamp of explicit retirement
+classification, not proof of when the last process stopped. Retired records
+remain visible in Jobs with their historical values; they are not current
+running, overdue, failed or successful jobs in operational monitoring.
+
+`POST /admin/jobs/:name/run` requires admin `manage_settings`. It requests a
+registered loop to run at its next poll; it does not execute the job itself.
+Missing and explicitly retired records return `404 not_found`. Retired loops
+cannot claim new scheduled slots or take manual requests. Retirement does not
+interrupt an already admitted run or erase its completion evidence.
+
+Migration 286 classifies only the backend `fleet_quarantine` loop, which was
+removed from the application, as retired. Other old or stalled jobs remain
+active and retain their monitoring warnings. There is no age-based automatic
+retirement. Registering a loop again reactivates its record and clears any
+old pending run request, without resetting its execution counters or errors.
+
+## Platform node diagnostics
+
+Backend-origin routes outside `/v1` require a normal bearer session, live admin
+permissions and session MFA. Workspace API keys/OAuth API tokens cannot use them.
+
+| Method and path | Existing admin permissions |
+| --- | --- |
+| `POST /admin/auth/device/describe` | Any nonzero admin permission |
+| `POST /admin/auth/device/decide` | Any nonzero admin permission + fresh auth |
+| `GET /admin/fleet/nodes/:id/logs` | `VIEW_WORKERS` |
+| `GET /admin/fleet/nodes/:id/broker` | `VIEW_WORKERS` and `VIEW_ANALYTICS` |
+
+Public device starts/polls are `POST /v1/auth/cli/admin/code` and `/poll`.
+See [exact auth schemas](/api/authentication/#platform-admin-device-sessions).
+There is no remote shell, arbitrary execution endpoint or admin API key.
+Mutations stay on existing permission-gated admin endpoints and audit trails.
+
+### Recent evidence
+
+`GET /admin/fleet/nodes/:id/logs` accepts optional `after`/`before` (inclusive
+RFC3339 timestamps, after cannot follow before), `level` (`info`, `warn`,
+`error`), `mailbox_id` (mailbox account UUID, not folder/message) and `limit`
+(integer 1..200, default 200). Newest-first results contain at most one hour
+and 1,000 retained events per node; expired/count-evicted evidence cannot be
+recovered. This is allowlisted process evidence, not a full journal export.
+
+Response `200` (`Cache-Control: no-store`):
+
+```json
+{
+  "node_id": "<node UUID>",
+  "availability": "fresh", "coverage": "partial",
+  "reason": "allowlisted_evidence_only", "observed_at": "2026-10-10T06:10:00Z",
+  "capture": {
+    "protocol": 1, "run_id": "<process UUID>", "started_at": "2026-10-10T06:00:00Z",
+    "observed_at": "2026-10-10T06:09:58Z", "received_at": "2026-10-10T06:09:59Z",
+    "dropped": 2
+  },
+  "events": [{
+    "id": "<event UUID>", "observed_at": "2026-10-10T06:09:50Z",
+    "event": "sync_control_plane_held", "level": "warn", "category": "control_plane",
+    "mailbox_id": "<mailbox account UUID>", "http_status": 503, "count": 1
+  }],
+  "oldest_retained_at": "2026-10-10T06:09:50Z", "newest_retained_at": "2026-10-10T06:09:50Z",
+  "retained_count": 1, "truncated": false, "retention_seconds": 3600, "max_events": 1000
+}
+```
+
+`capture` is omitted until observed. Oldest/newest/count describe the entire
+retained window, not filtered rows. `truncated` means additional matching
+retained rows exist beyond the response limit. `dropped` counts known queue
+overflow/exhausted transport batches since that process's start, not lifetime
+loss. It resets on `run_id`. Crash loss, events before capture installation and
+lost acknowledgements cannot be measured completely: an exhausted batch is
+counted as dropped even if ingestion succeeded but its acknowledgement was
+lost. TTL/count eviction is intentional retention, not transport loss.
+
+| Availability / reason | Meaning |
+| --- | --- |
+| `unavailable` / `log_credential_unavailable` | Old/manual worker or lost Redis enrollment state; re-enroll |
+| `unavailable` / `capture_not_observed` | Enrolled but no upgraded capture received; might be an old worker |
+| `unavailable` / `cache_unavailable` | History cannot be read, not zero errors |
+| `stale` / `no_recent_capture` | Capture observation older than two minutes; retained rows may still appear |
+| `fresh` / `no_recent_evidence` | Recent empty capture, not proof of provider health |
+| `fresh` / `allowlisted_evidence_only` | Fresh partial evidence, never complete/healthy inference |
+
+Fixed event schema: UUID `id`, RFC3339 `observed_at`, allowlisted `event`,
+canonical `level`/`category`, optional mailbox UUID and numeric `count`
+(0..1,000,000). Only `sync_control_plane_held` retains numeric HTTP status
+(100..599), including actual sync map/control-plane 503 responses.
+
+| Event | Category / level | Observed behavior |
+| --- | --- | --- |
+| `sync_control_plane_held` | `control_plane` / `warn` | Actual failed sync control-plane call; pass aborted, cursors held |
+| `sync_message_deferred` | `control_plane` / `warn` | Unpublished map cleanup failed, pass skipped |
+| `mailbox_provider_unreachable` | `provider` / `warn` | Actual sync connection/transport failure |
+| `mailbox_provider_auth_failed` | `provider` / `warn` | Actual sync auth/authorization failure |
+| `mailbox_provider_throttled` | `provider` / `warn` | Actual sync throttle |
+| `mailbox_provider_sync_completed` | `provider` / `info` | Measured complete pass after prior transport failures |
+| `sync_folder_skipped` | `sync_policy` / `info` | Count of folders excluded by sync policy |
+| `sync_message_deferred_by_policy` | `sync_policy` / `info` | Count of messages deferred in a sync pass |
+| `sync_skipped_folder_search_failed` | `provider` / `warn` | Actual excluded-folder search failure |
+| `sync_legacy_arrival` | `compatibility` / `warn` | Existing legacy arrival fallback used |
+| `worker_error` | `worker_runtime` / `error` | Worker Zap error severity only, without arbitrary log text |
+
+History also reports `generic_error_coverage: "unavailable"` and `generic_error_reason: "unhooked_runtime_sources"`. Generic runtime error capture currently hooks worker Zap only. Worker Zerolog and consumer standard-log/Zerolog errors are not captured. Explicit allowlisted sync/provider/control-plane decision hooks remain separate and unchanged. A fresh empty capture, including a consumer capture, never establishes zero runtime errors or health. These fields describe missing source coverage, not a current failure.
+
+No addresses, subjects, bodies, headers, raw errors, folder names or provider
+credentials are forwarded. Unknown free-form fields are discarded; categories
+and levels are reconstructed before transport and again on ingestion/read.
+Unknown events are rejected. Evidence does not change sync leases, cursor
+handling, arrival admission or send authority.
+
+### Node ingestion
+
+`POST /api/v1/internal/fleet/nodes/:id/logs` accepts only the enrollment-issued
+node-specific `Authorization: Bearer <NODE_LOG_TOKEN>`. The existing fleet join
+token authorizes issuance in `env_b64`. Shared broker/internal tokens are not
+accepted; hashes bind to exactly one registered node and are rechecked atomically
+at ingestion. Rejoin rotates; node deletion revokes and removes log state.
+This credential grants evidence submission only, not mailbox/command access.
+
+There is no broker-key-to-log-credential refresh endpoint: the existing broker
+key authenticates the fleet, not ownership of a particular node UUID. Existing
+nodes must upgrade and rerun authenticated enrollment with the same UUID. The
+normal join script reads that UUID from the existing `node.env`, retains
+`node.local.env` and restarts the service; do not remove the configuration
+directory or delete the fleet row. Until capture is received, availability is
+unavailable, not healthy. Redis enrollment-hash loss requires the same safe
+re-enrollment, and no historical journals are imported. See
+[upgrade order and coverage](/development/data-control/#upgrade-order-and-coverage).
+
+Request JSON (max 32 KiB, 32 events; events use the schema above):
+
+```json
+{
+  "protocol": 1, "batch_id": "<UUID, stable across retries>", "run_id": "<process UUID>",
+  "started_at": "2026-10-10T06:00:00Z", "observed_at": "2026-10-10T06:09:58Z",
+  "dropped": 2, "events": []
+}
+```
+
+Empty batches report capture coverage only. Batch time must be within two
+minutes of receipt and no more than one minute ahead. Events must be within
+one-hour retention and no more than one minute ahead. `started_at` must be
+present and not after observation. Duplicate batch IDs are idempotent for one
+hour; older batches cannot overwrite newer capture metadata. Cadence is five
+seconds, queue 256 events, at most three attempts with bounded backoff and
+five-second HTTP deadlines. Capture never waits for network/queue space.
+Authenticated requests are capped at 30/node/minute. Success `204`; errors use
+the standard envelope: `400 bad_request` (invalid protocol/time/bounds/event),
+`401 unauthorized` (missing/wrong-node/revoked credential), `404 not_found`
+(absent registered node), `429 rate_limit_exceeded` (`Retry-After: 60`) and
+`503 service_unavailable` (dependencies).
+
+### Broker committed lag
+
+`GET /admin/fleet/nodes/:id/broker` accepts a registered worker UUID, no
+topic/group overrides. Existing read-only scopes remain separate:
+`commands` observes `worker-<UUID>` / `w.<UUID>`; `results` observes
+`consumer-group` / `jobs.worker-events`, shared results, not attributable to
+that worker. No extra consumer scopes or offset mutations are created.
+
+Response `200` has `node_id`, RFC3339 `observed_at`, `commands`, `results` and
+`note`. Each uses existing `MonitoringSource`: `id`, `availability`, `coverage`,
+optional `reason`, `observed_at`, `checked_at`, measured/expected scopes and
+`metrics`. Successful metrics are `committed_lag` (messages) and `members`, with
+count, observation/evidence timestamps, `condition: "unknown"`, severity and
+cautionary note. Only this focused endpoint opts into lag partition detail:
+
+```json
+{
+  "broker": {
+    "consumer_group": "worker-<UUID>", "topics": ["w.<UUID>"],
+    "partitions": [{"topic":"w.<UUID>","partition":0,"earliest":10,"committed":16,"latest":22,"committed_lag":6}]
+  }
+}
+```
+
+Every requested topic/partition and committed/earliest/latest offset is
+validated; partition IDs must be nonnegative, max 128 partitions/scope, sorted
+by topic/partition. Missing commits, offsets outside retention, mismatched
+partitions, negative/overflowing lag, permission errors and timeouts are
+unavailable, never clamped to zero. Failed metrics have null count, no broker
+detail, unknown condition and attempted observation time. Reasons include
+`dependency_missing`, `resource_absent`, `permission_denied`, `timeout`,
+`collection_failed`; non-Kafka/unsupported buses return `unsupported` with
+empty metrics. One scope failure does not hide another successful scope.
+Overall collection deadline is eight seconds.
+
+Lag is **not** delivery, provider health, throughput, uncommitted in-flight
+work, queue-drain time or an outage. Membership alone is not an outage either.
+Errors: `400 bad_request` (UUID/non-worker/invalid log filters),
+`401 unauthorized`, `403 admin_mfa_required`/`forbidden`, `404 not_found`,
+`503 service_unavailable` (node registry). Log Redis read failure instead
+returns `200` with explicit unavailable coverage. Successful diagnostics use
+`Cache-Control: no-store`.
+
+## Internal warmup recovery
+
+These control-plane endpoints use the existing node-internal credential, not an API key, dashboard JWT or node logging credential. Their base is `/api/v1/internal`, not the public API base above. They introduce no new node identity or credential exchange.
+
+| Method | Internal path | Scope |
+| --- | --- | --- |
+| POST | `/worker/warmup-actions` | Check current mailbox assignment and permitted actions; exact pending single-file work can return versioned filing recovery proof |
+| POST | `/worker/warmup-actions/defer` | Commit a monotonic provider retry time for that exact pending filing under current mailbox assignment |
+
+Deferral accepts `mailbox_id`, `worker_id`, `filing_id` and an absolute `provider_retry_at` timestamp. Successful `persisted: true` is returned only after commit, with `filing_recovery` proof containing protocol `1`, the same three IDs and the retained timestamp. Requesting a shorter time never shortens an existing provider hold or ordinary retry lease. There is no GET mutation or new filing-success event on deferral.
+
+For exact filing commands, an upgraded backend returns no permitted actions when the pending filing is completed, missing, foreign or has a different action payload. Workers skip provider filing and do not emit a filing-success event for that denial. Untracked actions retain the existing admission behavior.
+
+Invalid identifiers or time return `400`; stale, deleted, foreign or disallowed work returns `403`; unsupported authority or database failure returns `503`. Responses use `Cache-Control: no-store`. Clients reject unmarked, malformed, unsupported-version or incorrectly scoped replies as durable deferral proof. Existing older-backend retry behavior is unchanged; an older worker does not implement the provider floor. See [warmup reconnect recovery](/development/data-control/#warmup-reconnect-recovery) for backend-first upgrade and source-instance data handling.
+
+## Notes
+
+- When a route has both a JWT permission and an API permission listed, the dual-auth middleware checks the JWT user's organization role for browser callers and the key's permission bitmask for API key callers. They're independent gates: a user's role doesn't constrain what an API key can do beyond what was granted at creation.
+- Every API key request is logged to `api_key_usage_logs` with the endpoint pattern (e.g. `/campaigns/:id`), method, IP, user-agent, response status, and elapsed milliseconds. JWT requests are not logged here.
+- Rate limit categories (`X-RateLimit-*` headers) are scoped to the underlying user, not the key; every key issued by a user shares the user's quota.
+
+## See also
+
+- [Authentication](/api/authentication/)
+- [Permissions Reference](/api/permissions/)
+- [Error Codes](/api/error-codes/)

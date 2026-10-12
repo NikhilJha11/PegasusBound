@@ -1,0 +1,838 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./styles/theme-dark.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Pegasusbound brand: the dashboard's accent utilities ("sky") carry the
+   Pegasus violet ramp, so every accent in the product follows the brand.
+   The dark theme re-maps the same ramp in styles/theme-dark.css. */
+@theme {
+  --color-sky-50: oklch(96.9% 0.016 293.756);
+  --color-sky-100: oklch(94.3% 0.029 294.588);
+  --color-sky-200: oklch(89.4% 0.057 293.283);
+  --color-sky-300: oklch(81.1% 0.111 293.571);
+  --color-sky-400: oklch(70.2% 0.183 293.541);
+  --color-sky-500: oklch(60.6% 0.25 292.717);
+  --color-sky-600: oklch(54.1% 0.281 293.009);
+  --color-sky-700: oklch(49.1% 0.27 292.581);
+  --color-sky-800: oklch(43.2% 0.232 292.759);
+  --color-sky-900: oklch(38% 0.189 293.745);
+  --color-sky-950: oklch(28.3% 0.141 291.089);
+}
+
+/* Wordmark and brand accents. */
+.pb-gradient-text {
+  background: linear-gradient(100deg, #5b3df5 0%, #8b4cf6 55%, #d946ef 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.dark .pb-gradient-text {
+  background: linear-gradient(100deg, #a78bfa 0%, #c084fc 55%, #f0abfc 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+@layer base {
+  .tiptap :where(p, a, div, h1, h2, h3, h4, h5, h6, ul, ol, li, blockquote) {
+    all: revert;
+  }
+}
+
+:root {
+  --radius: 0.5rem;
+  --foreground: oklch(0.15 0.01 260);
+  --background: oklch(1 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.15 0.01 260);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.15 0.01 260);
+  --primary: oklch(0.45 0.01 260);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.96 0.005 260);
+  --secondary-foreground: oklch(0.25 0.01 260);
+  --muted: oklch(0.97 0.003 260);
+  --muted-foreground: oklch(0.55 0.01 260);
+  --accent: oklch(0.96 0.005 260);
+  --accent-foreground: oklch(0.20 0.01 260);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.92 0.005 260);
+  --input: oklch(0.92 0.005 260);
+  --ring: oklch(0.55 0.01 260);
+  --chart-1: oklch(0.55 0.15 250);
+  --chart-2: oklch(0.60 0.12 160);
+  --chart-3: oklch(0.65 0.10 30);
+  --chart-4: oklch(0.50 0.14 300);
+  --chart-5: oklch(0.58 0.08 200);
+  --sidebar: oklch(0.98 0.002 260);
+  --sidebar-foreground: oklch(0.15 0.01 260);
+  --sidebar-primary: oklch(0.45 0.01 260);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.96 0.005 260);
+  --sidebar-accent-foreground: oklch(0.20 0.01 260);
+  --sidebar-border: oklch(0.92 0.005 260);
+  --sidebar-ring: oklch(0.55 0.01 260);
+}
+
+.dark {
+  --background: #12111a;
+  --foreground: #f7f8f8;
+  --card: #1a1923;
+  --card-foreground: #f7f8f8;
+  --popover: #1a1923;
+  --popover-foreground: #f7f8f8;
+  --primary: #f7f8f8;
+  --primary-foreground: #111214;
+  --secondary: #25262a;
+  --secondary-foreground: #f7f8f8;
+  --muted: #1c1d20;
+  --muted-foreground: #8a8f98;
+  --accent: #25262a;
+  --accent-foreground: #f7f8f8;
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: #26272b;
+  --input: #2e2f34;
+  --ring: oklch(72% 0.2 292 / 0.5);
+  --chart-1: oklch(0.70 0.15 240);
+  --chart-2: oklch(0.70 0.14 165);
+  --chart-3: oklch(0.72 0.13 60);
+  --chart-4: oklch(0.68 0.16 300);
+  --chart-5: oklch(0.70 0.10 200);
+  --sidebar: #08070f;
+  --sidebar-foreground: #f7f8f8;
+  --sidebar-primary: #f7f8f8;
+  --sidebar-primary-foreground: #111214;
+  --sidebar-accent: #1c1d20;
+  --sidebar-accent-foreground: #f7f8f8;
+  --sidebar-border: #26272b;
+  --sidebar-ring: oklch(72% 0.2 292 / 0.5);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  --font-display: 'Plus Jakarta Sans Variable', 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-serif: Georgia, 'Times New Roman', serif;
+  --ease-bezier: cubic-bezier(.53,-0.14,.16,1.78);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+}
+
+body {
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+}
+
+/* ── Loading spinner ─────────────────────── */
+
+svg.loading {
+  width: 3.25em;
+  transform-origin: center;
+  animation: rotate4 2s linear infinite;
+ }
+
+svg.loading circle {
+  fill: none;
+  stroke-width: 2;
+  stroke-dasharray: 1, 200;
+  stroke-dashoffset: 0;
+  stroke-linecap: round;
+  animation: dash4 1.5s ease-in-out infinite;
+}
+
+@keyframes rotate4 {
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes dash4 {
+  0% { stroke-dasharray: 1, 200; stroke-dashoffset: 0; }
+  50% { stroke-dasharray: 90, 200; stroke-dashoffset: -35px; }
+  100% { stroke-dashoffset: -125px; }
+}
+
+/* ── Auth sky + animations ───────────────────────
+   The auth showcase pane uses an airy sky (same palette as the marketing
+   site hero): CSS gradient layers + pre-rendered WebP clouds. No animated
+   SVG feTurbulence/feDisplacementMap (those rendered inconsistently in
+   Safari/Firefox and were slow); this is GPU-cheap and identical everywhere. */
+
+.sky-base {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 140% 130% at 60% 18%,
+    #c4b5fd 0%,
+    #a78bfa 20%,
+    #8b5cf6 40%,
+    #7c3aed 62%,
+    #5b21b6 84%,
+    #4c1d95 100%
+  );
+}
+
+.sky-breathe {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse 130% 120% at 60% 16%,
+    rgba(186, 230, 253, 0.80) 0%,
+    rgba(56, 189, 248, 0.40) 20%,
+    rgba(14, 165, 233, 0.16) 40%,
+    transparent 62%
+  );
+  animation: sky-breathe 30s ease-in-out infinite;
+}
+
+@keyframes sky-breathe {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(1.05); }
+}
+
+.sun-glow {
+  position: absolute;
+  top: -6%;
+  right: -4%;
+  width: 420px;
+  height: 420px;
+  border-radius: 9999px;
+  pointer-events: none;
+  filter: blur(36px);
+  background: radial-gradient(circle,
+    rgba(253, 230, 138, 0.34) 0%,
+    rgba(253, 186, 116, 0.12) 32%,
+    rgba(186, 230, 253, 0.05) 55%,
+    transparent 70%
+  );
+  animation: sun-pulse 22s ease-in-out infinite;
+}
+
+@keyframes sun-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%      { opacity: 0.6; transform: scale(1.10); }
+}
+
+/* Drifting pre-rendered WebP clouds (browser-perfect <img>) */
+.cloud-drift {
+  position: absolute;
+  pointer-events: none;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+  will-change: transform;
+}
+
+@keyframes cloud-glide-1 { from { transform: translate3d(0, 0, 0); } to { transform: translate3d(40px, -10px, 0); } }
+@keyframes cloud-glide-2 { from { transform: translate3d(0, 0, 0); } to { transform: translate3d(-38px, 8px, 0); } }
+
+.cloud-1 { animation-name: cloud-glide-1; animation-duration: 36s; }
+.cloud-2 { animation-name: cloud-glide-2; animation-duration: 44s; }
+
+@keyframes card-float {
+  from { opacity: 0; transform: translateY(16px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* AI writing surfaces — a text shimmer for "thinking/writing" status labels
+   and a caret blink for streaming text. Both quiet down under
+   prefers-reduced-motion. */
+@keyframes ai-shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+.ai-shimmer-text {
+  background: linear-gradient(90deg, #64748b 30%, #8b5cf6 50%, #64748b 70%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: ai-shimmer 1.8s linear infinite;
+}
+/* Loading placeholders: a light sweep across skeleton blocks, and an
+   indeterminate bar for a refresh that keeps the old data on screen. */
+@keyframes skeleton-sweep {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(90deg, #f1f5f9 0%, #f1f5f9 35%, #e2e8f0 50%, #f1f5f9 65%, #f1f5f9 100%);
+  background-size: 200% 100%;
+  animation: skeleton-sweep 1.4s ease-in-out infinite;
+}
+@keyframes progress-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+.progress-sweep {
+  animation: progress-sweep 1.1s ease-in-out infinite;
+}
+.dark .skeleton-shimmer {
+  background-image: linear-gradient(90deg, #1c1d20 0%, #1c1d20 35%, #26272b 50%, #1c1d20 65%, #1c1d20 100%);
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-shimmer, .progress-sweep { animation: none; }
+}
+@keyframes ai-caret-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+.ai-caret {
+  animation: ai-caret-blink 1s steps(1) infinite;
+}
+/* Soft diagonal light sweep over an input while AI writes into it. */
+.ai-sheen {
+  background: linear-gradient(
+    100deg,
+    transparent 25%,
+    rgba(14, 165, 233, 0.09) 45%,
+    rgba(56, 189, 248, 0.14) 50%,
+    rgba(14, 165, 233, 0.09) 55%,
+    transparent 75%
+  );
+  background-size: 220% 100%;
+  animation: ai-shimmer 1.6s linear infinite;
+}
+/* A soft blur over the newest streamed characters. */
+.ai-stream-tail {
+  filter: blur(1.6px);
+  -webkit-mask-image: linear-gradient(90deg, #000 20%, rgba(0, 0, 0, 0.2));
+  mask-image: linear-gradient(90deg, #000 20%, rgba(0, 0, 0, 0.2));
+}
+/* The assistant mark (AgentMark): a soft blue blob with light swirling inside, or
+   a bare pixel spark for inline loaders. Colors and the swirl angle are
+   registered properties, so a state change fades and the swirl can turn. */
+@property --amo-a { syntax: "<color>"; inherits: true; initial-value: #c4b5fd; }
+@property --amo-b { syntax: "<color>"; inherits: true; initial-value: #8b5cf6; }
+@property --amo-c { syntax: "<color>"; inherits: true; initial-value: #2563eb; }
+@property --amo-angle { syntax: "<angle>"; inherits: true; initial-value: 0deg; }
+.amo {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  vertical-align: middle;
+  color: #8b5cf6;
+  transition: --amo-a 0.6s, --amo-b 0.6s, --amo-c 0.6s, color 0.4s,
+    scale 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.amo-body {
+  position: absolute;
+  inset: 6%;
+  overflow: hidden;
+  border-radius: 46% 54% 52% 48% / 52% 46% 54% 48%;
+  box-shadow: 0 0.1em 0.3em -0.08em color-mix(in srgb, var(--amo-b) 70%, transparent);
+  animation: amo-blob 5s ease-in-out infinite;
+}
+.amo-swirl {
+  position: absolute;
+  inset: -30%;
+  background: conic-gradient(from var(--amo-angle), var(--amo-a), var(--amo-b), var(--amo-c), var(--amo-a));
+  filter: blur(0.1em);
+  animation: amo-turn 7s linear infinite;
+}
+.amo-shine {
+  position: absolute;
+  left: var(--amo-sx, 22%);
+  top: var(--amo-sy, 16%);
+  width: 32%;
+  height: 22%;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgb(255 255 255 / 0.9), rgb(255 255 255 / 0));
+  rotate: -28deg;
+  transition: left 0.3s ease-out, top 0.3s ease-out;
+}
+.amo-muted { --amo-a: #e2e8f0; --amo-b: #94a3b8; --amo-c: #cbd5e1; color: #94a3b8; }
+.dark .amo-muted { --amo-a: #62666d; --amo-b: #35373c; --amo-c: #26272b; color: #62666d; }
+.amo-attention { --amo-a: #fcd34d; --amo-b: #f59e0b; --amo-c: #ea580c; color: #f59e0b; }
+.amo-done { --amo-a: #6ee7b7; --amo-b: #10b981; --amo-c: #0d9488; color: #10b981; }
+.amo-thinking .amo-body { animation-duration: 1.6s; }
+.amo-thinking .amo-swirl { animation-duration: 1.2s; }
+.amo-b.amo-attention { animation: amo-hop 1.4s ease-in-out infinite; }
+.amo-b.amo-done { animation: amo-happy 0.7s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.amo-muted .amo-body { animation-duration: 9s; }
+.amo-muted .amo-shine { opacity: 0.6; }
+.group:hover .amo { scale: 1.1; }
+.group:active .amo { scale: 0.9; }
+.amo.amo-jelly { animation: amo-jelly 0.6s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.amo.amo-boop { animation: amo-boop 0.28s ease-out; }
+@keyframes amo-blob {
+  0%, 100% { border-radius: 46% 54% 52% 48% / 52% 46% 54% 48%; transform: scale(1, 1); }
+  33% { border-radius: 58% 42% 46% 54% / 44% 56% 46% 56%; transform: scale(1.04, 0.97); }
+  66% { border-radius: 42% 58% 56% 44% / 56% 44% 58% 42%; transform: scale(0.97, 1.04); }
+}
+@keyframes amo-turn {
+  from { --amo-angle: 0deg; }
+  to { --amo-angle: 360deg; }
+}
+@keyframes amo-jelly {
+  0%, 100% { scale: 1; }
+  30% { scale: 1.22 0.84; }
+  55% { scale: 0.9 1.12; }
+  75% { scale: 1.06 0.96; }
+}
+@keyframes amo-boop {
+  0%, 100% { scale: 1; }
+  40% { scale: 1.16 0.88; }
+}
+@keyframes amo-hop {
+  0%, 55%, 100% { translate: 0 0; }
+  18% { translate: 0 -0.16em; }
+  32% { translate: 0 0; }
+  42% { translate: 0 -0.06em; }
+}
+@keyframes amo-happy {
+  0%, 100% { scale: 1; translate: 0 0; }
+  30% { scale: 1.18 0.88; translate: 0 0; }
+  55% { scale: 0.94 1.1; translate: 0 -0.14em; }
+}
+/* The bare pixel spark, for inline loaders. */
+.amo-grid { position: relative; display: grid; }
+.amo-px {
+  border-radius: 24%;
+  background: currentColor;
+  opacity: var(--o, 0);
+  transition: opacity 0.22s ease;
+}
+@keyframes amo-pulse {
+  0%, 100% { opacity: var(--o); }
+  50% { opacity: calc(var(--o) * 0.35); }
+}
+@keyframes amo-chase {
+  0%, 100% { opacity: 0.2; }
+  12% { opacity: 1; }
+  45% { opacity: 0.2; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .amo, .amo *, .amo.amo-jelly, .amo.amo-boop { animation: none !important; }
+}
+/* The caret holds still while text is arriving and blinks only while waiting. */
+.ai-caret.is-typing {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-shimmer-text { animation: none; background: none; color: #64748b; }
+  .ai-caret { animation: none; }
+  .ai-sheen { animation: none; background: rgba(14, 165, 233, 0.06); }
+  .ai-stream-tail { filter: none; -webkit-mask-image: none; mask-image: none; }
+}
+
+/* A light sweep across live status text, tinted from the text's own colour. */
+.text-shimmer {
+  background-image: linear-gradient(
+    100deg,
+    currentColor 0%,
+    currentColor 40%,
+    color-mix(in oklab, currentColor 30%, white) 50%,
+    currentColor 60%,
+    currentColor 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: text-shimmer 2.6s linear infinite;
+}
+
+@keyframes text-shimmer {
+  from { background-position: 100% 0; }
+  to { background-position: -150% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-shimmer { animation: none; }
+}
+
+/* 3x3 dot-grid activity indicator (adapted from Temani Afif's css-loaders
+   "l26"). Native geometry is a ~52px square block, so the dot + box-shadow
+   grid lives on a ::before that is scaled down (origin 0 0, after the
+   centering translateX) and centered inside a fixed 18px box so it sits
+   inline on a nav row. currentColor tints all nine dots. */
+.campaign-grid {
+  display: inline-block;
+  position: relative;
+  width: 14px;
+  height: 14px;
+  vertical-align: middle;
+}
+
+.campaign-grid::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  color: currentColor;
+  transform-origin: 0 0;
+  transform: scale(0.26) translateX(-38px);
+  box-shadow:
+    19px -19px 0 0px, 38px -19px 0 0px, 57px -19px 0 0px,
+    19px 0     0 5px, 38px 0     0 5px, 57px 0     0 5px,
+    19px 19px  0 0px, 38px 19px  0 0px, 57px 19px  0 0px;
+  animation: campaign-grid 3.5s infinite linear;
+}
+
+@keyframes campaign-grid {
+  12.5% { box-shadow:
+    19px -19px 0 0px, 38px -19px 0 0px, 57px -19px 0 5px,
+    19px 0     0 5px, 38px 0     0 0px, 57px 0     0 5px,
+    19px 19px  0 0px, 38px 19px  0 0px, 57px 19px  0 0px; }
+  25%   { box-shadow:
+    19px -19px 0 5px, 38px -19px 0 0px, 57px -19px 0 5px,
+    19px 0     0 0px, 38px 0     0 0px, 57px 0     0 0px,
+    19px 19px  0 0px, 38px 19px  0 5px, 57px 19px  0 0px; }
+  50%   { box-shadow:
+    19px -19px 0 5px, 38px -19px 0 5px, 57px -19px 0 0px,
+    19px 0     0 0px, 38px 0     0 0px, 57px 0     0 0px,
+    19px 19px  0 0px, 38px 19px  0 0px, 57px 19px  0 5px; }
+  62.5% { box-shadow:
+    19px -19px 0 0px, 38px -19px 0 0px, 57px -19px 0 0px,
+    19px 0     0 5px, 38px 0     0 0px, 57px 0     0 0px,
+    19px 19px  0 0px, 38px 19px  0 5px, 57px 19px  0 5px; }
+  75%   { box-shadow:
+    19px -19px 0 0px, 38px -19px 0 5px, 57px -19px 0 0px,
+    19px 0     0 0px, 38px 0     0 0px, 57px 0     0 5px,
+    19px 19px  0 0px, 38px 19px  0 0px, 57px 19px  0 5px; }
+  87.5% { box-shadow:
+    19px -19px 0 0px, 38px -19px 0 5px, 57px -19px 0 0px,
+    19px 0     0 0px, 38px 0     0 5px, 57px 0     0 0px,
+    19px 19px  0 5px, 38px 19px  0 0px, 57px 19px  0 0px; }
+}
+
+/* Flame flicker — the warmup ("heat") motif for the sidebar Accounts row.
+   Deliberately a DIFFERENT motion than .campaign-grid so each nav row reads
+   distinct. A small living-flame wobble: scale + tilt + opacity, anchored at
+   the base so it dances like a candle. Tint via currentColor (orange). */
+.flame-flicker {
+  transform-origin: center bottom;
+  animation: flame-flicker 1.1s ease-in-out infinite;
+}
+
+@keyframes flame-flicker {
+  0%, 100% { transform: scale(1) rotate(-1.5deg); opacity: 0.82; }
+  25%      { transform: scale(1.09) rotate(1.5deg); opacity: 1; }
+  50%      { transform: scale(0.97) rotate(-1deg); opacity: 0.9; }
+  75%      { transform: scale(1.05) rotate(1deg); opacity: 1; }
+}
+
+/* Sidebar status halo: a quiet-but-connected workspace (READY) breathes —
+   the glow swells and fades on a slow cycle so it visibly reads as alive. */
+.status-breathe {
+  animation: status-breathe 2.2s ease-in-out infinite;
+}
+@keyframes status-breathe {
+  0%, 100% { transform: scale(0.6); opacity: 0.9; }
+  50%      { transform: scale(1.4); opacity: 0.2; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sky-breathe, .sun-glow, .cloud-drift, .animate-card-float, .animate-fade-in, .campaign-grid::before, .flame-flicker, .status-breathe { animation: none !important; }
+}
+
+/* ── Utilities ─────────────────────── */
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+
+  .animate-card-float {
+    animation: card-float 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+
+  .animate-fade-in {
+    animation: fade-in 0.5s ease both;
+  }
+
+}
+
+.bg-email {
+  background-image: url("data:image/svg+xml;utf8,%3Csvg%20viewBox%3D%220%200%20280%20256%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%3Cpath%20d%3D%22M170.241%2026.7461C173.21%2021.6919%20172.626%2018.8475%20173.784%2015.9756C174.496%2014.2117%20176.829%2014.1236%20177.834%2015.7385C180.648%2020.2595%20180.845%2026.7813%20177.013%2032.9134C173.481%2038.5661%20167.776%2039.8645%20163.614%2040.1136C161.729%2040.2265%20160.289%2038.5329%20161.394%2037.0014C163.36%2034.2764%20167.36%2031.6502%20170.241%2026.7461Z%22%20fill%3D%22%23FA9955%22%2F%3E%3Cpath%20d%3D%22M102.297%2024.6341C100.509%2014.4962%20105.013%208.82327%20109.477%205.22381C111.149%203.87595%20113.354%205.56809%20112.995%207.68538C112.606%209.98423%20112.439%2012.7392%20112.954%2015.6565C114.168%2022.541%20129.311%2032.3976%20130.311%2038.0672C130.907%2041.4479%20129.872%2046.1555%20127.942%2050.0239C126.917%2052.0788%20123.275%2050.5138%20122.889%2048.2502C122.874%2048.1667%20122.86%2048.0825%20122.845%2047.9975C121.872%2042.4782%20104.844%2039.078%20102.297%2024.6341Z%22%20fill%3D%22%23FA9955%22%2F%3E%3Cpath%20d%3D%22M190.692%2035.3663C192.809%2032.8656%20196.747%2033.1772%20197.811%2036.2765C198.721%2038.928%20199.501%2042.171%20199.501%2045.5001C199.5%2052.8707%20195.089%2056.8593%20201.348%2064.7111C202.416%2066.0499%20204.23%2066.5175%20205.859%2065.9894C221.601%2060.8854%20233.732%2052.3052%20236.001%2045.5001C239.068%2036.2981%20249.421%2056.6435%20240.291%2074.5695H148.49C147.967%2074.0823%20147.438%2073.5952%20146.899%2073.1105C145.12%2071.5102%20142.395%2071.617%20140.783%2073.3849C140.428%2073.774%20140.075%2074.1695%20139.723%2074.5695H43.9332C36.546%2060.0341%2029.9746%2042.7756%2035.5006%2045.5001C44.5572%2049.9658%2063.0006%2071.7725%2078.0631%2071.7726C85.5998%2071.7724%2086.173%2067.228%2090.5006%2063.5001C99.6418%2055.6251%2073.3363%2042.5028%2071.9068%2037.4191C71.6139%2036.3754%2073.086%2036.0973%2074.1529%2036.2902C79.7761%2037.3067%2098.1925%2040.9002%20105.001%2045.5001C110.232%2049.0351%20118.762%2056.9295%20124.123%2062.0538C126.481%2064.3068%20130.394%2063.5148%20131.65%2060.505L139.017%2042.8478C140.464%2039.3796%20145.084%2039.1142%20146.842%2042.4357C151.392%2051.0308%20155.783%2058.0803%20167.913%2056.0402C168.132%2056.0032%20168.357%2055.945%20168.568%2055.8741L169.258%2055.6427C178.23%2049.2942%20186.089%2040.8031%20190.692%2035.3663Z%22%20fill%3D%22url%28%23paint0_linear_1_188%29%22%2F%3E%3Cpath%20d%3D%22M124.869%20207.402C136.048%20217.634%20153.243%20217.457%20164.209%20206.997L190.655%20181.768L264.935%20250.395C259.677%20253.934%20253.347%20256%20246.533%20256H33C27.1193%20256%2021.5991%20254.46%2016.8174%20251.764L94.709%20179.798L124.869%20207.402ZM84.3457%20170.312L6.31152%20242.409C2.34327%20236.962%200%20230.255%200%20223V116.803C1.8303e-06%20109.946%202.09091%20103.578%205.66992%2098.3017L84.3457%20170.312ZM275.444%20100.884C278.049%20105.604%20279.533%20111.03%20279.533%20116.803V223C279.533%20229.344%20277.741%20235.269%20274.638%20240.3L200.805%20172.085L275.444%20100.884ZM246.533%2083.8027C253.916%2083.8027%20260.733%2086.2271%20266.23%2090.3232L154.546%20196.867C148.909%20202.245%20140.068%20202.335%20134.321%20197.075L15.8262%2088.6181C20.8292%2085.5631%2026.709%2083.8027%2033%2083.8027H246.533Z%22%20fill%3D%22url%28%23paint1_linear_1_188%29%22%2F%3E%3Cdefs%3E%3ClinearGradient%20id%3D%22paint0_linear_1_188%22%20x1%3D%22142.191%22%20y1%3D%2218.9244%22%20x2%3D%22142.191%22%20y2%3D%22208.992%22%20gradientUnits%3D%22userSpaceOnUse%22%3E%3Cstop%20stop-color%3D%22%23FAA057%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%23F03838%22%2F%3E%3C%2FlinearGradient%3E%3ClinearGradient%20id%3D%22paint1_linear_1_188%22%20x1%3D%22139.767%22%20y1%3D%2283.8027%22%20x2%3D%22139.767%22%20y2%3D%22256%22%20gradientUnits%3D%22userSpaceOnUse%22%3E%3Cstop%20stop-color%3D%22%237293FF%22%2F%3E%3Cstop%20offset%3D%221%22%20stop-color%3D%22%232C3EFF%22%2F%3E%3C%2FlinearGradient%3E%3C%2Fdefs%3E%3C%2Fsvg%3E");
+}
+
+.ripple {
+  position: relative;
+  overflow: hidden;
+}
+
+.ripple-effect-span {
+  position: absolute;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.3;
+  transform: scale(0);
+  transition: .8s ease-out;
+}
+.ripple-effect-span.in{
+  transform: scale(4);
+  opacity: 0.08;
+}
+.ripple-effect-span.out{
+  transition: .3s;
+  opacity: 0;
+}
+
+.tiptap p{
+  margin: 0;
+}
+
+/* Campaign Step composer body (the TipTap editor surface). Tailwind preflight
+   strips list markers + heading sizes, so restore them. The Preview tab is not
+   styled here: it renders in the inbox's sandboxed frame, which carries its
+   own document CSS. */
+.tiptap-body { position: relative; word-break: break-word; white-space: break-spaces; font-variant-ligatures: none; font-feature-settings: "liga" 0; }
+.tiptap-body [contenteditable="false"] { white-space: normal; }
+.tiptap-body [contenteditable="false"] [contenteditable="true"], .tiptap-body pre { white-space: pre-wrap; }
+.tiptap-body img.ProseMirror-separator { display: inline !important; border: none !important; margin: 0 !important; width: 0 !important; height: 0 !important; }
+.ProseMirror-gapcursor { display: none; pointer-events: none; position: absolute; margin: 0; }
+.ProseMirror-gapcursor::after { content: ""; display: block; position: absolute; top: -2px; width: 20px; border-top: 1px solid currentColor; animation: ProseMirror-cursor-blink 1.1s steps(2, start) infinite; }
+@keyframes ProseMirror-cursor-blink { to { visibility: hidden; } }
+.ProseMirror-hideselection *::selection { background: transparent; }
+.ProseMirror-hideselection *::-moz-selection { background: transparent; }
+.ProseMirror-hideselection * { caret-color: transparent; }
+.ProseMirror-focused .ProseMirror-gapcursor { display: block; }
+.tiptap-body p { margin: 0 0 0.6em; }
+.tiptap-body p:last-child { margin-bottom: 0; }
+.tiptap-body h2 { font-size: 1.25rem; line-height: 1.3; font-weight: 600; margin: 0.5em 0 0.3em; color: #0f172a; }
+.tiptap-body h3 { font-size: 1.08rem; line-height: 1.3; font-weight: 600; margin: 0.5em 0 0.3em; color: #0f172a; }
+.tiptap-body ul { list-style: disc; padding-left: 1.25rem; margin: 0.4em 0; }
+.tiptap-body ol { list-style: decimal; padding-left: 1.25rem; margin: 0.4em 0; }
+.tiptap-body li { margin: 0.15em 0; }
+.tiptap-body li > p { margin: 0; }
+.tiptap-body a { color: #7c3aed; text-decoration: underline; }
+.tiptap-body strong { font-weight: 600; }
+.tiptap-body:focus { outline: none; }
+
+/* Body images. The sent markup carries its own inline width/margins (mail
+   clients ignore stylesheets), so these rules only cover the editing surface:
+   a sensible ceiling, and a visible ring while the image is the selection the
+   floating size/alignment bar acts on. */
+.tiptap-body img { max-width: 100%; height: auto; border-radius: 2px; }
+.tiptap-body .email-image-preview { min-height: 24px; }
+.tiptap-body .email-image-preview[data-image-unavailable]::after { content: "Image unavailable"; font-size: 12px; color: #64748b; }
+.tiptap-body img.ProseMirror-selectednode,
+.tiptap-body .email-image-preview.ProseMirror-selectednode,
+/* A linked image is an <a> wrapping the <img>, so the selection lands on the
+   anchor and the ring has to be able to live there too. */
+.tiptap-body a.ProseMirror-selectednode {
+  outline: 2px solid #a78bfa; /* sky-400 */
+  outline-offset: 1px;
+}
+
+/* Layout tables. The editing surface needs a visible grid to work in, but the
+   sent markup keeps whatever borders the template wrote: these rules never
+   leave the dashboard, and a mail client would ignore them anyway. A cell with
+   its own inline border or background wins, so a real design still previews as
+   itself while it is being edited. */
+.tiptap-body table { border-collapse: collapse; margin: 0.4em 0; max-width: 100%; }
+/* Only a table that sizes itself nowhere else. A presentational width= loses to
+   any stylesheet rule, so forcing one here edited a 600px design at full
+   container width and table-layout:fixed threw away its column widths. An
+   inline style beats this rule on its own. */
+.tiptap-body table:not([width]) { width: 100%; }
+.tiptap-body td, .tiptap-body th { border: 1px dashed #e2e8f0; padding: 0.4em 0.55em; vertical-align: top; position: relative; }
+.tiptap-body th { background: #f8fafc; font-weight: 600; text-align: left; }
+.tiptap-body td > p:last-child, .tiptap-body th > p:last-child { margin-bottom: 0; }
+.tiptap-body .selectedCell::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: rgba(2, 132, 199, 0.08); /* sky-600 */
+}
+
+/* Call-to-action buttons. The sent markup is a one-cell table, which the
+   layout-table rules above would otherwise stretch to the container and draw a
+   dashed editing grid on. Everything else about a button (its colour, padding,
+   corners and margins) is inline, so the editing surface shows the box the
+   recipient gets rather than a dashboard-only approximation of it. */
+.tiptap-body table[data-pegasusbound-button]:not([width]) { width: auto; }
+.tiptap-body table[data-pegasusbound-button] td { border: 0; }
+.tiptap-body table[data-pegasusbound-button].ProseMirror-selectednode {
+  outline: 2px solid #a78bfa; /* sky-400 */
+  outline-offset: 2px;
+}
+
+/* The signature is other people's markup mounted in the dashboard's own DOM,
+   because a contentEditable is how the visual editor works. Paint containment
+   makes this box the containing block for anything positioned inside it and
+   clips to it, so a signature carrying position:fixed covers itself rather
+   than a teammate's screen. Markup that could execute never reaches here at
+   all; EmailEditor forces the source view for that. */
+.email-signature-surface { contain: layout paint; }
+
+/* Merge-tag chips shown inside the composer editor. Only the node-view button
+   carries .tpl-var; the resolved `<span data-var>` the preview renders is left
+   unstyled on purpose so it reads as the plain value it will send as. */
+.tpl-var-wrap { vertical-align: baseline; }
+.tiptap-body .tpl-var {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  height: 1.25rem;
+  padding: 0 0.375rem;
+  border-radius: 0.25rem;
+  border: 1px solid #e2e8f0; /* slate-200 */
+  background: #f8fafc; /* slate-50 */
+  color: #475569; /* slate-600 */
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  white-space: nowrap;
+  vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+.tiptap-body .tpl-var:hover,
+.tiptap-body .tpl-var.tpl-var-active {
+  border-color: #c4b5fd; /* sky-300 */
+  background: #f5f3ff; /* sky-50 */
+  color: #6d28d9; /* sky-700 */
+}
+
+/* AI blocks — per-recipient generated copy. A restrained sky tint (with a
+   sparkle icon) distinguishes them from the slate merge chips without leaving
+   the house theme. No gradients or glow. */
+.tpl-ai-wrap { vertical-align: baseline; }
+.tiptap-body .tpl-ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 1.25rem;
+  padding: 0 0.4rem;
+  border-radius: 0.25rem;
+  border: 1px solid #ddd6fe; /* sky-200 */
+  background: #f5f3ff; /* sky-50 */
+  color: #6d28d9; /* sky-700 */
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  white-space: nowrap;
+  vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+.tiptap-body .tpl-ai:hover,
+.tiptap-body .tpl-ai.tpl-ai-active {
+  border-color: #c4b5fd; /* sky-300 */
+  background: #ede9fe; /* sky-100 */
+  color: #5b21b6; /* sky-800 */
+}
+/* Unconfigured AI block: a dashed edge nudges the user to set it up. */
+.tiptap-body .tpl-ai.tpl-ai-empty {
+  border-style: dashed;
+}
+
+/* Conditional (logic) chips — a heavier neutral slate so they read as structure,
+   distinct from the light merge chips and the sky AI chips. Sky hover accent. */
+.tpl-if-wrap { vertical-align: baseline; }
+.tiptap-body .tpl-if {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  height: 1.25rem;
+  padding: 0 0.4rem;
+  border-radius: 0.25rem;
+  border: 1px solid #cbd5e1; /* slate-300 */
+  background: #f1f5f9; /* slate-100 */
+  color: #334155; /* slate-700 */
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  white-space: nowrap;
+  vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
+  transition: background-color 0.12s, border-color 0.12s, color 0.12s;
+}
+.tiptap-body .tpl-if:hover,
+.tiptap-body .tpl-if.tpl-if-active {
+  border-color: #c4b5fd; /* sky-300 */
+  background: #f5f3ff; /* sky-50 */
+  color: #6d28d9; /* sky-700 */
+}
+
+/* The editor surface in the dark theme. A block that paints a light background of its
+   own (a template's white table cell or banner) keeps dark text, as the recipient sees it. */
+.dark .tiptap-body h2, .dark .tiptap-body h3 { color: #f7f8f8; }
+.dark .tiptap-body a { color: #c4b5fd; }
+.dark .tiptap-body td, .dark .tiptap-body th { border-color: #2e2f34; }
+.dark .tiptap-body th { background: #16171a; }
+.dark .tiptap-body :is(
+  [style*="background-color: #f" i], [style*="background-color:#f" i], [style*="background: #f" i], [style*="background:#f" i],
+  [style*="background-color: white" i], [style*="background: white" i],
+  [style*="rgb(255, 255, 255)"], [style*="rgb(255,255,255)"], [bgcolor^="#f" i], [bgcolor="white" i]
+) { color: #0f172a; }
+.dark .tiptap-body .tpl-var { border-color: #2e2f34; background: #1c1d20; color: #d0d6e0; }
+.dark .tiptap-body .tpl-if { border-color: #3b3d42; background: #25262a; color: #e6e8eb; }
+.dark .tiptap-body .tpl-ai { border-color: oklch(74.6% 0.16 232.661 / 0.35); background: oklch(68.5% 0.169 237.323 / 0.14); color: #c4b5fd; }
+.dark .tiptap-body :is(.tpl-var, .tpl-if, .tpl-ai):hover,
+.dark .tiptap-body :is(.tpl-var.tpl-var-active, .tpl-if.tpl-if-active, .tpl-ai.tpl-ai-active) {
+  border-color: oklch(74.6% 0.16 232.661 / 0.6);
+  background: oklch(68.5% 0.169 237.323 / 0.2);
+  color: #ddd6fe;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* iOS Safari auto-zooms the page when a focused control has font-size < 16px.
+   Force 16px on phones (!important beats Tailwind text-[12.5px] utilities);
+   desktop type is untouched. */
+@media (max-width: 767px) {
+  input, select, textarea, [contenteditable="true"] { font-size: max(16px, 1em) !important; }
+}

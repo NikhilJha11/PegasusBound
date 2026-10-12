@@ -1,0 +1,570 @@
+---
+import Wordmark from './Wordmark.astro';
+import Icon from './Icon.astro';
+import Photo from './Photo.astro';
+import { GITHUB_PATH } from '../lib/marks';
+import { getRepoStars, REPO_URL } from '../lib/github';
+
+interface Props {
+  /** Render as transparent over the sky hero, with light text. Becomes solid once scrolled past the hero. */
+  onSky?: boolean;
+}
+const { onSky = false } = Astro.props;
+
+const path = Astro.url.pathname;
+const stars = await getRepoStars();
+
+// Featured tile on the right of each dropdown, over a photo.
+type Featured = { href: string; title: string; desc: string; photo: string; cta: string };
+
+const productFeatured: Featured = {
+  href: '/automations/',
+  title: 'Automations',
+  desc: 'When a reply lands, open the deal, post to Slack or update your CRM.',
+  photo: 'paint-teal',
+  cta: 'Explore automations',
+};
+const useCaseFeatured: Featured = {
+  href: 'https://docs.pegasusbound.com/learn/deliverability/',
+  title: 'The deliverability handbook',
+  desc: 'How warmup, inbox placement and sender reputation fit together.',
+  photo: 'sheer-peach',
+  cta: 'Read the handbook',
+};
+
+const products = [
+  { icon: 'flame',    href: '/warmup/',     title: 'Warmup',         desc: 'Build sender reputation before you send.' },
+  { icon: 'workflow', href: '/campaigns/',  title: 'Campaigns',      desc: 'Sequences with follow-ups and A/B tests.' },
+  { icon: 'inbox',    href: '/inbox/',      title: 'Unified inbox',  desc: 'Every reply from every mailbox in one place.' },
+  { icon: 'chart',    href: '/analytics/',  title: 'Analytics',      desc: 'Sends, replies, bounces and inbox placement.' },
+  { icon: 'contact',  href: '/crm/',        title: 'CRM',            desc: 'Turn interested replies into deals.' },
+  { icon: 'webhook',  href: '/developers/', title: 'API & webhooks', desc: 'Build on Pegasusbound with REST and webhooks.' },
+];
+
+const useCases = [
+  { icon: 'rocket',  href: '/use-cases/founders/',    title: 'Founders',    desc: 'Outreach without risking your own domain.' },
+  { icon: 'users',   href: '/use-cases/agencies/',    title: 'Agencies',    desc: 'Many clients and domains in one account.' },
+  { icon: 'chart',   href: '/use-cases/sales/',       title: 'Sales teams', desc: 'Spread sending across reps and mailboxes.' },
+  { icon: 'contact', href: '/use-cases/recruiters/',  title: 'Recruiters',  desc: 'Candidate outreach from personal mailboxes.' },
+  { icon: 'star',    href: '/use-cases/fundraising/', title: 'Fundraising', desc: 'A focused investor sequence that lands.' },
+];
+
+type MegaItem = { icon: string; href: string; title: string; desc: string };
+type NavItem = {
+  label: string;
+  href: string;
+  match?: string;
+  mega?: boolean;
+  megaItems?: MegaItem[];
+  megaFeatured?: Featured;
+};
+
+const nav: NavItem[] = [
+  {
+    label: 'Product',
+    href: '/warmup/',
+    match: '/warmup|/developers|/inbox|/campaigns|/analytics|/crm|/automations',
+    mega: true,
+    megaItems: products,
+    megaFeatured: productFeatured,
+  },
+  {
+    label: 'Use cases',
+    href: '/use-cases/founders/',
+    match: '/use-cases',
+    mega: true,
+    megaItems: useCases,
+    megaFeatured: useCaseFeatured,
+  },
+  { label: 'Deliverability',href: '/deliverability/',match: '/deliverability' },
+  { label: 'Pricing',       href: '/pricing/',       match: '/pricing' },
+  { label: 'Blog',          href: '/blog/',          match: '/blog' },
+  { label: 'Docs',          href: 'https://docs.pegasusbound.com' },
+];
+
+function active(match?: string) {
+  if (!match) return false;
+  // Support pipe-delimited multi-match for the Product mega item
+  const parts = match.split('|');
+  return parts.some((m) => path === m || path.startsWith(m + '/'));
+}
+---
+<header
+  id="site-header"
+  data-on-sky={onSky ? 'true' : 'false'}
+  class={[
+    'sticky top-0 z-50 transition-[border-color,background-color] duration-200',
+    onSky ? 'header-on-sky' : 'site-header-solid border-b border-transparent bg-white/85 backdrop-blur-md',
+  ].join(' ')}
+>
+  <div class="container-page flex h-16 items-center gap-6">
+    <Wordmark size="md" />
+
+    <nav class="hidden lg:flex items-center gap-0.5 ml-4 relative">
+      {nav.map((n) => (
+        n.mega ? (
+          <div class="mega-wrapper relative" data-mega>
+            <a
+              href={n.href}
+              class={
+                'nav-link h-9 px-3 inline-flex items-center gap-1.5 text-[14px] transition-colors ' +
+                (active(n.match)
+                  ? (onSky ? 'is-active' : 'text-slate-900')
+                  : (onSky ? '' : 'text-slate-600 hover:text-slate-900'))
+              }
+            >
+              {n.label}
+              <svg width="9" height="9" viewBox="0 0 12 12" fill="none" class="mega-caret transition-transform duration-200" aria-hidden="true">
+                <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </a>
+
+            <!-- Dropdown: a full-width panel under the header, a quiet grid of
+                 links on the left and a large photo tile on the right. -->
+            <div class="mega-panel pointer-events-none opacity-0 transition-[opacity,transform] duration-200 ease-out" style="position: fixed; top: 64px; left: 0; right: 0;">
+              <div class="border-b border-slate-200/80 bg-white shadow-[0_40px_80px_-40px_rgba(15,23,42,0.28)]">
+                <div class="container-page py-8">
+                  <div class="grid grid-cols-[1fr_360px] gap-10">
+                    <div>
+                      <div class="px-3 text-[13px] text-slate-400">{n.label}</div>
+                      <div class="mt-3 grid grid-cols-3 gap-1">
+                        {(n.megaItems ?? []).map((it) => {
+                          const isCurrent = path === it.href || path.startsWith(it.href);
+                          return (
+                            <a
+                              href={it.href}
+                              aria-current={isCurrent ? 'page' : undefined}
+                              class={`mega-card group flex items-start gap-3.5 rounded-xl p-3 transition-colors ${isCurrent ? 'bg-slate-50' : 'hover:bg-slate-50'}`}
+                            >
+                              <span class="inline-flex size-9 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition-colors group-hover:border-slate-300 group-hover:text-slate-900">
+                                <Icon name={it.icon} size={16} />
+                              </span>
+                              <span class="min-w-0 pt-0.5">
+                                <span class="flex items-center gap-1.5 text-[14.5px] font-medium text-slate-900">
+                                  {it.title}
+                                  {isCurrent && <span class="size-1.5 rounded-full bg-sky-500"></span>}
+                                </span>
+                                <span class="mt-1 block text-[13px] leading-snug text-slate-500">{it.desc}</span>
+                              </span>
+                            </a>
+                          );
+                        })}
+                      </div>
+                    </div>
+                    {n.megaFeatured && (
+                      <a href={n.megaFeatured.href} class="mega-card group relative flex min-h-[236px] flex-col overflow-hidden rounded-[6px]">
+                        <Photo name={n.megaFeatured.photo} sizes="360px" class="absolute inset-0 h-full w-full object-cover transition-transform duration-700 ease-out group-hover:scale-[1.04]" />
+                        <span class="relative mt-auto m-3 rounded-lg bg-white/85 p-4 backdrop-blur-md ring-1 ring-white/60">
+                          <span class="block text-[14.5px] font-medium text-slate-900">{n.megaFeatured.title}</span>
+                          <span class="mt-1 block text-[13px] leading-snug text-slate-600">{n.megaFeatured.desc}</span>
+                          <span class="mt-3 inline-flex items-center gap-1 text-[13px] font-medium text-slate-900">
+                            {n.megaFeatured.cta}
+                            <Icon name="arrowRight" size={12} class="transition-transform group-hover:translate-x-0.5" />
+                          </span>
+                        </span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <a
+            href={n.href}
+            class={
+              'nav-link h-9 px-3 inline-flex items-center text-[14px] transition-colors ' +
+              (active(n.match)
+                ? (onSky ? 'is-active' : 'text-slate-900')
+                : (onSky ? '' : 'text-slate-600 hover:text-slate-900'))
+            }
+          >
+            {n.label}
+          </a>
+        )
+      ))}
+    </nav>
+
+    <div class="ml-auto flex items-center gap-2">
+      <a
+        href={REPO_URL}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={stars ? `Pegasusbound on GitHub, ${stars} stars` : 'Pegasusbound on GitHub'}
+        class="group hidden md:inline-flex h-9 items-center gap-2 rounded-full pl-3 pr-3.5 text-[14px] text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={GITHUB_PATH} /></svg>
+        {stars ? (
+          <span class="inline-flex items-center gap-1 tabular-nums">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" class="text-slate-400 transition-colors group-hover:text-amber-500" aria-hidden="true"><path d="M12 2.5l2.9 6.1 6.6.8-4.9 4.6 1.3 6.6L12 17.3l-5.9 3.3 1.3-6.6-4.9-4.6 6.6-.8z"/></svg>
+            {stars}
+          </span>
+        ) : <span>GitHub</span>}
+      </a>
+      <a
+        href="https://dc.pegasusbound.com"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Join the Pegasusbound Discord"
+        title="Discord"
+        class={
+          'cta-ghost inline-flex h-9 w-9 items-center justify-center rounded-full transition-colors ' +
+          (onSky ? '' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-100')
+        }
+      >
+        <Icon name="discord" size={16} />
+      </a>
+      <a
+        href="https://app.pegasusbound.com/auth/login"
+        class={
+          'cta-ghost hidden sm:inline-flex h-9 px-4 items-center rounded-full text-[14px] transition-colors ' +
+          (onSky ? '' : 'border border-slate-200 text-slate-800 hover:border-slate-300 hover:bg-slate-50')
+        }
+      >
+        Log in
+      </a>
+      <a
+        href="https://app.pegasusbound.com/auth/register"
+        class={
+          'cta-primary inline-flex h-9 px-4 items-center rounded-full text-[14px] font-medium transition-colors ' +
+          (onSky ? '' : 'bg-slate-900 text-white hover:bg-slate-800')
+        }
+      >
+        Start free
+      </a>
+      <button
+        id="nav-toggle"
+        class={
+          'lg:hidden inline-flex h-9 w-9 items-center justify-center rounded-full ' +
+          (onSky ? 'cta-ghost' : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100')
+        }
+        aria-label="Open navigation"
+        aria-expanded="false"
+        aria-controls="mobile-nav"
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="4" y1="7" x2="20" y2="7" />
+          <line x1="4" y1="12" x2="20" y2="12" />
+          <line x1="4" y1="17" x2="20" y2="17" />
+        </svg>
+      </button>
+    </div>
+  </div>
+</header>
+
+<!-- Full-screen mobile menu (outside <header> so fixed positioning is viewport-relative,
+     not clipped by the header's backdrop-filter containing block) -->
+<div
+    id="mobile-nav"
+    class="mobile-menu fixed inset-0 z-[60] lg:hidden flex flex-col bg-white text-slate-900"
+    aria-hidden="true"
+  >
+    <div class="container-page flex h-16 items-center shrink-0 border-b border-slate-200/70">
+      <a href="/" class="inline-flex items-center gap-2.5 text-slate-900">
+        <svg viewBox="0 0 746 764" class="w-6 h-6" fill="currentColor" aria-hidden="true"><path d="M140 548C300 462 468 300 616 120L596 292C478 418 326 516 140 548ZM140 640C326 604 498 504 640 352L612 476C490 580 330 638 140 640ZM140 724C318 716 470 656 594 560L566 650C452 722 302 744 140 724Z"/></svg>
+        <span class="font-extrabold tracking-tight text-[15.5px]">Pegasusbound</span>
+      </a>
+      <button id="nav-close" class="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 transition-colors" aria-label="Close navigation">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+      </button>
+    </div>
+
+    <nav class="container-page flex-1 overflow-y-auto py-2">
+      {nav.map((n, i) => (
+        n.mega ? (
+          <div class="mobile-link border-b border-slate-100" style={`--i:${i}`}>
+            <button type="button" class="acc-trigger w-full flex items-center justify-between py-4 text-[19px] font-medium text-slate-900" aria-expanded="false">
+              <span>{n.label}</span>
+              <svg class="acc-caret text-slate-400" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
+            </button>
+            <div class="acc-panel">
+              <div>
+                <div class="pb-3 flex flex-col">
+                  {[...(n.megaFeatured ? [n.megaFeatured] : []), ...(n.megaItems ?? [])].map((it) => (
+                    <a href={it.href} class="flex flex-col py-2 pl-1 pr-2 rounded-md hover:bg-slate-50">
+                      <span class="text-[15px] font-medium text-slate-800">{it.title}</span>
+                      <span class="text-[12.5px] text-slate-400 leading-snug">{it.desc.split('.')[0]}.</span>
+                    </a>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <a href={n.href} class="mobile-link group flex items-center justify-between py-4 border-b border-slate-100 text-[19px] font-medium text-slate-900" style={`--i:${i}`}>
+            <span>{n.label}</span>
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-slate-300 group-hover:text-slate-500 transition-colors"><path d="M9 18l6-6-6-6"/></svg>
+          </a>
+        )
+      ))}
+    </nav>
+
+    <div class="container-page py-5 shrink-0 flex flex-col gap-2.5 border-t border-slate-200/70">
+      <a href={REPO_URL} target="_blank" rel="noopener noreferrer" class="h-12 inline-flex items-center justify-center gap-2 rounded-[11px] border border-slate-200 text-slate-700 text-[15px] font-medium hover:bg-slate-50 transition-colors">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={GITHUB_PATH} /></svg>
+        Star on GitHub{stars && <span class="text-slate-400 tabular-nums">· {stars}</span>}
+      </a>
+      <a href="https://dc.pegasusbound.com" target="_blank" rel="noopener noreferrer" class="h-12 inline-flex items-center justify-center gap-2 rounded-[11px] border border-slate-200 text-slate-700 text-[15px] font-medium hover:bg-slate-50 transition-colors">
+        <Icon name="discord" size={17} class="text-[#5865F2]" />
+        Join the Discord
+      </a>
+      <a href="https://app.pegasusbound.com/auth/login" class="h-12 inline-flex items-center justify-center rounded-[11px] border border-slate-200 text-slate-700 text-[15px] font-medium hover:bg-slate-50 transition-colors">Log in</a>
+      <a href="https://app.pegasusbound.com/auth/register" class="h-12 inline-flex items-center justify-center rounded-[11px] bg-foreground text-background text-[15px] font-medium hover:bg-foreground/85 transition-colors">Start free</a>
+    </div>
+  </div>
+
+<style>
+  /* Mega panel: only fade opacity to keep bounds stable while open */
+  .mega-panel { transform: translateY(-4px); }
+  .mega-panel.open {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+  /* Invisible hover-bridge above the panel so cursor can travel
+     from the trigger without crossing a dead gap. */
+  .mega-panel.open::before {
+    content: '';
+    position: absolute;
+    top: -24px;
+    left: 0;
+    right: 0;
+    height: 24px;
+  }
+  .mega-wrapper.open .mega-caret { transform: rotate(180deg); }
+  .site-header-solid.is-scrolled { border-bottom-color: rgb(226 232 240 / 0.8); }
+
+  /* Full-screen mobile menu: animates open AND closed. Display is toggled by
+     JS via .is-visible; .is-open drives the fade + slide so both run. */
+  .mobile-menu {
+    display: none;
+    opacity: 0;
+    transform: translateY(-10px);
+    transition: opacity 220ms ease, transform 320ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .mobile-menu.is-visible { display: flex; }
+  .mobile-menu.is-open { opacity: 1; transform: translateY(0); }
+
+  /* staggered link entrance */
+  .mobile-menu .mobile-link { opacity: 0; transform: translateY(14px); transition: opacity 180ms ease; }
+  .mobile-menu.is-open .mobile-link {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 380ms ease, transform 460ms cubic-bezier(0.22, 1, 0.36, 1);
+    transition-delay: calc(70ms + var(--i, 0) * 48ms);
+  }
+
+  /* accordion: collapsed by default, expands on click via grid-rows */
+  .acc-panel { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 300ms cubic-bezier(0.22, 1, 0.36, 1); }
+  .acc-panel.open { grid-template-rows: 1fr; }
+  .acc-panel > div { overflow: hidden; }
+  .acc-caret { transition: transform 240ms ease; }
+  .acc-trigger[aria-expanded="true"] .acc-caret { transform: rotate(180deg); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .mobile-menu, .mobile-menu .mobile-link, .acc-panel, .acc-caret { transition: none; }
+  }
+</style>
+
+<script is:inline>
+  (function () {
+    // Full-screen mobile menu
+    var toggle = document.getElementById('nav-toggle');
+    var menu = document.getElementById('mobile-nav');
+    var closeBtn = document.getElementById('nav-close');
+    var closeTimer = null;
+    function openMenu() {
+      if (!menu) return;
+      if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
+      menu.classList.add('is-visible');
+      void menu.offsetWidth; // reflow so the open transition runs from the hidden state
+      menu.classList.add('is-open');
+      menu.setAttribute('aria-hidden', 'false');
+      if (toggle) toggle.setAttribute('aria-expanded', 'true');
+      document.documentElement.style.overflow = 'hidden';
+    }
+    function closeMenu() {
+      if (!menu) return;
+      menu.classList.remove('is-open');
+      menu.setAttribute('aria-hidden', 'true');
+      if (toggle) toggle.setAttribute('aria-expanded', 'false');
+      document.documentElement.style.overflow = '';
+      if (closeTimer) clearTimeout(closeTimer);
+      closeTimer = setTimeout(function () {
+        menu.classList.remove('is-visible');
+        // reset accordions so the menu reopens clean
+        Array.prototype.forEach.call(menu.querySelectorAll('.acc-trigger'), function (b) { b.setAttribute('aria-expanded', 'false'); });
+        Array.prototype.forEach.call(menu.querySelectorAll('.acc-panel'), function (p) { p.classList.remove('open'); });
+      }, 340);
+    }
+    function setMenu(open) { open ? openMenu() : closeMenu(); }
+    if (toggle) toggle.addEventListener('click', function () { setMenu(!menu.classList.contains('is-open')); });
+    if (closeBtn) closeBtn.addEventListener('click', function () { setMenu(false); });
+    if (menu) {
+      // Accordion sections (Product / Use cases): collapsed by default, expand on tap.
+      Array.prototype.forEach.call(menu.querySelectorAll('.acc-trigger'), function (btn) {
+        btn.addEventListener('click', function () {
+          var panel = btn.nextElementSibling;
+          var open = btn.getAttribute('aria-expanded') === 'true';
+          btn.setAttribute('aria-expanded', String(!open));
+          if (panel) panel.classList.toggle('open', !open);
+        });
+      });
+      // Tapping a destination link closes the menu.
+      Array.prototype.forEach.call(menu.querySelectorAll('a'), function (a) {
+        a.addEventListener('click', function () { setMenu(false); });
+      });
+    }
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') setMenu(false); });
+    window.addEventListener('resize', function () { if (window.innerWidth >= 1024) setMenu(false); });
+
+    // Mega-menu — hover state driven by hit-testing the cursor against
+    // both the trigger and the panel. Avoids the fixed-positioning
+    // mouseleave quirks that caused the panel to flicker shut as soon
+    // as the cursor entered it.
+    var wrappers = Array.prototype.slice.call(document.querySelectorAll('[data-mega]'));
+    var bag = [];
+    wrappers.forEach(function (wrapper) {
+      var panel = wrapper.querySelector('.mega-panel');
+      if (!panel) return;
+
+      var entry = {
+        wrapper: wrapper,
+        panel: panel,
+        closeTimer: null,
+        moveHandler: null,
+        isOpen: false,
+        forceClose: null,
+      };
+
+      function insideRect(x, y, el, padTop) {
+        if (!el) return false;
+        var r = el.getBoundingClientRect();
+        var top = r.top - (padTop || 0);
+        return x >= r.left && x <= r.right && y >= top && y <= r.bottom;
+      }
+      // The panel hit-area extends 40px above its top so the gap between
+      // the trigger and the fixed panel acts as an invisible bridge.
+      function inside(x, y, el) {
+        return el === panel ? insideRect(x, y, el, 40) : insideRect(x, y, el, 0);
+      }
+
+      function detachMoveHandler() {
+        if (entry.moveHandler) {
+          document.removeEventListener('mousemove', entry.moveHandler);
+          entry.moveHandler = null;
+        }
+      }
+
+      function forceClose() {
+        if (entry.closeTimer) { clearTimeout(entry.closeTimer); entry.closeTimer = null; }
+        detachMoveHandler();
+        entry.isOpen = false;
+        wrapper.classList.remove('open');
+        panel.classList.remove('open');
+      }
+      entry.forceClose = forceClose;
+
+      function open() {
+        // Synchronously close any other mega panel so only one is ever visible.
+        for (var i = 0; i < bag.length; i++) {
+          if (bag[i] !== entry) bag[i].forceClose();
+        }
+        if (entry.closeTimer) { clearTimeout(entry.closeTimer); entry.closeTimer = null; }
+        if (entry.isOpen) return;
+        entry.isOpen = true;
+        wrapper.classList.add('open');
+        panel.classList.add('open');
+        // Stagger-animate cards on each open
+        var cards = panel.querySelectorAll('.mega-card');
+        cards.forEach(function (c, i) {
+          c.style.opacity = '0';
+          c.style.transform = 'translateY(6px)';
+          c.style.transition = 'none';
+          setTimeout(function () {
+            c.style.transition = 'opacity 220ms ease-out, transform 280ms cubic-bezier(0.22,1,0.36,1), background-color 140ms ease-out';
+            c.style.opacity = '1';
+            c.style.transform = 'translateY(0)';
+          }, 40 + i * 32);
+        });
+        // Track cursor globally so we know when to close
+        if (!entry.moveHandler) {
+          entry.moveHandler = function (e) {
+            if (entry.closeTimer) return; // already scheduled
+            if (!inside(e.clientX, e.clientY, wrapper) && !inside(e.clientX, e.clientY, panel)) {
+              scheduleClose();
+            }
+          };
+          document.addEventListener('mousemove', entry.moveHandler);
+        }
+      }
+      function scheduleClose() {
+        if (entry.closeTimer) clearTimeout(entry.closeTimer);
+        entry.closeTimer = setTimeout(function () {
+          entry.isOpen = false;
+          wrapper.classList.remove('open');
+          panel.classList.remove('open');
+          detachMoveHandler();
+        }, 180);
+      }
+      function cancelClose() {
+        if (entry.closeTimer) { clearTimeout(entry.closeTimer); entry.closeTimer = null; }
+      }
+
+      wrapper.addEventListener('mouseenter', open);
+      panel.addEventListener('mouseenter', cancelClose);
+
+      // Keyboard support
+      wrapper.addEventListener('focusin', open);
+      wrapper.addEventListener('focusout', function (e) {
+        if (!wrapper.contains(e.relatedTarget)) scheduleClose();
+      });
+
+      bag.push(entry);
+    });
+
+    // Close on Escape (global, all panels)
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== 'Escape') return;
+      bag.forEach(function (entry) { entry.forceClose(); });
+    });
+
+    // Hovering any non-mega nav item instantly closes any open mega panel.
+    // Picks up the desktop nav links that are not inside a [data-mega] wrapper.
+    var siblingNavLinks = document.querySelectorAll('#site-header nav .nav-link');
+    siblingNavLinks.forEach(function (link) {
+      if (link.closest('[data-mega]')) return;
+      link.addEventListener('mouseenter', function () {
+        bag.forEach(function (entry) { entry.forceClose(); });
+      });
+    });
+
+    // The solid header shows its hairline only once the page has scrolled.
+    var solid = document.querySelector('#site-header.site-header-solid');
+    if (solid) {
+      var onScroll = function () { solid.classList.toggle('is-scrolled', window.scrollY > 4); };
+      onScroll();
+      window.addEventListener('scroll', onScroll, { passive: true });
+    }
+
+    // If the header is rendered "on sky", flip it to solid once the hero's
+    // bottom sentinel scrolls past the header.
+    var header = document.getElementById('site-header');
+    if (header && header.dataset.onSky === 'true') {
+      var sentinel = document.getElementById('hero-sentinel');
+      if (sentinel) {
+        var io = new IntersectionObserver(function (entries) {
+          var entry = entries[0];
+          if (entry.isIntersecting) {
+            header.classList.add('header-on-sky');
+            header.classList.remove('border-b', 'border-border/70', 'bg-background/70', 'backdrop-blur-md');
+          } else {
+            header.classList.remove('header-on-sky');
+            header.classList.add('border-b', 'border-border/70', 'bg-background/70', 'backdrop-blur-md');
+          }
+        }, { rootMargin: '-56px 0px 0px 0px', threshold: 0 });
+        io.observe(sentinel);
+      }
+    }
+  })();
+</script>

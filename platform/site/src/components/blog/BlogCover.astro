@@ -1,0 +1,31 @@
+---
+/**
+ * Post cover art. Uses the frontmatter `cover` image when one is set;
+ * otherwise picks one of the site's photos from the post id, so every post
+ * gets stable artwork in the same style as the rest of the site.
+ */
+import Photo from '../Photo.astro';
+import type { BlogPost } from '../../lib/blog';
+
+interface Props {
+  post: BlogPost;
+  /** Lazy-load by default; the featured card should pass eager. */
+  eager?: boolean;
+}
+const { post, eager = false } = Astro.props;
+
+let hash = 0;
+for (const ch of post.id) hash = (hash * 31 + ch.charCodeAt(0)) % 9973;
+const photos = ['sheer-blue', 'lake-mist', 'reeded-glass', 'frost-blue', 'sheer-lavender', 'lake-motion', 'paint-aqua', 'sheer-cream', 'paint-blue', 'paint-teal', 'sheer-peach', 'sheer-sky'];
+---
+{post.data.cover ? (
+  <img
+    src={post.data.cover}
+    alt=""
+    class="absolute inset-0 w-full h-full object-cover"
+    loading={eager ? 'eager' : 'lazy'}
+    decoding="async"
+  />
+) : (
+  <Photo name={photos[hash % photos.length]} priority={eager} sizes="(min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw" class="absolute inset-0 h-full w-full object-cover" />
+)}

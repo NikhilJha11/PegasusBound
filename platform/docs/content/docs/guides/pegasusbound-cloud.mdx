@@ -1,0 +1,317 @@
+---
+title: Pegasusbound Cloud for self-hosted instances
+description: "Warm the mailboxes on your own Pegasusbound instance in the hosted warmup pool, while campaigns, contacts and inbox stay on your server."
+---
+
+Linking a self-hosted instance to Pegasusbound Cloud lets its mailboxes warm in the hosted pool, instead of only against the few other mailboxes on your server. Campaigns, contacts, the unibox, tracking and every stored message stay on your server. The cloud does hold the credential of each SMTP/IMAP mailbox you enroll, the sign-in of any Google or Microsoft mailbox connected through it, and any redirect you choose to serve from it.
+
+## Link a workspace
+
+<Steps>
+
+<Step>
+
+On your instance, open **Settings > Pegasusbound Cloud**, select the local workspace, and press **Connect to Pegasusbound Cloud**.
+
+</Step>
+
+<Step>
+
+Press **Open Pegasusbound Cloud**, sign in with your Pegasusbound account, enter the eight character code and pick the workspace to link to.
+
+</Step>
+
+<Step>
+
+Back on your instance, switch on the mailboxes you want warmed.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- A free Pegasusbound Cloud workspace warms up to 10 mailboxes at no cost. The Warmup plan ($15 a month or $144 a year) moves them to the premium pool with no mailbox cap.
+- Connecting needs an instance administrator signed in with two-factor authentication.
+- A code expires after 15 minutes if nobody approves it.
+- The cloud reaches your mail server over the internet, so SMTP and IMAP both need TLS or STARTTLS.
+- A mailbox the cloud quarantines or blocks is skipped by your campaigns until the hold ends.
+
+<Fold>
+
+## What linking gives you
+
+A self-hosted Pegasusbound instance warms mailboxes only against the other mailboxes on that same instance, which for most installs is a handful. Linking the instance to Pegasusbound Cloud lets those mailboxes warm in the hosted pool instead: thousands of real, monitored mailboxes exchanging natural-looking mail, with replies and inbox engagement handled for you.
+
+Only warmup moves to the cloud. Campaigns, contacts, the unibox, tracking and every stored message stay on your server exactly as before. Linked instances also get Google and Microsoft sign-in through Pegasusbound's own OAuth apps, so there is no client to register: see [Google and Microsoft mailboxes](#google-and-microsoft-mailboxes-sign-in-through-pegasusbound-cloud). They can also have Cloud serve a sending domain's [root redirect](#root-redirects-served-by-pegasusbound-cloud), so the domain answers visitors without any proxy setup on your server.
+
+<Callout type="info" title="Pricing">
+  A free Pegasusbound Cloud workspace holds up to 10 mailboxes, connected directly or through a linked instance, and warms them at no cost. The Warmup plan, $15 a month per workspace or $144 a year, moves the workspace's mailboxes to the premium pool for better deliverability, with reputation protection and no mailbox cap. Nothing else about self-hosting changes.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## How it works
+
+New connections link one local workspace to one Pegasusbound Cloud workspace. A Cloud workspace can have only one active self-hosted connection, including any older instance-wide link. New connections for different local workspaces need different Cloud workspaces, each with its own plan. Existing server-wide connections keep serving their local workspaces without reconnecting or buying another plan. Self-hosted workspace creation itself is unlimited; hosted creation limits and request-rate protection are unchanged. When you enroll a mailbox, the instance sends that mailbox's SMTP/IMAP credential to the cloud, sealed in transit and at rest with the same envelope encryption the hosted product uses for every customer mailbox. From then on:
+
+- Pegasusbound Cloud sends the mailbox's warmup mail, replies to partners, and rescues, opens and stars the warmup mail it receives, on Pegasusbound's own workers
+- the cloud reads only verified warmup mail from the mailbox. Everything else that arrives is dropped unread; no history is imported and nothing is stored
+- your instance stops its own warmup for that mailbox and takes it out of the local warmup pool, so no mailbox on your server writes to it any more, and keeps sending campaigns from it as usual
+- your instance recognises both received warmup and the mailbox's own Sent copies and leaves them out of your unibox, asking the cloud to vouch for anything it cannot identify on its own
+
+Verification accepts a cloud token only for the mailbox that sent or received that warmup message. It also recognises recorded message identifiers when a provider strips the header, including older messages and mail the cloud has already processed. If the cloud cannot answer, inbox ingestion retries verification before publishing the message. This can delay ordinary inbox arrivals for enrolled mailboxes during a cloud outage. Existing Unibox entries are checked automatically in background batches, and confirmed warmup is removed locally without deleting provider mail.
+
+Arrivals awaiting verification are stored in your instance's database and retried automatically, including after a consumer restart. Once verification succeeds, ordinary messages enter Unibox and warmup messages are discarded from the pending queue. Pending verification belongs to the instance and is [not included in a workspace export](/guides/workspace-export-import/).
+- health, daily volume and 7 day totals show up in your instance's settings as the cloud reports them, and the health also gates the mailbox's campaigns here (see [safety and enforcement](#safety-and-enforcement))
+
+Unenrolling an SMTP/IMAP mailbox, disconnecting the instance, or deleting the mailbox altogether deletes its credential on the cloud immediately. Deleting an enrolled mailbox revokes its enrollment before the record goes, so the pool cannot be left holding a password for a mailbox your instance no longer has; if the cloud cannot be reached at that moment the delete is refused, the mailbox is put back as it was, and retrying it once the cloud is reachable completes it. A mailbox that was signed in through Pegasusbound Cloud stays in the cloud workspace when you remove it from the instance; disconnecting the instance removes its mirrors of such mailboxes, since they cannot send without the link.
+
+</Fold>
+
+<Fold>
+
+## Warmup analytics on your instance
+
+Enrolled mailboxes show Cloud's daily sends, replies, received warmup mail and target volumes in **Mailboxes > Analytics**. Their warmup placement reports include daily inbox, tabs, spam and rescued counts, provider and host breakdowns, and the trailing inbox rate. Workspace reports combine Cloud-enrolled mailboxes with mailboxes warming locally. Earlier local warmup history stays visible too.
+
+Reports are fetched from Cloud when you open or refresh them, using the existing instance link. They are not copied into your instance's warmup tables and do not wait for the five-minute standing poll. Only enrolled mailboxes belonging to the selected local workspace are requested. A Cloud failure shows a load error and a retry action, not an empty chart.
+
+Existing enrollments work without reconnecting or re-enrolling. Deploy the reporting support on Cloud before upgrading self-hosted instances. Against an older Cloud deployment without these endpoints, Analytics and placement reports that include an enrolled mailbox show a load error until Cloud is upgraded. The **Pegasusbound Cloud** card's existing summary counts and standing synchronization use separate endpoints and continue working. No database migration or history backfill is needed.
+
+Once a mailbox is unenrolled, the instance no longer requests its Cloud history. SMTP/IMAP unenrollment deletes the Cloud mailbox and its warmup history; a Cloud-managed mailbox's history stays in its Cloud workspace. The instance's earlier local history is unchanged.
+
+</Fold>
+
+<Fold>
+
+## Linking a workspace
+
+The link is offered on a self-hosted instance as the last step of onboarding when you first sign in, as a banner on **Mailboxes** until you connect or dismiss it, under **Settings > Pegasusbound Cloud** at any time, and on **Sending domains** when a [root redirect](#root-redirects-served-by-pegasusbound-cloud) could be served from Cloud. Whichever you use, the steps are the same:
+
+1. Select the local workspace you want to connect, then press **Connect to Pegasusbound Cloud**. The instance shows an eight character code.
+2. Press **Open Pegasusbound Cloud**, or go to `app.pegasusbound.com/connect`, sign in with your Pegasusbound account (create one if you do not have it, it is free), enter the code and pick the workspace to link to. The workspace needs the manage settings permission.
+3. Your instance notices the approval within a few seconds and moves on to mailbox selection. Switch on the mailboxes you want warmed.
+
+The whole flow takes about a minute. A code expires after 15 minutes if nobody approves it; start again from the instance.
+
+The link belongs to the selected local workspace. Connecting and disconnecting it, and bringing in mailboxes from its Cloud workspace, still requires an instance administrator because credentials leave the server: it needs a platform admin account with the manage settings admin permission (the [first owner](/development/first-run/) has it) signed in with two-factor authentication. Once a workspace is linked, its members with the manage mailboxes permission can use that workspace's connection: enrolling, pausing and resuming, and connecting Google and Microsoft mailboxes through Pegasusbound Cloud. The onboarding step that links the instance is shown only to an administrator who can complete it.
+
+### Existing instance-wide connections
+
+Upgrading does not revoke an existing connection or move its mailboxes. The migration records which connection enrolled each mailbox, and existing warmup, brokered access tokens, warmup verification, analytics, standing synchronization, redirects and placement results keep using that original connection. Old placement results and Cloud-served redirects are backfilled to that connection too.
+
+Existing connections work normally after upgrading: you can enroll more mailboxes, connect Cloud mailboxes, sign in with Google or Microsoft, create Cloud-served redirects, and start placement tests within the connected Cloud workspace's plan. **Settings > Pegasusbound Cloud** shows the normal connection, plan and mailbox controls, with no separate migration step. You do not need to disconnect or buy another plan to keep using your existing connection.
+
+The one-active-connection limit applies when creating an additional connection, not when using an existing one. A local workspace with an existing connection does not offer another connection setup. A Cloud workspace that already has a connection cannot approve another, including when that connection is shared across a self-hosted server's local workspaces. Existing connections and their mailboxes remain in place. New connection requests are scoped to an unconnected local workspace and require an unused Cloud workspace.
+
+Disconnect is still deliberate and potentially disruptive. Disconnecting a shared server connection affects **all** local workspaces using it; the confirmation states that scope. Disconnecting a workspace's own connection affects only its mailboxes and redirects. Other connections are unaffected. Removing an SMTP/IMAP enrollment deletes its Cloud mailbox and history; enrolling it again starts a new Cloud enrollment. Cloud-managed mailboxes remain on Cloud, but disconnecting removes their local mirrors. None of this is required by an upgrade.
+
+Deploy the Cloud backend and migration **before** publishing the self-hosted upgrade. Old self-hosted clients can keep using existing connections, including adding mailboxes, but cannot establish new instance-wide connections. New self-hosted clients refuse to connect to older Cloud versions that do not advertise workspace-scoped support. No new environment variable or data backfill is required for restoring use of existing connections.
+
+</Fold>
+
+<Fold>
+
+## Google and Microsoft mailboxes: sign in through Pegasusbound Cloud
+
+On a linked instance, signing in one mailbox under **Add account > Google** or **Add account > Microsoft** no longer needs an OAuth client of your own. The sign-in window opens on a Pegasusbound Cloud page first. It names the address of the instance asking and the Cloud workspace the mailbox will join; press **Continue** and Pegasusbound's verified Google or Microsoft app takes over. If you did not start the sign-in yourself, close that page: the mailbox would join the workspace it names. When you approve:
+
+- the mailbox is created in your Pegasusbound Cloud workspace, where its sign-in lives, and starts warming in the pool right away
+- your instance gets a mirror of the mailbox with no credential on it. Campaigns, replies and the unibox work from your server as before; to send and sync, the instance asks the cloud for a short-lived access token (about an hour, cached) using its link token
+- the refresh grant never leaves the cloud. Removing the mailbox from either side, unlinking the instance, or the cloud blocking the mailbox stops the instance sending from it within the hour
+
+The sign-in only completes in the browser that pressed **Continue**, and Cloud only ever sends it back to the address the instance registered when it was linked (its `APP_URL`). An instance linked before it had an address set cannot use this until you set `APP_URL`, disconnect it and link it again. The exchange with Google or Microsoft is protected with PKCE, so an authorization code is useless to anyone but Cloud.
+
+These mailboxes show the blue **Cloud** badge with "Signed in through Pegasusbound Cloud". The `BOX_GOOGLE_*` and `BOX_OUTLOOK_*` variables are still honoured when set, but an instance without them can now connect Google and Microsoft mailboxes as long as it is linked.
+
+### Mailboxes connected on the cloud
+
+A Google or Microsoft mailbox you connect directly on app.pegasusbound.com shows up in your instance's **Add account** dialog under **In your Pegasusbound Cloud workspace**. Press **Connect** to add it to the instance the same way: the cloud keeps the sign-in, the instance sends with brokered tokens. A mailbox can be linked to one instance at a time.
+
+### Which existing mailboxes can be enrolled
+
+Mailboxes connected with **SMTP/IMAP** (including Google Workspace and Microsoft 365 through an app password) can be enrolled as they are: the instance sends the credential to the cloud and keeps its own copy. Changing the mailbox's SMTP/IMAP settings on your instance later hands the new credential to the cloud as well.
+
+The cloud connects to your mail server over the internet, so both SMTP and IMAP need TLS or STARTTLS. A mailbox set to security `none`, which only works for a mail server on your instance's own machine, is refused at enrollment with `pool_link_cleartext_mailbox`.
+
+A Google or Microsoft mailbox that was signed in with your instance's own OAuth app cannot be enrolled, because that grant can only be refreshed by the app that issued it. Remove it and add it again through Pegasusbound Cloud to warm it there.
+
+</Fold>
+
+<Fold>
+
+## What your instance shows
+
+Once linked, the **Mailboxes** page marks every enrolled mailbox with a blue **Cloud** badge on its address and its avatar and a "Warmed by Pegasusbound Cloud" line under it (amber while paused), shows the cloud's daily count in the warmup column with the same warming animation local warmup uses, and offers **Warm in Pegasusbound Cloud**, pause, resume and remove in each row's warmup menu. The mailbox drawer's Warmup tab shows the same block with the cloud's numbers in place of the local controls. This is shown to members with the manage mailboxes permission.
+
+**Settings > Pegasusbound Cloud** lists every active mailbox with a switch for whether it is in the pool. For enrolled mailboxes it shows the cloud's view:
+
+| Column | Meaning |
+|--------|---------|
+| Health | The pool's reputation state for the mailbox: healthy, watch, throttled, quarantined or blocked. The same bands the hosted product uses, see [warmup](/guides/warmup/#pool-safety) |
+| Today | Warmup mail sent today against today's ramp target |
+| 7 days | Total sent, and how many landed in spam at partners |
+
+Pause and resume per mailbox from the same row. Warmup settings (start volume, daily increase, ceiling, reply rate, window, days) are taken from the mailbox's own settings on your instance at enrollment time.
+
+### When the count stays at zero
+
+Pegasusbound Cloud sends the warmup mail itself, connecting to your mail server's SMTP from its own network rather than from your instance. A server that accepts only your instance's address, an SMTP host that resolves to a private or internal address, or a port your host blocks from outside will refuse it while your own sending keeps working. When that happens the warmup column turns red with a warning icon, and the mailbox's Warmup tab shows the server's own answer (for example a refused connection or a rejected login) until a send goes through again. Fix the SMTP host, port or allowlist on your mail server; nothing needs re-enrolling.
+
+The count can also hold below the target when the pool has fewer partners free for the mailbox today than the ramp asks for, since a mailbox never writes to the same partner twice in a day. The Warmup tab says so with how many partners are available, and the cloud checks again every few hours.
+
+</Fold>
+
+<Fold>
+
+## Free and Premium
+
+| Tier | Mailboxes | Partners |
+|------|-----------|----------|
+| Free | Up to 10 per linked workspace | The pool's free tier, plus the paid mailboxes that wrote to it in the last 14 days, which a proven free mailbox writes back to |
+| Premium (the Warmup plan, $15 a month or $144 a year) | Unlimited | The premium tier first; when a mailbox has too few partners in other workspaces (fewer than 25, or its warmup ceiling if higher), that many of the best proven free mailboxes fill in, and those mailboxes write back |
+
+Premium workspaces are always served first. Borrowed partners are limited to mailboxes that have been healthy pool members for at least three days in a workspace in good standing, and only those may write back, so nothing unproven and nothing unsolicited ever reaches a paying mailbox. Every draw favours the inbox that has received the least for what it sent, so a paying mailbox in a thin tier is written to first rather than last. See [pools](/guides/warmup/#pools) for the full rule.
+
+Your instance shows which tier it is on in two places: the plan badge in the header reads **Cloud · Free** or **Cloud · Premium** once the link is live, and **Settings > Pegasusbound Cloud** has a **Plan** section with the allowance and what Premium adds: better deliverability, reputation protection, priority matching and no mailbox cap. Its **Premium** button opens Pegasusbound Cloud's billing page, asks whether you want to be billed monthly or yearly, and sends you to checkout for the workspace the instance is linked to; the instance itself bills nothing. On Premium the same section links to that billing page to manage or cancel. The **Mailboxes** page nudges once, only when every free pool mailbox is in use and the instance has more to warm.
+
+The Warmup plan is the same plan a hosted workspace buys when it only warms and does not send, so it is not tied to self-hosting: a workspace on it can hold mailboxes connected on the cloud, through linked instances, or both, and the workspace's regular hosted plan, if it has one, also counts as Premium, so a workspace on Starter or above needs nothing extra. It is not listed next to Starter, Grow and Business because it is not an alternative to them; the button on your instance and the mailboxes page on the cloud are the ways in. See [billing](/guides/billing/#the-warmup-plan).
+
+</Fold>
+
+<Fold>
+
+## Safety and enforcement
+
+Enrolled mailboxes are ordinary members of the hosted pool and are held to the same rules: verification tokens on every warmup message, complaint and bounce tracking with automatic quarantine or blocking when a mailbox starts hurting partners, and spam placement that slows a mailbox down. A mailbox that gets quarantined on the cloud stops being offered to partners and re-enters on the same probation terms as any hosted mailbox.
+
+Your instance holds the mailbox to the cloud's verdict as well, exactly as it would one from its own pool. It reads every enrolled mailbox's standing from the cloud every five minutes, on enrolling, pausing or resuming, and when loading the mailbox list in **Settings > Pegasusbound Cloud**. A recognized status from that list refreshes the local observation instead of being replaced by an older cached status. From then on:
+
+| Cloud standing | On your instance |
+|----------------|------------------|
+| `watch` | Campaigns send from the mailbox at reduced volume |
+| `throttled` | Campaigns send from it at half volume until it recovers |
+| `quarantined` or `blocked` | Campaigns skip it until the hold ends |
+
+The same standing feeds the mailbox's health on the **Mailboxes** page, the **Warmup reputation** block in its drawer (marked **Pegasusbound Cloud**, with the reason and the end of any hold), a campaign's sending limits, the [Advisor](/guides/advisor/) and the dashboard's health summary. A change reaches your instance within five minutes and fires the same `warmup.health_changed`, `warmup.quarantined` and `warmup.blocked` [webhooks](/guides/webhooks/) a local transition does.
+
+Cloud standing is observed evidence, not a permanent permission. Healthy, watch and throttled observations have a 15-minute freshness limit. Missing, unrecognized or stale observations stop new control-plane admission with `cloud_evidence_unavailable` until a recognized cloud observation arrives. This availability hold does not claim the provider blocked the mailbox. Existing enrollments start with unknown freshness after upgrading, then the next successful standing sync establishes it.
+
+The Advisor reports an unavailable Cloud status separately from a real pool quarantine or block. A mailbox may still be warming on Cloud while its self-hosted instance lacks a current status. Open **Settings > Pegasusbound Cloud** and refresh the mailbox list. If the status remains unavailable, check Cloud connectivity and the consumer's `cloud_standing_sync` job, and keep the backend and consumer on the same release. Do not disconnect or re-enroll the mailbox to refresh its status. The **Warming** count indicates warmup is enabled, not that a provider has confirmed a send; the warmup count and send warnings show progress and failures.
+
+An active quarantine or block remains in force even when the cloud cannot be reached. A bounded hold still ends on its own date; an unbounded block needs review. Removing a mailbox from the cloud does not lift an active hold. Restrictive cloud evidence is retained by workspace and address in the local reputation ledger, so leaving or changing pools, reconnecting, or [exporting and importing the workspace](/guides/workspace-export-import/) does not reset it. The cloud link itself is instance-local and does not travel with the archive. Fresh positive observations from a new link do not erase an unexpired restriction from the previous link. Appeals go through the mailbox on Pegasusbound Cloud, where the verdict was reached.
+
+Local and cloud warmup use the same active-mailbox, participant-role, workspace-standing and health checks. A recipient-only participant cannot originate diagnostic messages. Restricted or suspended workspaces cannot contribute candidates, and paying for Premium does not waive these rules. Spam placement slows participation; it is not by itself a reason to quarantine a mailbox.
+
+These checks apply before new commands are admitted. Updating the control plane cannot revoke a command an older worker has already accepted; cached provider credentials and already-running work keep their existing expiry and execution behavior.
+
+For mailboxes signed in through Pegasusbound Cloud the enforcement reaches sending too. Every access token the instance draws is checked on the cloud: a mailbox the cloud has **blocked**, one that is no longer active there, one that was removed from the workspace, or an instance whose link was revoked gets no token, and the instance stops sending and syncing from that mailbox as soon as its cached token expires.
+
+</Fold>
+
+<Fold>
+
+## Placement tests on Pegasusbound Cloud's seed panel
+
+A self-hosted instance's own seed panel holds whatever its administrator added, often nothing. A linked instance can borrow Pegasusbound Cloud's instead: pick **Pegasusbound Cloud** as the panel when you start an [inbox placement test](/guides/placement-tests/), or for a campaign's placement monitor.
+
+The split is the same as for warmup, only narrower:
+
+- **Your instance renders and sends every copy.** The cloud stores no template and never gets the mailbox's credentials; its seed inboxes receive the rendered copies like any recipient. A campaign step renders for a placeholder contact here, not the campaign's first lead, so no lead's details reach the cloud's seed inboxes unless you pick a contact for the test. Copies go out from your mailbox through your own workers, paced and charged to the mailbox's daily limit exactly like a test on any other panel.
+- **The cloud only hands out seed addresses and reports where each copy landed.** It picks seeds for the test (never one on your sender's domain), your instance tells it the Message-ID of each copy it sent, and the cloud answers with the folder each seed found it in. Seed addresses are shown masked, as on any shared panel.
+- **Tests use the linked cloud workspace's free tests**, the same monthly number a hosted workspace on the same plan gets, and a tracking comparison counts as two. Paying for more in credits is only offered on the hosted product's own panel, so past the free tests a test here waits for the next month. Tests on your instance's own panel and on your own seed inboxes are never counted.
+- **You can narrow a test to some providers**, as on any shared panel; the cloud then picks its seeds from those providers alone.
+
+The panel is offered only while the instance is linked. Without a link a test on it is refused with `placement_panel_unavailable`.
+
+</Fold>
+
+<Fold>
+
+## Root redirects served by Pegasusbound Cloud
+
+A [root redirect](/guides/sending-domains/#root-redirects) sends visitors to a sending domain on to your website. Served from your own instance, the domain has to reach Pegasusbound through whatever proxy sits in front of it, which on a server behind Traefik, nginx or a hosting panel means routing each domain by hand. A linked instance can pick **Pegasusbound Cloud** under the redirect's **Served from** instead: Cloud answers for the domain from its own tracking service and issues its certificate, and all you add is DNS.
+
+- Cloud proves the domain on its own terms: it lists its own ownership value for the `_pegasusbound` `TXT` record and its own addresses for the root, and serves nothing until it sees both.
+- Only the domain, the website and the `www` setting go to Cloud. Visitors to the domain reach Cloud, not your server; nothing about your mailboxes, contacts or mail is involved.
+- Cloud serves up to 200 redirects for one linked instance.
+- Unlinking stops redirects using that connection, not redirects using another workspace's connection or a retained legacy link. Each one says so on your instance and can be moved back to it.
+
+See [serve it from Pegasusbound Cloud](/guides/sending-domains/#serve-it-from-pegasusbound-cloud) for how it looks on the sending domains page.
+
+</Fold>
+
+<Fold>
+
+## Unlinking
+
+On your instance, **Settings > Pegasusbound Cloud > Disconnect** removes only the selected workspace link's enrollments and lets eligible local warmup take over after confirmed cleanup. Other workspace links and retained legacy links are unaffected. Instance-originated SMTP mailboxes and their credentials are deleted on the cloud. An OAuth mailbox belongs to the cloud workspace: unlinking removes that connection's access, not the workspace's mailbox or provider grant. Its native cloud warmup configuration also remains: pause or delete it separately on Pegasusbound Cloud if you want that participation or its stored credentials removed. Root redirects using the disconnected link stop at the same time. Removing a legacy instance-wide link remains a separate administrator action. On Pegasusbound Cloud, **Settings > Linked instances** lists the connections linked to a workspace and can unlink any of them from the other side.
+
+SMTP enrollment, mailbox removal and instance disconnect first record a durable local intent. While enrollment or removal is pending, the mailbox is not admitted to local warmup. The regular standing sync retries pending work after an outage or restart, using the same mailbox identity rather than creating another. Remote removal must be acknowledged, or confirmed already absent, before local enrollment is dropped. A failed local cleanup stays pending and is retried.
+
+Removal is an explicit opt-out. A late enrollment acknowledgment cannot reverse a pending removal. After removal finishes, a new explicit enrollment can create a fresh intent, but it does not reset reputation holds. Disconnect remains pending until remote revocation and local cleanup succeed, and no new enrollment is accepted during it.
+
+</Fold>
+
+<Fold>
+
+## Managed sign-in recovery and consent
+
+New Gmail/Outlook sign-ins and adoption of an existing cloud mailbox use managed consent protocol 1. Both sides record a stable operation before acting. The instance records the workspace and initiating user, rechecks their current mailbox-management permission, and binds completion to that workspace, user, linked cloud instance, provider and mailbox identity. Organization owners are allowed; another member needs an accepted membership with `manage_emails`. Restricted or suspended workspaces cannot complete a managed operation.
+
+Consent records survive backend restarts. Replaying a confirmed completion returns its existing mailbox rather than creating another. A lost cloud reply or failed local mirror write can be recovered by the regular standing sync. The original planned local mailbox ID and remote operation ID are reused. Adoption retries likewise reuse their original identity. Completion timestamps prove only that the recorded consent operation completed, not that authentication or inbox placement passed.
+
+A browser sign-in has a ten-minute consent window, and the browser that chose to continue must complete the callback. A repeated callback cannot exchange the same code again. If the provider exchange may have happened but there is no committed mailbox at its planned ID, the result is unknown. Pegasusbound does not retry the authorization code or report success. Remove the pending connection and start a new explicit sign-in. If the planned mailbox was committed, completion can recover without exchanging again while consent is still valid. Loss of Redis before provider exchange can require opening the consent flow again; durable consent is not a replacement for the provider's short-lived browser/PKCE state.
+
+Opt-out, instance revocation and expiry are restrictive. Pending local removal is recorded before calling the cloud. A remote deletion reserves a tombstone even if a delayed start has not arrived yet. Late callbacks and adoption replays cannot revive that operation. A genuinely new sign-in or enrollment needs a new explicit operation and does not erase reputation holds. A pending initial warmup activation is also durable: completion retries it after a restart, but a confirmed completion replay does not undo an explicit pause.
+
+Current local consent, enrollment, workspace standing and cloud observation freshness are checked before using even a cached brokered token. The cloud rechecks current instance and operation authority before minting another token. Previously issued provider tokens and commands already accepted by an older worker are not retroactively canceled by these checks.
+
+### Version compatibility and rollout
+
+The cloud advertises `managed_consent_protocol: 1` in its authenticated instance information response. New clients require that capability and use separate correlated endpoints; they do not silently send fields an old cloud could ignore. Correlated browser states also use a different prefix, so an old callback handler cannot exchange them as legacy one-shot operations.
+
+Upgrade and settle all cloud control-plane replicas first, then upgrade linked instances. No new configuration is required. An old cloud cannot provide the stronger managed-sign-in guarantee, and a new client refuses a new managed operation against it. Existing SMTP enrollment and existing mailbox IDs remain valid. Old one-shot endpoints remain available to old clients, with their original weaker recovery behavior. An old browser session whose local authority was never stored durably cannot be reconstructed after upgrading/restarting; start a new explicit sign-in instead. Mixed replicas can reject the new endpoints or browser state, so do not treat a partial rollout as completed recovery.
+
+The additive cloud routes below are beneath `/v1/pool-link`, use the linked instance's bearer token, and require `protocol: 1`. These are instance-scoped routes, not organization API-key routes. Existing routes without `-correlated` remain available.
+
+| Method and route | Purpose |
+| --- | --- |
+| `POST /instance/oauth/start-correlated` | Reserve the supplied session hash and stable remote operation ID, then open browser consent |
+| `POST /instance/oauth/finish-correlated` | Read/reconcile completion by remote operation ID without consuming its durable result |
+| `POST /instance/mailboxes/adopt-correlated` | Idempotently adopt a specified OAuth mailbox at a stable remote operation ID |
+
+`cloud_link_managed_protocol` means the cloud does not advertise the required recovery capability. `pool_link_oauth_unknown` means no provider-exchange result has been confirmed; it is not permission to resend the code. Existing `cloud_link_oauth_session` / `pool_link_oauth_session` errors cover missing, expired, revoked or mismatched consent. Permission or persistence failures do not report a successful connection.
+
+### Data, secrets and moving a workspace
+
+PostgreSQL retains managed consent history and revocation tombstones until the owning organization is deleted. There is no automatic history purge or configurable retention duration in this release. Records contain organization/user references, instance/operation/account IDs, provider, operation kind, state and timestamps; local records retain a SHA-256 session hash, not the raw browser handle. These durable operation tables contain no email bodies, authorization codes, PKCE verifiers, access tokens or refresh tokens.
+
+The schema downgrade refuses to discard any managed consent history, including completed, expired, imported and revoked records. An older release cannot represent these restrictions. Ordinary disconnect deliberately does not erase them, so it does not make such a downgrade safe.
+
+Redis still holds the short-lived browser session, PKCE verifier, browser binding and consent result, with a ten-minute TTL. The cloud's ordinary encrypted mailbox credential store holds provider credentials under its existing retention rules. The instance only caches brokered access tokens in memory for at most ten minutes; an already-issued worker token can remain valid until its provider expiry.
+
+Consent restrictions/history travel in a [workspace export](/guides/workspace-export-import/). Import resets source instance IDs, remote IDs, session hashes, planned account handles and queued activation handles; live cloud account references on the local consent record are reset too. This prevents an imported pending operation from resuming against the source instance, while retaining its restrictive state. Workspace links and legacy instance-wide links do not travel: reconnect and explicitly authorize any new managed operation after moving. Imported history is not a fresh consent or a positive provider verdict.
+
+</Fold>
+
+<Fold>
+
+## Self-hosting notes
+
+- Traffic is outbound only: the instance calls `PEGASUSBOUND_CLOUD_URL` (default `https://api.pegasusbound.com`) over HTTPS, on port 443 or 8443, and only to a public address. Plain HTTP to `localhost` is accepted only when `APP_ENV` is `dev`. Nothing needs to reach the instance from the internet
+- The instance token is stored sealed with `CREDENTIALS_ENCRYPTION_KEY`. Rotating that key invalidates the stored token; reconnect afterwards
+- Brokered access tokens reach the worker through the backend's internal API (`/api/v1/internal/cloud-link/token/:id`), so workers keep needing only `ENCRYPTED_KEYS_BACKEND_URL` and `ENCRYPTED_KEYS_WORKER_TOKEN`. A worker that cannot reach the backend keeps sending from such mailboxes until its cached token expires, about an hour
+- Connections and enrollments are bound to this installation's encryption key, even when workspace-scoped, so they are not part of a [workspace export](/guides/workspace-export-import/). Reconnect after moving a workspace to a new instance
+- `INSTANCE_NAME` sets the name shown on the approval page; the hostname is used when unset. The name follows the workspace [naming rules](/api/error-codes/#name-refusals), so one that reads as a web address (a hostname, for example) shows as "Self-hosted instance"
+
+</Fold>
+
+## Related guides
+
+- [Warmup](/guides/warmup/)
+- [Mailboxes](/guides/mailboxes/)
+- [Configuration reference](/development/configuration/)

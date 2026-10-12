@@ -1,0 +1,518 @@
+// Organizations browser: left filter rail + server-driven sortable,
+// cursor-paged table. Searchable by identity, plan, plan visibility,
+// subscription state, relationships, count ranges, and timeline date ranges.
+// The Mailboxes cell links into the Mailboxes browser pre-filtered to the org.
+
+import { useEffect, useState } from "react";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
+import { Link, useNavigate } from "react-router-dom";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { StatusBadge } from "@/components/ui/kit";
+import { TONE_TEXT } from "@/lib/tones";
+import {
+    Explorer,
+    FilterGroup,
+    SearchFilter,
+    SegmentedFilter,
+    SelectFilter,
+    ToggleFilter,
+    DateRangeFilter,
+    NumberRangeFilter,
+} from "@/components/data/Explorer";
+import { DataTable, type Column } from "@/components/data/DataTable";
+import { useCursorPager } from "@/lib/useCursorPager";
+import { emptyRange, rangeActive, rangeWithin, rangeAfter, rangeBefore, type DateRange } from "@/lib/dateRange";
+import { listOrganizations } from "@/lib/api/client/admin/organizations";
+import type { AdminOrgListItem, OrgRiskState } from "@/lib/api/models/admin";
+import { RiskBadge } from "./OrganizationRiskCard";
+
+type StatusFilter = "active" | "pending_deletion" | "all";
+type VisibilityFilter = "" | "public" | "private" | "none";
+type RiskFilter = "" | "flagged" | OrgRiskState;
+
+const RISK_OPTIONS: { value: RiskFilter | "any"; label: string }[] = [
+    { value: "any", label: "Any posture" },
+    { value: "flagged", label: "Flagged (not trusted)" },
+    { value: "watch", label: "Watch" },
+    { value: "restricted", label: "Restricted" },
+    { value: "suspended", label: "Suspended" },
+    { value: "trusted", label: "Trusted" },
+];
+
+const SUB_STATUS_OPTIONS: { value: string; label: string }[] = [
+    { value: "any", label: "Any subscription" },
+    { value: "trialing", label: "Trialing" },
+    { value: "active", label: "Active" },
+    { value: "past_due", label: "Past due" },
+    { value: "canceled", label: "Canceled" },
+    { value: "unpaid", label: "Unpaid" },
+    { value: "incomplete", label: "Incomplete" },
+    { value: "incomplete_expired", label: "Incomplete (expired)" },
+    { value: "paused", label: "Paused" },
+];
+
+const VISIBILITY_OPTIONS: { value: string; label: string }[] = [
+    { value: "any", label: "Any plan state" },
+    { value: "public", label: "On a public plan" },
+    { value: "private", label: "On a private plan" },
+    { value: "none", label: "No subscription" },
+];
+
+const ownerName = (o: AdminOrgListItem) =>
+    `${o.owner_first_name} ${o.owner_last_name}`.trim() || o.owner_email;
+
+const columns: Column<AdminOrgListItem>[] = [
+    {
+        id: "name",
+        header: "Name",
+        sortable: true,
+        sortKey: "name",
+        cell: (o) => (
+            <div className="min-w-0 py-1.5 leading-tight">
+                <Link
+                    to={`/organizations/${o.id}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="font-medium text-foreground hover:text-[var(--admin-accent-strong)] hover:underline"
+                >
+                    {o.name}
+                </Link>
+                {o.category === "test" && <StatusBadge tone="info" className="ml-2">Test</StatusBadge>}
+                {o.slug && <div className="mt-0.5 font-mono text-[11px] text-subtle-foreground">{o.slug}</div>}
+            </div>
+        ),
+        csv: (o) => o.name,
+    },
+    {
+        id: "owner",
+        header: "Owner",
+        sortable: true,
+        sortKey: "owner_email",
+        cell: (o) => (
+            <div className="min-w-0 py-1.5 leading-tight">
+                <div className="flex items-center gap-1.5">
+                    <span className="text-foreground">{ownerName(o)}</span>
+                    {o.owner_banned_at && (
+                        <StatusBadge tone="danger">banned</StatusBadge>
+                    )}
+                </div>
+                <div className="mt-0.5 text-xs text-muted-foreground">{o.owner_email}</div>
+            </div>
+        ),
+        csv: (o) => o.owner_email,
+    },
+    {
+        id: "plan",
+        header: "Plan",
+        cell: (o) =>
+            o.plan_name ? (
+                <div className="flex items-center gap-1.5">
+                    <span className="whitespace-nowrap text-foreground">{o.plan_name}</span>
+                    {o.plan_public === false && <StatusBadge tone="strong">private</StatusBadge>}
+                    {o.is_enterprise && <StatusBadge tone="accent">enterprise</StatusBadge>}
+                    {/* Paid because we said so. Worth seeing in the table: it is
+                        the difference between revenue and a grant. */}
+                    {o.managed_plan && (
+                        <StatusBadge tone="info" title={o.managed_plan_reason ?? "Granted by an operator"}>
+                            managed
+                        </StatusBadge>
+                    )}
+                    {o.managed_plan_expired && (
+                        <StatusBadge tone="warning" title={o.managed_plan_reason ?? "The grant has lapsed"}>
+                            grant lapsed
+                        </StatusBadge>
+                    )}
+                </div>
+            ) : (
+                <span className="text-subtle-foreground">—</span>
+            ),
+        csv: (o) =>
+            [o.plan_name || "", o.managed_plan ? "managed" : "", o.managed_plan_expired ? "grant lapsed" : ""]
+                .filter(Boolean)
+                .join(" "),
+    },
+    {
+        id: "channel",
+        header: "Channel",
+        cell: (o) =>
+            o.utm_source || o.utm_medium || o.utm_campaign || o.landing_path || o.referrer_host ? (
+                <div className="flex flex-col leading-tight" title={[o.referrer_host, o.utm_campaign, o.landing_path].filter(Boolean).join(" · ")}>
+                    <span className="text-foreground">{o.utm_source || o.referrer_host || "Unknown"}</span>
+                    {o.utm_medium && <span className="mt-0.5 text-xs text-muted-foreground">{o.utm_medium}</span>}
+                    {o.utm_source && o.referrer_host && <span className="mt-0.5 text-xs text-muted-foreground">{o.referrer_host}</span>}
+                    {o.landing_path && <span className="mt-0.5 text-xs text-muted-foreground">{o.landing_path}</span>}
+                </div>
+            ) : (
+                <span className="text-muted-foreground">Unknown</span>
+            ),
+        csv: (o) => [o.utm_source, o.utm_medium, o.utm_campaign, o.referrer_host, o.landing_path].filter(Boolean).join(" | "),
+    },
+    {
+        id: "posture",
+        header: "Posture",
+        cell: (o) =>
+            o.risk_state && o.risk_state !== "trusted" ? (
+                <RiskBadge state={o.risk_state} />
+            ) : (
+                <span className="text-subtle-foreground">—</span>
+            ),
+        csv: (o) => o.risk_state || "",
+    },
+    { id: "members", header: "Members", align: "right", sortable: true, sortKey: "member_count", cell: (o) => <span className="tabular-nums">{o.member_count}</span>, csv: (o) => o.member_count },
+    {
+        id: "mailboxes",
+        header: "Mailboxes",
+        align: "right",
+        sortable: true,
+        sortKey: "email_account_count",
+        cell: (o) => (
+            <Link
+                to={`/mailboxes?org=${o.id}`}
+                onClick={(e) => e.stopPropagation()}
+                className="tabular-nums text-[var(--admin-accent-strong)] underline-offset-2 hover:underline"
+                title="Browse this org's mailboxes"
+            >
+                {o.email_account_count}
+            </Link>
+        ),
+        csv: (o) => o.email_account_count,
+    },
+    {
+        id: "campaigns",
+        header: "Campaigns",
+        align: "right",
+        sortable: true,
+        sortKey: "campaign_count",
+        cell: (o) => (
+            <span className="whitespace-nowrap tabular-nums">
+                {o.campaign_count}
+                {o.active_campaigns > 0 && (
+                    <span className={`ml-1 text-xs ${TONE_TEXT.success}`}>({o.active_campaigns} active)</span>
+                )}
+            </span>
+        ),
+        csv: (o) => o.campaign_count,
+    },
+    {
+        id: "status",
+        header: "Status",
+        cell: (o) =>
+            o.deletion_scheduled_for ? (
+                <StatusBadge tone="warning" dot>
+                    pending deletion
+                </StatusBadge>
+            ) : (
+                <StatusBadge tone="success" dot>
+                    active
+                </StatusBadge>
+            ),
+        csv: (o) => (o.deletion_scheduled_for ? "pending_deletion" : "active"),
+    },
+    {
+        id: "created",
+        header: "Created",
+        sortable: true,
+        sortKey: "created_at",
+        cell: (o) => <span className="whitespace-nowrap tabular-nums text-muted-foreground">{new Date(o.created_at).toLocaleDateString()}</span>,
+        csv: (o) => o.created_at,
+        defaultHidden: true,
+    },
+];
+
+export default function OrganizationsPage() {
+    const nav = useNavigate();
+    const [query, setQuery] = useState("");
+    const [status, setStatus] = useState<StatusFilter>("active");
+    const [visibility, setVisibility] = useState<VisibilityFilter>("");
+    const [subStatus, setSubStatus] = useState("");
+    const [enterprise, setEnterprise] = useState(false);
+    const [managedPlan, setManagedPlan] = useState(false);
+    const [hasOverrides, setHasOverrides] = useState(false);
+    const [risk, setRisk] = useState<RiskFilter>("");
+    const [cancelAtPeriodEnd, setCancelAtPeriodEnd] = useState(false);
+    const [hasActiveSubscription, setHasActiveSubscription] = useState(false);
+    const [noSubscription, setNoSubscription] = useState(false);
+    const [ownerBanned, setOwnerBanned] = useState(false);
+    const [hasActiveCampaigns, setHasActiveCampaigns] = useState(false);
+    const [hasEmailAccounts, setHasEmailAccounts] = useState(false);
+    // Acquisition filters match the values recorded at signup exactly.
+    const [utmSource, setUtmSource] = useState("");
+    const [utmMedium, setUtmMedium] = useState("");
+    const [referrerHost, setReferrerHost] = useState("");
+    const [hasAcquisition, setHasAcquisition] = useState(false);
+    const [noAcquisition, setNoAcquisition] = useState(false);
+    // Count ranges
+    const [memMin, setMemMin] = useState<number | undefined>();
+    const [memMax, setMemMax] = useState<number | undefined>();
+    const [mbMin, setMbMin] = useState<number | undefined>();
+    const [mbMax, setMbMax] = useState<number | undefined>();
+    const [campMin, setCampMin] = useState<number | undefined>();
+    const [campMax, setCampMax] = useState<number | undefined>();
+    // Date ranges
+    const [created, setCreated] = useState<DateRange>(emptyRange);
+    const [trialEnd, setTrialEnd] = useState<DateRange>(emptyRange);
+    const [periodEnd, setPeriodEnd] = useState<DateRange>(emptyRange);
+    const [updated, setUpdated] = useState<DateRange>(emptyRange);
+
+    const [sort, setSort] = useState<{ by: string; desc: boolean }>({ by: "", desc: true });
+    const pager = useCursorPager();
+    const { reset } = pager;
+
+    const filterKey = JSON.stringify({
+        query, status, visibility, subStatus, enterprise, managedPlan, hasOverrides, risk, cancelAtPeriodEnd,
+        hasActiveSubscription, noSubscription, ownerBanned, hasActiveCampaigns, hasEmailAccounts,
+        utmSource, utmMedium, referrerHost, hasAcquisition, noAcquisition,
+        memMin, memMax, mbMin, mbMax, campMin, campMax, created, trialEnd, periodEnd, updated, sort,
+    });
+
+    useEffect(() => {
+        reset();
+    }, [filterKey, reset]);
+
+    const { data, isLoading, error, refetch } = useQuery({
+        queryKey: ["admin", "organizations", filterKey, pager.cursor],
+        queryFn: () =>
+            listOrganizations({
+                q: query.trim() || undefined,
+                status: status === "all" ? "" : status,
+                plan_visibility: visibility || undefined,
+                subscription_status: subStatus || undefined,
+                enterprise: enterprise || undefined,
+                managed_plan: managedPlan || undefined,
+                has_overrides: hasOverrides || undefined,
+                risk_state: risk && risk !== "flagged" ? risk : undefined,
+                risk_flagged: risk === "flagged" || undefined,
+                cancel_at_period_end: cancelAtPeriodEnd || undefined,
+                has_active_subscription: hasActiveSubscription || undefined,
+                no_subscription: noSubscription || undefined,
+                owner_banned: ownerBanned || undefined,
+                has_active_campaigns: hasActiveCampaigns || undefined,
+                has_email_accounts: hasEmailAccounts || undefined,
+                utm_source: utmSource.trim() || undefined,
+                utm_medium: utmMedium.trim() || undefined,
+                referrer_host: referrerHost.trim().toLowerCase() || undefined,
+                has_acquisition: hasAcquisition || undefined,
+                no_acquisition: noAcquisition || undefined,
+                member_count_min: memMin,
+                member_count_max: memMax,
+                email_account_count_min: mbMin,
+                email_account_count_max: mbMax,
+                campaign_count_min: campMin,
+                campaign_count_max: campMax,
+                created_within: rangeWithin(created),
+                created_after: rangeAfter(created),
+                created_before: rangeBefore(created),
+                trial_end_after: rangeAfter(trialEnd),
+                trial_end_before: rangeBefore(trialEnd),
+                current_period_end_after: rangeAfter(periodEnd),
+                current_period_end_before: rangeBefore(periodEnd),
+                updated_after: rangeAfter(updated),
+                updated_before: rangeBefore(updated),
+                limit: 50,
+                cursor: pager.cursor,
+                sort_by: sort.by ? (sort.by as AdminOrgSortKey) : undefined,
+                sort_desc: sort.by ? sort.desc : undefined,
+            }),
+        staleTime: 30_000,
+        placeholderData: keepPreviousData,
+    });
+
+    const rows = data?.data ?? [];
+
+    const bools = [enterprise, managedPlan, hasOverrides, cancelAtPeriodEnd, hasActiveSubscription, noSubscription, ownerBanned, hasActiveCampaigns, hasEmailAccounts, hasAcquisition, noAcquisition];
+    const ranges = [[memMin, memMax], [mbMin, mbMax], [campMin, campMax]];
+    const activeCount =
+        (query ? 1 : 0) +
+        (status !== "active" ? 1 : 0) +
+        (visibility ? 1 : 0) +
+        (subStatus ? 1 : 0) +
+        (risk ? 1 : 0) +
+        (utmSource ? 1 : 0) +
+        (utmMedium ? 1 : 0) +
+        (referrerHost ? 1 : 0) +
+        bools.filter(Boolean).length +
+        ranges.filter(([a, b]) => a !== undefined || b !== undefined).length +
+        [created, trialEnd, periodEnd, updated].filter(rangeActive).length +
+        (sort.by ? 1 : 0);
+
+    function resetAll() {
+        setQuery("");
+        setStatus("active");
+        setVisibility("");
+        setSubStatus("");
+        setEnterprise(false);
+        setManagedPlan(false);
+        setHasOverrides(false);
+        setCancelAtPeriodEnd(false);
+        setHasActiveSubscription(false);
+        setNoSubscription(false);
+        setOwnerBanned(false);
+        setHasActiveCampaigns(false);
+        setHasEmailAccounts(false);
+        setUtmSource("");
+        setUtmMedium("");
+        setReferrerHost("");
+        setHasAcquisition(false);
+        setNoAcquisition(false);
+        setMemMin(undefined);
+        setMemMax(undefined);
+        setMbMin(undefined);
+        setMbMax(undefined);
+        setCampMin(undefined);
+        setCampMax(undefined);
+        setCreated(emptyRange);
+        setTrialEnd(emptyRange);
+        setPeriodEnd(emptyRange);
+        setUpdated(emptyRange);
+        setSort({ by: "", desc: true });
+    }
+
+    return (
+        <div>
+            <PageHeader
+                title="Organizations"
+                meta={
+                    data?.pagination.total != null ? (
+                        <span className="text-[13px] tabular-nums text-subtle-foreground">
+                            {data.pagination.total.toLocaleString()}
+                        </span>
+                    ) : undefined
+                }
+                description="Every workspace on the platform. Filter by plan, subscription, relationships, usage, and timeline; sort and drill into owner, members, and mailboxes."
+            />
+            <Explorer
+                activeCount={activeCount}
+                onReset={resetAll}
+                filters={
+                    <>
+                        <FilterGroup label="Search">
+                            <SearchFilter value={query} onChange={setQuery} placeholder="Name, slug, or owner…" />
+                        </FilterGroup>
+                        <FilterGroup label="Status">
+                            <SegmentedFilter
+                                value={status}
+                                onChange={setStatus}
+                                options={[
+                                    { value: "active", label: "Active" },
+                                    { value: "pending_deletion", label: "Pending" },
+                                    { value: "all", label: "All" },
+                                ]}
+                            />
+                        </FilterGroup>
+                        <FilterGroup label="Plan visibility">
+                            <SelectFilter
+                                value={visibility || "any"}
+                                onChange={(v) => setVisibility(v === "any" ? "" : (v as VisibilityFilter))}
+                                options={VISIBILITY_OPTIONS}
+                                placeholder="Any plan state"
+                            />
+                        </FilterGroup>
+                        <FilterGroup label="Abuse posture">
+                            <SelectFilter
+                                value={(risk || "any") as RiskFilter | "any"}
+                                onChange={(v) => setRisk(v === "any" ? "" : (v as RiskFilter))}
+                                options={RISK_OPTIONS}
+                            />
+                        </FilterGroup>
+                        <FilterGroup label="Subscription">
+                            <SelectFilter
+                                value={subStatus || "any"}
+                                onChange={(v) => setSubStatus(v === "any" ? "" : v)}
+                                options={SUB_STATUS_OPTIONS}
+                                placeholder="Any subscription"
+                            />
+                            <div className="mt-2 flex flex-col gap-2">
+                                <ToggleFilter checked={enterprise} onChange={setEnterprise} label="Enterprise plan" />
+                                <ToggleFilter checked={managedPlan} onChange={setManagedPlan} label="Managed plan" />
+                                <ToggleFilter checked={hasActiveSubscription} onChange={setHasActiveSubscription} label="Active subscription" />
+                                <ToggleFilter checked={cancelAtPeriodEnd} onChange={setCancelAtPeriodEnd} label="Canceling at period end" />
+                                <ToggleFilter checked={noSubscription} onChange={setNoSubscription} label="No subscription" />
+                            </div>
+                        </FilterGroup>
+                        <FilterGroup label="Signed up">
+                            <DateRangeFilter value={created} onChange={setCreated} />
+                        </FilterGroup>
+                        <FilterGroup label="Acquisition channel">
+                            <SearchFilter value={utmSource} onChange={setUtmSource} placeholder="utm_source…" />
+                            <div className="mt-2">
+                                <SearchFilter value={utmMedium} onChange={setUtmMedium} placeholder="utm_medium…" />
+                            </div>
+                            <div className="mt-2">
+                                <SearchFilter value={referrerHost} onChange={setReferrerHost} placeholder="Referrer host, e.g. www.google.com…" />
+                            </div>
+                            <div className="mt-2 flex flex-col gap-2">
+                                {/* Mutually exclusive: the backend resolves both-at-once
+                                    by ignoring one, which would leave a filter switched
+                                    on that is doing nothing. */}
+                                <ToggleFilter
+                                    checked={hasAcquisition}
+                                    onChange={(v) => { setHasAcquisition(v); if (v) setNoAcquisition(false); }}
+                                    label="Has acquisition data"
+                                />
+                                <ToggleFilter
+                                    checked={noAcquisition}
+                                    onChange={(v) => { setNoAcquisition(v); if (v) setHasAcquisition(false); }}
+                                    label="No acquisition data (unknown source)"
+                                />
+                            </div>
+                        </FilterGroup>
+                        <FilterGroup label="Flags">
+                            <div className="flex flex-col gap-2">
+                                <ToggleFilter checked={hasOverrides} onChange={setHasOverrides} label="Has custom limits" />
+                                <ToggleFilter checked={ownerBanned} onChange={setOwnerBanned} label="Owner banned" />
+                                <ToggleFilter checked={hasActiveCampaigns} onChange={setHasActiveCampaigns} label="Has active campaigns" />
+                                <ToggleFilter checked={hasEmailAccounts} onChange={setHasEmailAccounts} label="Has mailboxes" />
+                            </div>
+                        </FilterGroup>
+                        <FilterGroup label="Members">
+                            <NumberRangeFilter min={memMin} max={memMax} onMinChange={setMemMin} onMaxChange={setMemMax} />
+                        </FilterGroup>
+                        <FilterGroup label="Mailboxes">
+                            <NumberRangeFilter min={mbMin} max={mbMax} onMinChange={setMbMin} onMaxChange={setMbMax} />
+                        </FilterGroup>
+                        <FilterGroup label="Campaigns">
+                            <NumberRangeFilter min={campMin} max={campMax} onMinChange={setCampMin} onMaxChange={setCampMax} />
+                        </FilterGroup>
+                        <FilterGroup label="Trial ends">
+                            <DateRangeFilter value={trialEnd} onChange={setTrialEnd} mode="custom" />
+                        </FilterGroup>
+                        <FilterGroup label="Current period ends">
+                            <DateRangeFilter value={periodEnd} onChange={setPeriodEnd} mode="custom" />
+                        </FilterGroup>
+                        <FilterGroup label="Last updated">
+                            <DateRangeFilter value={updated} onChange={setUpdated} mode="custom" />
+                        </FilterGroup>
+                    </>
+                }
+            >
+                <DataTable
+                    columns={columns}
+                    rows={rows}
+                    getRowId={(o) => o.id}
+                    loading={isLoading}
+                    error={error}
+                    onRetry={() => refetch()}
+                    errorTitle="Failed to load organizations"
+                    onRowClick={(o) => nav(`/organizations/${o.id}`)}
+                    sort={sort.by ? sort : undefined}
+                    onSortChange={setSort}
+                    storageKey="admin.organizations"
+                    csvName="pegasusbound-organizations"
+                    noun="organizations"
+                    emptyTitle="No organizations"
+                    emptyHint="No organizations match these filters."
+                    pager={{
+                        canPrev: pager.canPrev,
+                        canNext: !!data?.pagination.has_more,
+                        onPrev: pager.prev,
+                        onNext: () => pager.next(data?.pagination.next_cursor),
+                        page: pager.page,
+                        shown: rows.length,
+                        total: data?.pagination.total ?? null,
+                    }}
+                />
+            </Explorer>
+        </div>
+    );
+}
+
+type AdminOrgSortKey = "created_at" | "name" | "owner_email" | "member_count" | "email_account_count" | "campaign_count";

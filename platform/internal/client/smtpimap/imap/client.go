@@ -1,0 +1,981 @@
+package imap
+
+import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"errors"
+	"io"
+	"net"
+	"net/textproto"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/emersion/go-imap/v2"
+	"github.com/emersion/go-imap/v2/imapclient"
+	"github.com/emersion/go-sasl"
+	"github.com/pegasusbound/pegasusbound/internal/client/netbind"
+	"github.com/pegasusbound/pegasusbound/internal/config"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/mailhdr"
+	"github.com/rs/zerolog/log"
+	"golang.org/x/oauth2"
+)
+
+// headerFetchFields are the internet headers fetched alongside each changed
+// message (BODY.PEEK[HEADER.FIELDS ...]) and surfaced into Flags as
+// "Header:value" pseudo-flags: the warmup verification token plus the
+// machine-reply/DSN markers the consumer's reply/bounce classifier reads.
+// The IMAP ENVELOPE carries none of these.
+var headerFetchFields = append([]string{config.WarmupVerifyHeader}, config.InboundClassificationHeaders...)
+
+var evidenceFetchFields = append(append([]string{}, headerFetchFields...), "Authentication-Results", "From", "Return-Path", "DKIM-Signature", "List-Unsubscribe", "List-Unsubscribe-Post")
+
+type Client struct {
+	// Context optionally binds connections and setup to the installed mailbox lifetime.
+	Context     context.Context
+	Email       string
+	AuthType    models.AuthType
+	Credentials *models.Service
+	Oauth2      *models.Oauth2Service
+
+	client *imapclient.Client
+
+	// mu is held by every sync step and warmup action, each for one step, so neither runs against the other's selected folder.
+	mu sync.Mutex
+
+	// syncView is the sync pass's selected folder, re-opened by each sync step after a warmup action; guarded by mu.
+	syncView *selection
+
+	// sentMailboxName caches the resolved Sent folder for this connection.
+	// Guarded by mu.
+	sentMailboxName string
+
+	// selected records whether a mailbox is currently SELECTed, so
+	// ReleaseMailbox does not send UNSELECT in authenticated state, where a
+	// strict server answers BAD. Atomic because a reconnect clears it under
+	// the lifecycle lock, not under mu.
+	selected atomic.Bool
+
+	// nsPrefix caches this connection's personal-namespace prefix (nil until
+	// resolved, "" when the server puts user folders at the root). Guarded by mu.
+	nsPrefix *string
+
+	// BindIP optionally pins outbound TCP to a specific local source address.
+	// When nil, WORKER_BIND_IP is consulted; when still unset, the OS default
+	// route is used.
+	BindIP *net.TCPAddr
+
+	// lifecycle guards the client field itself. A reconnect holds the write
+	// lock through dial, auth and assignment; every command holds the read
+	// lock for its duration, so a reconnect never swaps the session out from
+	// under a command, and two paths that both see the drop dial once.
+	// Lock order: mu before lifecycle, and never nest a read lock.
+	lifecycle sync.RWMutex
+
+	// conn is the transport under client, nil until the first Connect. It
+	// is swapped under the lifecycle write lock and read under the read lock
+	// like client itself.
+	conn *idleConn
+
+	setupMu      sync.Mutex
+	setupCancel  context.CancelFunc
+	transport    net.Conn
+	lifetimeStop func() bool
+	closed       atomic.Bool
+
+	// IdleTimeout bounds how long a command waits for the server to say
+	// anything before the session is declared dead. Zero means
+	// config.ImapCommandIdleTimeout.
+	IdleTimeout time.Duration
+
+	// plaintext dials without TLS at all. Only the tests set it, to talk to
+	// the in-process server; no product path reaches it, because an IMAP
+	// session in the clear would put the mailbox password on the wire.
+	plaintext bool
+
+	// condStore is whether the current session advertised CONDSTORE after
+	// authentication, which decides between the mod-sequence and the UIDNEXT
+	// incremental sync.
+	condStore atomic.Bool
+
+	// eSearch is whether the session advertised ESEARCH, read at connect
+	// because a session the server's reply just closed reports no caps.
+	eSearch atomic.Bool
+
+	// folderOverflow is what the last Folders call had to leave out for the
+	// cap, folderConflicts what it left out for a duplicate UIDVALIDITY.
+	folderOverflow  atomic.Int32
+	folderConflicts atomic.Int32
+
+	// selection is what the last successful SELECT opened, nil when nothing
+	// is selected. Each SELECT stores a fresh value, so a scan can tell that
+	// the selection moved under it.
+	selection atomic.Pointer[selection]
+
+	// sinceRefused is set once the server refuses a dated SEARCH; SearchSince
+	// reads INTERNALDATE instead from then on. It outlives a reconnect.
+	sinceRefused atomic.Bool
+
+	// changedSince is the changedSinceMode this server answers in a form we
+	// can read. It only ever steps down, and it outlives a reconnect.
+	changedSince atomic.Int32
+
+	// lastUnreadable is the last unreadable reply logged, so a server stuck on
+	// one is reported once rather than every pass.
+	lastUnreadable atomic.Pointer[string]
+
+	// dateScans is that read per folder, extended rather than repeated on the
+	// next pass. Guarded by scanMu.
+	scanMu    sync.Mutex
+	dateScans map[string]*dateScan
+}
+
+// begin starts the idle clock for one command; call the result on exit.
+// Callers hold the lifecycle read lock, so conn cannot change underneath.
+func (c *Client) begin() func() {
+	if c.conn == nil {
+		return func() {}
+	}
+	return c.conn.arm()
+}
+
+// HasCondStore reports whether the session supports CONDSTORE, the
+// mod-sequence path of the incremental sync. Without it the sync loop keys
+// on UIDNEXT and mirrors flags with a periodic scan.
+func (c *Client) HasCondStore() bool {
+	return c.condStore.Load()
+}
+
+func (c *Client) selectedCondStore() bool {
+	sel := c.selection.Load()
+	return c.condStore.Load() && sel != nil && sel.modSeq > 0
+}
+
+// ensureConnected re-dials after the server has dropped the session. go-imap
+// parks a dead client in the Logout state and fails every later command with
+// net.ErrClosed; nothing re-dialed, so one drop (Gmail closes sessions after a
+// while) left the mailbox a zombie until the worker restarted: no sync, no
+// sent copies. Every entry point that starts a command runs through here,
+// before taking its own read lock.
+func (c *Client) ensureConnected() *errx.MailError {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	if c.closed.Load() || c.Context != nil && c.Context.Err() != nil {
+		return errx.ErrMailServerUnreachable
+	}
+
+	// Only a session that got past auth is worth keeping: a failed Login
+	// leaves go-imap in NotAuthenticated, which is just as unusable as Logout.
+	if c.client != nil {
+		switch c.client.State() {
+		case imap.ConnStateAuthenticated, imap.ConnStateSelected:
+			return nil
+		}
+	}
+	return c.connectLocked()
+}
+
+func (c *Client) Connect() *errx.MailError {
+	c.lifecycle.Lock()
+	defer c.lifecycle.Unlock()
+	return c.connectLocked()
+}
+
+// connectLocked dials and authenticates a fresh session. lifecycle must be
+// held for writing.
+func (c *Client) connectLocked() *errx.MailError {
+	if c.closed.Load() || c.Context != nil && c.Context.Err() != nil {
+		return errx.ErrMailServerUnreachable
+	}
+	c.setupMu.Lock()
+	if c.lifetimeStop != nil {
+		c.lifetimeStop()
+	}
+	if c.transport != nil {
+		_ = c.transport.Close()
+		c.transport = nil
+	}
+	c.setupMu.Unlock()
+	var addr, host, security string
+	var port int
+	switch c.AuthType {
+	case models.AuthPlain:
+		host, port, security = c.Credentials.Host, c.Credentials.Port, c.Credentials.Security
+	case models.AuthOAuth2:
+		host, port = c.Oauth2.Host, c.Oauth2.Port
+	}
+	// Normalized before it is used anywhere: brackets belong to the address,
+	// not to the host, and JoinHostPort is what puts them back for an IPv6
+	// literal.
+	host = models.NormalizeMailHost(host)
+	addr = models.MailDialAddress(host, port)
+
+	tlsConf := &tls.Config{
+		ServerName:         host,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: netbind.InsecureTLS(), //nolint:gosec // MAIL_TLS_INSECURE, local dev only
+	}
+
+	// Dial through netbind so both paths honour WORKER_BIND_IP, and wrap the
+	// socket before TLS so the idle clock sits under the encryption.
+	timeout := c.IdleTimeout
+	if timeout <= 0 {
+		timeout = config.ImapCommandIdleTimeout
+	}
+	// The unencrypted mode is checked before the dial and again against the
+	// peer we actually got, because only the second one is a fact about this
+	// socket rather than about what DNS said a moment ago.
+	resolved := models.ResolveIMAPSecurity(security, port)
+	if resolved == models.MailSecurityNone && !models.CleartextMailAllowed(host) {
+		return errx.ErrMailInsecureRemoteHost
+	}
+	lifetime := c.Context
+	if lifetime == nil {
+		lifetime = context.Background()
+	}
+	setupCtx, cancel := context.WithTimeout(lifetime, timeout)
+	c.setupMu.Lock()
+	if c.closed.Load() {
+		c.setupMu.Unlock()
+		cancel()
+		return errx.ErrMailServerUnreachable
+	}
+	c.setupCancel = cancel
+	c.setupMu.Unlock()
+	defer func() {
+		c.setupMu.Lock()
+		c.setupCancel = nil
+		c.setupMu.Unlock()
+		cancel()
+	}()
+	raw, err := netbind.Dialer(c.BindIP).DialContext(setupCtx, "tcp", addr)
+	if err != nil {
+		return errx.ErrMailServerUnreachable
+	}
+	if resolved == models.MailSecurityNone && !netbind.LoopbackPeer(raw) {
+		_ = raw.Close()
+		return errx.ErrMailInsecureRemoteHost
+	}
+	c.setupMu.Lock()
+	if c.closed.Load() {
+		c.setupMu.Unlock()
+		_ = raw.Close()
+		return errx.ErrMailServerUnreachable
+	}
+	c.transport = raw
+	c.lifetimeStop = context.AfterFunc(lifetime, func() { _ = raw.Close() })
+	c.setupMu.Unlock()
+	conn := &idleConn{Conn: raw, timeout: timeout}
+	// Library greeting/STARTTLS waits precede client installation; close the pending socket too.
+	stopSetup := context.AfterFunc(setupCtx, func() { _ = raw.Close() })
+	defer stopSetup()
+	done := conn.arm()
+	defer done()
+
+	var client *imapclient.Client
+	switch {
+	case c.plaintext, resolved == models.MailSecurityNone:
+		client = imapclient.New(conn, nil)
+	case resolved == models.MailSecurityStartTLS:
+		// Plaintext greeting, upgraded in-band. NewStartTLS closes conn
+		// itself when the upgrade fails.
+		client, err = imapclient.NewStartTLS(conn, &imapclient.Options{TLSConfig: tlsConf})
+		if err != nil {
+			return errx.ErrMailServerUnreachable
+		}
+	default:
+		tconn := tls.Client(conn, tlsConf)
+		err = tconn.HandshakeContext(setupCtx)
+		if err != nil {
+			_ = tconn.Close()
+			return errx.ErrMailServerUnreachable
+		}
+		client = imapclient.New(tconn, nil)
+	}
+
+	c.client = client
+	c.conn = conn
+	c.selected.Store(false)
+	c.selection.Store(nil)
+	c.condStore.Store(false)
+	var xerr *errx.MailError
+
+	switch c.AuthType {
+	case models.AuthPlain:
+		xerr = c.plainAuth()
+	case models.AuthOAuth2:
+		xerr = c.oauth2Auth()
+	}
+	if xerr != nil {
+		// Drop the half-open session so the next ensureConnected re-dials
+		// instead of reusing an unauthenticated client.
+		_ = client.Close()
+		return xerr
+	}
+
+	// CONDSTORE backs the mod-sequence incremental sync. Servers (Gmail,
+	// Dovecot, ...) typically advertise it only after authentication, so the
+	// check must run post-auth. Without it (Outlook.com, Microsoft 365 over
+	// IMAP, Yahoo, many hosted servers) the sync loop keys on UIDNEXT instead.
+	c.condStore.Store(c.client.Caps().Has(imap.CapCondStore) && changedSinceMode(c.changedSince.Load()) != changedSinceNone)
+	c.eSearch.Store(c.client.Caps().Has(imap.CapESearch))
+	if !stopSetup() || setupCtx.Err() != nil {
+		_ = client.Close()
+		return errx.ErrMailServerUnreachable
+	}
+
+	return nil
+}
+
+func (c *Client) Close() error {
+	if !c.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	c.setupMu.Lock()
+	defer c.setupMu.Unlock()
+	if c.setupCancel != nil {
+		c.setupCancel()
+	}
+	if c.lifetimeStop != nil {
+		c.lifetimeStop()
+	}
+	if c.transport == nil {
+		return nil
+	}
+	err := c.transport.Close()
+	if errors.Is(err, net.ErrClosed) {
+		return nil
+	}
+	return err
+}
+
+func (c *Client) plainAuth() *errx.MailError {
+	if err := c.client.Login(c.Credentials.Username, c.Credentials.Password).Wait(); err != nil {
+		return c.handleError(err)
+	}
+
+	return nil
+}
+
+func (c *Client) oauth2Auth() *errx.MailError {
+	tk, err := c.Oauth2.Token.Token()
+	if err != nil {
+		var rErr *oauth2.RetrieveError
+		if errors.As(err, &rErr) {
+			if rErr.Response.StatusCode >= 500 {
+				return errx.ErrMailServerUnreachable
+			}
+		}
+		return errx.ErrMailAuthenticationFailed
+	}
+
+	saslc := sasl.NewOAuthBearerClient(&sasl.OAuthBearerOptions{
+		Username: c.Email,
+		Token:    tk.AccessToken,
+		Port:     c.Oauth2.Port,
+		Host:     c.Oauth2.Host,
+	})
+
+	if err := c.client.Authenticate(saslc); err != nil {
+		return c.handleError(err)
+	}
+
+	return nil
+}
+
+// selectMailbox is the single SELECT funnel: every path that changes the
+// selected mailbox goes through it so ReleaseMailbox knows whether there is
+// one to release. A failed SELECT leaves the session with no mailbox
+// selected (RFC 3501 6.3.1). The caller holds the lifecycle read lock.
+func (c *Client) selectMailbox(mailbox string, opts *imap.SelectOptions) (*imap.SelectData, error) {
+	// Cleared before the command is written, so a command pipelined behind
+	// this SELECT can never be credited to the previous selection.
+	c.selection.Store(nil)
+	data, err := c.client.Select(mailbox, opts).Wait()
+	c.selected.Store(err == nil)
+	if err == nil {
+		c.selection.Store(&selection{name: mailbox, uidValidity: data.UIDValidity, count: data.NumMessages, modSeq: data.HighestModSeq})
+	}
+	return data, err
+}
+
+// SelectForSync opens a mailbox read-only with CONDSTORE enabled and returns
+// its message count. FETCH is only valid against a selected mailbox, so the
+// sync loop must call this before FetchChanges; CONDSTORE on the SELECT is
+// what arms ChangedSince. The count lets the caller skip the fetch entirely
+// for an empty mailbox, where a 1:* set is a server error.
+func (c *Client) SelectForSync(mailbox string) (uint32, *errx.MailError) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	data, err := c.selectForSyncLocked(mailbox)
+	if err != nil {
+		return 0, c.handleError(err)
+	}
+	return data.NumMessages, nil
+}
+
+// SelectForSyncGen opens the mailbox exactly as SelectForSync does and also
+// reports the selected UIDVALIDITY. A caller that diffs stored UIDs against
+// the folder's live set needs the generation it actually selected: UIDs only
+// mean anything within one, so acting across a change deletes rows it never
+// compared.
+func (c *Client) SelectForSyncGen(mailbox string) (uint32, uint32, *errx.MailError) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	data, err := c.selectForSyncLocked(mailbox)
+	if err != nil {
+		return 0, 0, c.handleError(err)
+	}
+	return data.NumMessages, data.UIDValidity, nil
+}
+
+// Selected is the view a SELECT opened: the count and the cursors every
+// SEARCH on it answers against.
+type Selected struct {
+	Count         uint32
+	UIDValidity   uint32
+	UIDNext       uint32
+	HighestModSeq uint64
+}
+
+// SelectForSyncState selects exactly as SelectForSync does and reports the
+// cursors of the selected view, which is what a folder's stored cursor must
+// advance to: a STATUS taken earlier can be ahead of the view the SEARCH ran on.
+func (c *Client) SelectForSyncState(mailbox string) (Selected, *errx.MailError) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	data, err := c.selectForSyncLocked(mailbox)
+	if err != nil {
+		return Selected{}, c.handleError(err)
+	}
+	return Selected{
+		Count:         data.NumMessages,
+		UIDValidity:   data.UIDValidity,
+		UIDNext:       uint32(data.UIDNext),
+		HighestModSeq: data.HighestModSeq,
+	}, nil
+}
+
+// errSyncViewMoved voids the step's UIDs; the next pass re-baselines the folder.
+var errSyncViewMoved = errors.New("imap: folder UIDVALIDITY changed while the sync pass had it open")
+
+// selectForSyncLocked opens mailbox as every sync step reads it and records the view; mu and lifecycle are held.
+func (c *Client) selectForSyncLocked(mailbox string) (*imap.SelectData, error) {
+	data, err := c.examineLocked(mailbox)
+	c.syncView = c.selection.Load()
+	return data, err
+}
+
+// examineLocked is the sync's read-only SELECT; CONDSTORE only where advertised, or a strict server answers BAD.
+func (c *Client) examineLocked(mailbox string) (*imap.SelectData, error) {
+	return c.selectMailbox(mailbox, &imap.SelectOptions{ReadOnly: true, CondStore: c.condStore.Load()})
+}
+
+// resumeSync is resumeSyncLocked taking its own lifecycle read lock; mu is held.
+func (c *Client) resumeSync() error {
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	return c.resumeSyncLocked()
+}
+
+// resumeSyncLocked re-opens the sync's folder when another is selected; a failure keeps the view, so every later step retries it.
+func (c *Client) resumeSyncLocked() error {
+	want := c.syncView
+	if want == nil || c.selection.Load() == want {
+		return nil
+	}
+	data, err := c.examineLocked(want.name)
+	if err != nil {
+		return err
+	}
+	if data.UIDValidity != want.uidValidity {
+		return errSyncViewMoved
+	}
+	c.syncView = c.selection.Load()
+	return nil
+}
+
+// ReleaseMailbox drops the selected mailbox. Dovecot answers LIST-STATUS for
+// the selected mailbox with the values it held at SELECT, so a loop that keeps
+// INBOX selected never sees another change land. Servers without UNSELECT keep
+// the previous behaviour.
+//
+// It takes mu because it changes selected state, which is exactly what mu
+// exists to serialize against an in-flight warmup MOVE/STORE.
+func (c *Client) ReleaseMailbox() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+
+	// Between folders: no view for a step to resume.
+	c.syncView = nil
+	if c.client == nil || !c.selected.Load() || !c.client.Caps().Has(imap.CapUnselect) {
+		return
+	}
+	defer c.begin()()
+	c.selection.Store(nil)
+	if err := c.client.Unselect().Wait(); err == nil {
+		c.selected.Store(false)
+	}
+}
+
+// Fetched is one message's envelope as read by FetchEnvelopes, plus what
+// FetchBody needs to read its text parts later. Bodies are deliberately a
+// second step: the sync loop decides per message whether it is new and
+// admitted before paying for the body.
+type Fetched struct {
+	Email *models.EmailMessageData
+	uid   imap.UID
+	body  imap.BodyStructure
+}
+
+// SearchSince returns the UIDs in the selected mailbox whose internal date is
+// on or after since (IMAP SINCE has day granularity), ascending. It drives
+// the backfill: the caller walks the set newest first under its cap. On a
+// server that refuses the dated SEARCH the set comes from INTERNALDATE (see
+// searchSinceByDate), and may then still hold UIDs expunged since.
+func (c *Client) SearchSince(since time.Time) ([]imap.UID, *errx.MailError) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.resumeSync(); err != nil {
+		return nil, c.handleError(err)
+	}
+	if !c.sinceRefused.Load() {
+		sel := c.selection.Load()
+		uids, err := c.searchSince(since)
+		if err == nil {
+			return uids, nil
+		}
+		// Only a refusal against a folder that stayed selected is about the
+		// date: a concurrent SELECT of a missing folder leaves none, and the
+		// BAD that earns says nothing about SEARCH.
+		if sel == nil || c.selection.Load() != sel || !searchRefused(err) {
+			return nil, c.handleError(err)
+		}
+		c.sinceRefused.Store(true)
+		log.Warn().Str("host", c.host()).Str("reply", err.Error()).
+			Msg("imap: server refused a dated SEARCH; the backfill window is read from INTERNALDATE")
+	}
+	return c.searchSinceByDate(since)
+}
+
+func (c *Client) searchSince(since time.Time) ([]imap.UID, error) {
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	data, err := c.client.UIDSearch(&imap.SearchCriteria{Since: since}, nil).Wait()
+	if err != nil {
+		return nil, err
+	}
+	return data.AllUIDs(), nil
+}
+
+// SearchChangedSince returns the UIDs whose mod-sequence is above modSeq: the
+// CONDSTORE incremental set, in one round trip. It asks in the most widely
+// implemented form first and steps down for good when a server's answer
+// cannot be read (see changedSinceMode).
+func (c *Client) SearchChangedSince(modSeq uint64) ([]imap.UID, *errx.MailError) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	if err := c.resumeSyncLocked(); err != nil {
+		return nil, c.handleError(err)
+	}
+	for {
+		mode := changedSinceMode(c.changedSince.Load())
+		sel := c.selection.Load()
+		uids, err := c.changedSinceLocked(mode, modSeq)
+		if err == nil {
+			slices.Sort(uids)
+			return uids, nil
+		}
+		switch {
+		case unreadableReply(err):
+			// The session is gone; the next pass reconnects and asks the next way.
+			c.stepDownChangedSince(mode, err, false)
+		case changedSinceRefused(err, sel, c.selection.Load()) && c.stepDownChangedSince(mode, err, true):
+			// A refusal leaves the session usable, so the next form is asked now.
+			if c.condStore.Load() {
+				continue
+			}
+			// Nothing left to ask: the next pass takes the UIDNEXT path, so this one only retries.
+			return nil, errx.ErrMailServerUnreachable
+		}
+		return nil, c.handleError(err)
+	}
+}
+
+// changedSinceRefused is the server declining the form itself, against a
+// folder that stayed selected. A transient NO (UNAVAILABLE, INUSE, SERVERBUG)
+// and the bare "UID FETCH failed" OVH and Zoho send under load stay retryable.
+func changedSinceRefused(err error, before, after *selection) bool {
+	if before == nil || before != after || !searchRefused(err) {
+		return false
+	}
+	var imapErr *imap.Error
+	return !errors.As(err, &imapErr) || !bareCommandFailure(imapErr.Text)
+}
+
+// changedSinceMode is one way of asking what changed since a mod-sequence,
+// ordered from the form the most servers answer correctly to the least.
+type changedSinceMode int32
+
+const (
+	// UID FETCH 1:* (UID) (CHANGEDSINCE n), RFC 7162's own resync and the
+	// path every mainstream client exercises.
+	changedSinceFetch changedSinceMode = iota
+	// UID SEARCH RETURN (ALL) MODSEQ n. Zoho's plain SEARCH answer to an
+	// empty match is malformed and this one is not.
+	changedSinceESearch
+	// UID SEARCH MODSEQ n. Dovecot's ESEARCH answer trails a parenthesised
+	// MODSEQ that go-imap cannot parse and this one is fine.
+	changedSinceSearch
+	// No readable form: HasCondStore turns false and the sync keys on UIDNEXT
+	// with the periodic flag scan, like a server without CONDSTORE.
+	changedSinceNone
+)
+
+func (m changedSinceMode) String() string {
+	switch m {
+	case changedSinceFetch:
+		return "fetch-changedsince"
+	case changedSinceESearch:
+		return "esearch-modseq"
+	case changedSinceSearch:
+		return "search-modseq"
+	default:
+		return "uidnext"
+	}
+}
+
+// changedSinceLocked runs one mode; mu and the lifecycle read lock are held.
+func (c *Client) changedSinceLocked(mode changedSinceMode, modSeq uint64) ([]imap.UID, error) {
+	if mode == changedSinceFetch {
+		// An empty view has nothing to report, and "1:*" against it is an error on strict servers.
+		if sel := c.selection.Load(); sel != nil && sel.count == 0 {
+			return nil, nil
+		}
+		var set imap.UIDSet
+		set.AddRange(1, 0)
+		cmd := c.client.Fetch(set, &imap.FetchOptions{UID: true, ChangedSince: modSeq})
+		var uids []imap.UID
+		for msg := cmd.Next(); msg != nil; msg = cmd.Next() {
+			for item := msg.Next(); item != nil; item = msg.Next() {
+				if u, ok := item.(imapclient.FetchItemDataUID); ok {
+					uids = append(uids, u.UID)
+				}
+			}
+		}
+		return uids, cmd.Close()
+	}
+	var opts *imap.SearchOptions
+	if mode == changedSinceESearch {
+		opts = &imap.SearchOptions{ReturnAll: true}
+	}
+	data, err := c.client.UIDSearch(&imap.SearchCriteria{ModSeq: &imap.SearchCriteriaModSeq{ModSeq: modSeq + 1}}, opts).Wait()
+	if err != nil {
+		return nil, err
+	}
+	return data.AllUIDs(), nil
+}
+
+// stepDownChangedSince moves past a mode the server could not answer usably,
+// reporting whether this call made the move.
+func (c *Client) stepDownChangedSince(from changedSinceMode, cause error, refused bool) bool {
+	next := from + 1
+	if next == changedSinceESearch && !c.eSearch.Load() {
+		next++
+	}
+	if next > changedSinceNone {
+		return false
+	}
+	if !c.changedSince.CompareAndSwap(int32(from), int32(next)) {
+		return false
+	}
+	if next == changedSinceNone {
+		c.condStore.Store(false)
+	}
+	ev := log.Warn().Str("host", c.host()).Str("from", from.String()).Str("to", next.String()).Str("reply", cause.Error())
+	if refused {
+		ev.Msg("imap: server refused a change query; asking another way from now on")
+		return true
+	}
+	msg := cause.Error()
+	c.lastUnreadable.Store(&msg)
+	ev.Msg("imap: server answered a change query in a form that cannot be read; asking another way from now on")
+	return true
+}
+
+// SearchAll returns every UID in the selected mailbox, ascending. An expunge
+// leaves no UID behind to report, so the drafts reconciliation diffs this set
+// against the UIDs the platform holds for the folder.
+func (c *Client) SearchAll() ([]imap.UID, *errx.MailError) {
+	return c.uidSearch(&imap.SearchCriteria{})
+}
+
+// SearchNewSince returns the UIDs at or above uidNext: the mail that arrived
+// since the folder's UIDNEXT was last recorded. It is the incremental set on
+// a server without CONDSTORE. A "n:*" set with n past the end answers with
+// the highest UID in the folder (RFC 3501 6.4.8), so the result is filtered.
+func (c *Client) SearchNewSince(uidNext uint32) ([]imap.UID, *errx.MailError) {
+	if uidNext == 0 {
+		uidNext = 1
+	}
+	var set imap.UIDSet
+	set.AddRange(imap.UID(uidNext), 0)
+	uids, err := c.uidSearch(&imap.SearchCriteria{UID: []imap.UIDSet{set}})
+	if err != nil {
+		return nil, err
+	}
+	out := uids[:0]
+	for _, uid := range uids {
+		if uint32(uid) >= uidNext {
+			out = append(out, uid)
+		}
+	}
+	return out, nil
+}
+
+// FlagState is one message as the flag scan sees it: enough to find the
+// platform's copy (the RFC Message-ID, which is the map key) and to compare
+// its flags with the previous scan. Bodies and envelopes are not read.
+type FlagState struct {
+	MessageID string
+	Flags     []string
+}
+
+// FetchFlags reads the flags and Message-ID of every message at or above
+// uidFrom in the selected mailbox, in one round trip with no bodies. It is
+// how flag and read-state changes are found on a server without CONDSTORE:
+// the caller diffs it against the previous scan.
+func (c *Client) FetchFlags(ctx context.Context, uidFrom uint32) (map[uint32]FlagState, *errx.MailError) {
+	if uidFrom == 0 {
+		uidFrom = 1
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	if err := c.resumeSyncLocked(); err != nil {
+		return nil, c.handleError(err)
+	}
+	var set imap.UIDSet
+	set.AddRange(imap.UID(uidFrom), 0)
+	cmd := c.client.Fetch(set, &imap.FetchOptions{UID: true, Flags: true, Envelope: true})
+	out := map[uint32]FlagState{}
+	for em := cmd.Next(); em != nil; em = cmd.Next() {
+		var uid uint32
+		var st FlagState
+		for item := em.Next(); item != nil; item = em.Next() {
+			switch item := item.(type) {
+			case imapclient.FetchItemDataUID:
+				uid = uint32(item.UID)
+			case imapclient.FetchItemDataFlags:
+				st.Flags = make([]string, 0, len(item.Flags))
+				for _, f := range item.Flags {
+					st.Flags = append(st.Flags, string(f))
+				}
+			case imapclient.FetchItemDataEnvelope:
+				if item.Envelope != nil {
+					st.MessageID = item.Envelope.MessageID
+				}
+			}
+		}
+		if uid >= uidFrom {
+			out[uid] = st
+		}
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	if err := cmd.Close(); err != nil {
+		return nil, c.handleError(err)
+	}
+	return out, nil
+}
+
+func (c *Client) uidSearch(criteria *imap.SearchCriteria) ([]imap.UID, *errx.MailError) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	if err := c.resumeSyncLocked(); err != nil {
+		return nil, c.handleError(err)
+	}
+	data, err := c.client.UIDSearch(criteria, nil).Wait()
+	if err != nil {
+		return nil, c.handleError(err)
+	}
+	return data.AllUIDs(), nil
+}
+
+// FetchEnvelopes reads envelope, flags, structure and the classification
+// headers for the given UIDs (at most ImapFetchBatchSize per call is the
+// caller's job) without bodies.
+func (c *Client) FetchEnvelopes(ctx context.Context, uids []imap.UID) ([]*Fetched, *errx.MailError) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	var set imap.UIDSet
+	for _, uid := range uids {
+		set.AddNum(uid)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	if err := c.resumeSyncLocked(); err != nil {
+		return nil, c.handleError(err)
+	}
+	cmd := c.client.Fetch(set, &imap.FetchOptions{
+		UID:      true,
+		Envelope: true,
+		BodyStructure: &imap.FetchItemBodyStructure{
+			Extended: true,
+		},
+		Flags: true,
+		// MODSEQ is a CONDSTORE fetch item (RFC 7162). Asking a server that
+		// never advertised it for one is a malformed fetch-att, and a strict
+		// parser answers BAD and syncs nothing: issue #405, where IONOS said
+		// `BAD expected fetch-att instead of "MODSEQ BODY.P"` on every pass.
+		ModSeq:       c.selectedCondStore(),
+		InternalDate: true,
+		RFC822Size:   true,
+		BodySection: []*imap.FetchItemBodySection{{
+			Specifier:    imap.PartSpecifierHeader,
+			HeaderFields: evidenceFetchFields,
+			Peek:         true,
+		}},
+	})
+	var collected []*Fetched
+
+	for em := cmd.Next(); em != nil; em = cmd.Next() {
+		email := &models.EmailMessageData{}
+		var euid imap.UID
+
+		var bodyStructure imap.BodyStructure
+		// Collected separately: the FLAGS item resets email.Flags and item
+		// order is server-dependent, so appending inline could be wiped.
+		var headerFlags []string
+
+		for item := em.Next(); item != nil; item = em.Next() {
+			switch item := item.(type) {
+			case imapclient.FetchItemDataUID:
+				email.UID = uint32(item.UID)
+				euid = item.UID
+			case imapclient.FetchItemDataFlags:
+				email.Flags = make([]string, 0)
+				for _, f := range item.Flags {
+					email.Flags = append(email.Flags, string(f))
+				}
+			case imapclient.FetchItemDataEnvelope:
+				email.BCC = GetAddressNames(item.Envelope.Bcc)
+				email.CC = GetAddressNames(item.Envelope.Cc)
+				email.Date = item.Envelope.Date
+				email.From = GetAddressNames(item.Envelope.From)
+				email.InReplyTo = item.Envelope.InReplyTo
+				email.MessageID = item.Envelope.MessageID
+				email.ReplyTo = GetAddressNames(item.Envelope.ReplyTo)
+				email.Sender = GetAddressNames(item.Envelope.Sender)
+				email.Subject = item.Envelope.Subject
+				email.To = GetAddressNames(item.Envelope.To)
+			case imapclient.FetchItemDataRFC822Size:
+				email.Size = item.Size
+			case imapclient.FetchItemDataInternalDate:
+				email.InternalDate = item.Time
+			case imapclient.FetchItemDataModSeq:
+				email.ModSeq = item.ModSeq
+			case imapclient.FetchItemDataBodyStructure:
+				bodyStructure = item.BodyStructure
+			case imapclient.FetchItemDataBodySection:
+				headerFlags = parseHeaderFlags(item.Literal)
+			}
+		}
+
+		email.Flags = append(email.Flags, headerFlags...)
+		collected = append(collected, &Fetched{Email: email, uid: euid, body: bodyStructure})
+		if ctx.Err() != nil {
+			break
+		}
+	}
+
+	if err := cmd.Close(); err != nil {
+		return nil, c.handleError(err)
+	}
+	return collected, nil
+}
+
+// FetchBody reads the text parts of one fetched message. It must run after
+// the FetchEnvelopes command that produced it is closed: a nested FETCH on
+// the same connection blocks until the outer one finishes, and the outer one
+// cannot finish while we wait, which deadlocks the sync on the first message.
+func (c *Client) FetchBody(f *Fetched) *errx.MailError {
+	if f == nil || f.Email == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lifecycle.RLock()
+	defer c.lifecycle.RUnlock()
+	defer c.begin()()
+	if err := c.resumeSyncLocked(); err != nil {
+		return errx.ErrMailServerUnreachable
+	}
+	plain, html, err := fetchTextParts(c.client, f.uid, f.body)
+	if errors.Is(err, errBodyMessageGone) {
+		return errx.ErrMailResourceNotFound
+	}
+	if err != nil {
+		if mailErr := c.handleError(err); mailErr.Code != errx.MailErrorCodeNotFound {
+			return mailErr
+		}
+		return errx.ErrMailServerUnreachable
+	}
+	f.Email.BodyPlain, f.Email.BodyHTML = plain, html
+	return nil
+}
+
+// parseHeaderFlags reads a HEADER.FIELDS literal and renders the fetched
+// headers as "Header:value" pseudo-flags, using the canonical names from
+// headerFetchFields so the consumer's prefix matching always hits.
+func parseHeaderFlags(lit io.Reader) []string {
+	if lit == nil {
+		return nil
+	}
+	tp := textproto.NewReader(bufio.NewReader(io.LimitReader(lit, 32*1024)))
+	hdr, err := tp.ReadMIMEHeader()
+	if len(hdr) == 0 && err != nil {
+		return nil
+	}
+	if len(hdr) == 0 {
+		return nil
+	}
+	out := []string{mailhdr.ReceivedEvidence(hdr, "imap_headers").Flag()}
+	for _, name := range headerFetchFields {
+		if v := strings.TrimSpace(hdr.Get(name)); v != "" {
+			out = append(out, name+":"+v)
+		}
+	}
+	return out
+}

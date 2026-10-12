@@ -1,0 +1,357 @@
+---
+title: Install
+description: One command installs Pegasusbound from published release images, with a wizard that asks where your data lives, what is kept and for how long, and how it is backed up.
+---
+
+```bash
+curl -fsSL https://pegasusbound.com/install.sh | sh
+```
+
+No clone, no compiler, no toolchain. The script checks Docker, creates one directory, generates every secret, pulls the pinned release images, starts the stack and prints the link that claims your instance. On a clean box with Docker already installed it finishes in under two minutes.
+
+Add `--wizard` and it asks the questions a config reference cannot ask for you.
+
+```bash
+curl -fsSL https://pegasusbound.com/install.sh | sh -s -- --wizard
+```
+
+You do not have to remember the flag. A fresh install with a terminal in front of it and no hostname given asks whether to configure itself before it writes anything, because the alternative is an instance on `localhost`: a dashboard, a tracking host and an unsubscribe address that work from that machine and nowhere else, all of which end up inside campaign mail. Answer no and it says so plainly and carries on. `--assume-yes`, `--host`, `PEGASUSBOUND_HOST` and a re-run over an existing install all skip the question, because each of them already answered it.
+
+## What it installs
+
+| | |
+|---|---|
+| Where | `/opt/pegasusbound`, or wherever you point `--dir` |
+| What | `docker-compose.yml`, a `.env` at 0600, `keys-backup.txt`, and the data root |
+| Version | The newest release, resolved once and pinned in `.env`. Never `latest` |
+| Images | `ghcr.io/pegasusbound/pegasusbound/*`, multi-arch for amd64 and arm64. Public, so no registry login and no GitHub account |
+| Services | Backend, consumer, worker, dashboard, admin, Postgres, Redis, NATS, and (unless you say core only) tracking, realtime and forms |
+
+Nothing is built on your machine. The clone-and-build path still exists and is still supported; see [self-hosting](/development/deployment-guide/) for when you want it.
+
+## Before you run it
+
+Piping a script into a shell is a fair thing to be uneasy about, and the objection is only answerable if the script is versioned, inspectable and checksummed. All three are:
+
+```bash
+curl -fsSLO https://pegasusbound.com/install.sh
+curl -fsSLO https://pegasusbound.com/install.sh.sha256
+sha256sum -c install.sh.sha256
+less install.sh
+sh install.sh
+```
+
+The script itself is written to deserve that: `set -eu`, every line inside a function, and `main "$@"` on the very last line, so a download that is cut off half way executes nothing at all. It never asks to be piped into `sudo`; it asks for elevation only for the specific steps that need it, and names them.
+
+You also do not have to run it to see what it would do:
+
+```bash
+sh install.sh --dry-run
+```
+
+That prints the exact `.env` and compose file it would write, and touches nothing.
+
+### And after it runs
+
+Every release publishes an `images.json` asset listing the manifest digest of each image in it. Once the pull finishes the installer compares what actually landed on the machine against that file, and stops before starting anything if they differ. You can check the same thing yourself at any time:
+
+```bash
+docker image inspect ghcr.io/pegasusbound/pegasusbound/backend:v1.4.2 --format '{{index .RepoDigests 0}}'
+```
+
+An install pointed at your own registry with `--registry` has no manifest to check against, and the installer says so rather than pretending it verified something.
+
+## Requirements
+
+| You need | Notes |
+|---|---|
+| Linux or macOS, amd64 or arm64 | On Windows, run it inside WSL |
+| Docker 20.10+ with Compose v2 | The script offers to install Docker on Linux, and never does so quietly |
+| ~2 GB disk | The images, not a build cache. There is no build |
+| 4 GB RAM | The running stack idles near 300 MB |
+| Free ports | 8080, 5173, 5174, and 3000, 4000, 8090 with every component |
+
+Port `3000` is the one that actually collides: it is the default for a lot of other self-hosted software. The installer checks every port before it writes anything and tells you which one is taken.
+
+## The wizard
+
+`--wizard` walks nine steps. Every answer has a default that matches the fast path, so pressing enter through the whole thing produces exactly the install the one-liner produces.
+
+Every menu takes the keys you already use:
+
+| Keys | Does |
+|---|---|
+| `↑` `↓`, `j` `k`, `ctrl-n` `ctrl-p` | Move |
+| `ctrl-d` `ctrl-u` | Half a screen |
+| `gg`, `G` | First, last |
+| `1` to `9` | Jump straight to that option |
+| `enter`, `space`, `l` | Take it |
+| `q`, `esc`, `ctrl-c` | Leave without installing |
+
+The review screen at the end takes `enter` to install, `e` to go back into a section, and `q` to quit.
+
+Steps append rather than replacing each other, so the whole run stays scrollable and nothing above the installer is touched. `--clear` redraws the screen at each step instead, if you prefer that.
+
+<Steps>
+
+<Step>
+
+### Where it lives
+
+One directory holds the compose file, the `.env`, and, unless you move it in step three, every store this instance writes to. Default `/opt/pegasusbound`.
+
+</Step>
+
+<Step>
+
+### How it is reached
+
+The hostname every link is built from: the dashboard URL, the unsubscribe link in campaign mail, the tracking pixel. Then how it is served:
+
+| Choice | What it does |
+|---|---|
+| **Plain HTTP** | Ports published as they are. Correct for localhost or a private network |
+| **Bundled Caddy** | Adds a Caddy service with automatic HTTPS, one hostname per surface, and binds everything else to loopback |
+| **Behind your proxy** | Binds every service to `127.0.0.1` and sets `TRUSTED_PROXIES`, which is silently wrong on every proxied install that was configured by hand |
+
+`TRUSTED_PROXIES` matters more than it looks. Without it every request appears to come from the proxy, so per-IP rate limits and click deduplication stop distinguishing between people.
+
+The bundled Caddy option serves six hostnames under the domain you give it, and the installer prints the DNS records at the end:
+
+```
+app.example.com     admin.example.com    api.example.com
+ws.example.com      track.example.com    forms.example.com
+```
+
+It also gets a certificate for hostnames that do not exist yet. A workspace on this instance can point its own [tracking domain](/guides/mailboxes/#custom-tracking-domain) or [forms domain](/guides/forms/#custom-domain) here months after the install, and a site block cannot name a host nobody has heard of. The generated Caddyfile carries `on_demand_tls` with an `ask` pointed at the backend, so Caddy obtains a certificate the first time such a name is requested, after the backend confirms this instance has verified it. A name nobody here has verified is refused, so pointing a domain at the machine is not enough to get a certificate out of it.
+
+Behind your own proxy this is yours to arrange: the same custom domains need certificates there, and how depends on the proxy. Caddy takes the same `on_demand_tls` block; nginx and Traefik need each domain added by hand. [Root redirects](/guides/sending-domains/#root-redirects) are custom domains too: the proxy sends the bare domain and its `www` to the tracking port with the original `Host` header. The sending domains page shows **Not reaching visitors**, and the change for Traefik, nginx, Caddy, Coolify or Dokploy, until it does. An instance [linked to Pegasusbound Cloud](/guides/pegasusbound-cloud/#root-redirects-served-by-pegasusbound-cloud) can have Cloud serve redirects instead.
+
+</Step>
+
+<Step>
+
+### Where the data sits
+
+The question the rest of the install cannot answer for you, and the reason the wizard exists.
+
+| Choice | What you get |
+|---|---|
+| **Under the install directory** | `/opt/pegasusbound/data` holds Postgres, blobs, NATS and worker state |
+| **A path you choose** | An external disk or a mount you already snapshot |
+| **Docker named volumes** | Managed by Docker, portable only through `docker volume` |
+
+A real path is the default, because it is the choice that makes backup and migration obvious: with the stack stopped, moving the instance to another host is `rsync` of that path plus the `.env`. Do not copy it while Postgres is running; a live data directory is not a consistent snapshot. To move an instance without stopping it, use [`pegasusboundctl backup`](/development/data-control/#backups). Compose reads a volume source starting with `/` as a bind mount and anything else as a named volume, so this is one variable per store and no second compose file.
+
+Then, behind one prompt: an external Postgres or Redis (the bundled container is left out entirely when you bring your own), and where message bodies, attachments and avatars go.
+
+<Callout type="warn" title="Filesystem blobs are local to one machine">
+A worker running on another host writes to its own disk. Once you scale workers out, blob storage has to be S3-compatible or bodies go missing. The wizard offers MinIO, R2, B2 and AWS.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Keys and secrets
+
+Seven secrets are generated: `AUTH_SECRET`, `INTERNAL_API_TOKEN`, `NODE_BROKER_TOKEN`, `UPDATER_TOKEN`, `SECRET_KEY_BASE`, `KMS_LOCAL_MASTER_KEY` and `CREDENTIALS_ENCRYPTION_KEY`. `INTERNAL_API_TOKEN` is what the tracking and forms services present, `NODE_BROKER_TOKEN` is what workers and consumers present, and `UPDATER_TOKEN` is what the backend presents to the updater, so none of the three opens what another guards. A re-run adopts the ones already in `.env` and adds a missing `UPDATER_TOKEN`; it never adds a `NODE_BROKER_TOKEN` to an existing install, because nodes already joined to it hold only the shared token. They are written 0600, `APP_ENV` is set to `prod`, and no published default is ever reachable through this path.
+
+The last two are unrecoverable. Every mailbox credential and every per-organization key is sealed with them, so a database backup that does not travel with them restores an instance whose mailboxes authenticate against nothing. The wizard prints both, writes them to `keys-backup.txt` next to the install, and waits until you type that you have a copy somewhere else.
+
+</Step>
+
+<Step>
+
+### What is kept, and for how long
+
+Two groups, both editable afterwards in **Instance > Configuration > Settings**:
+
+| Setting | Default | What it governs |
+|---|---|---|
+| Import window | 90 days | How far back the initial import reaches when a mailbox is connected |
+| Import cap | 5,000 | The most messages that import stores per mailbox |
+| Daily per mailbox | 2,000 | New mail one mailbox may store per UTC day |
+| Daily per organization | 25,000 | New plus imported mail across one workspace per UTC day |
+| Opens and clicks | 365 days | Per-event logs, with the client, device and approximate location of each |
+| Form funnel events | 180 days | Views, starts, field-level drop-off |
+| Audit log | 90 days | Who did what, from which IP address and user agent |
+| Warmup mail in mailboxes | 30 days | Warmup mail is deleted from each mailbox once older than this, wherever it is filed |
+| Warmup records | 365 days | Per-message warmup tokens, receipts, tampering events and spam reports |
+
+The opens, forms and audit windows are also how long that personal data is held. A "minimal retention" preset sets those three to 30 days, warmup mail to 7 and warmup records to 30.
+
+</Step>
+
+<Step>
+
+### Backups
+
+A scheduled `pegasusboundctl backup`: a target directory, a frequency, how many to keep, and whether the encryption keys travel in the bundle. It writes `backup.sh` next to the install and, on a systemd host, a service and a timer.
+
+Including the keys makes the bundle as sensitive as the instance itself. Leaving them out means keeping `keys-backup.txt` somewhere else, or the bundles cannot be restored at all.
+
+</Step>
+
+<Step>
+
+### Who gets in
+
+The first owner, either as a printed claim link or unattended from `PEGASUSBOUND_BOOTSTRAP_EMAIL` plus a hash from `pegasusboundctl hash-password`. Then the registration posture, and platform mail: an SMTP relay, or skip it and have password resets and login codes printed to the backend log.
+
+</Step>
+
+<Step>
+
+### Footprint
+
+Everything, or core only (no tracking pixel, no websockets, no hosted forms). Core only leaves `TRACKING_DOMAIN` and `FORMS_DOMAIN` unset, because naming a host nothing answers on is worse than naming none: campaign mail would ship links and an opt-out address pointing at a name that does not resolve. Sending still works, without open and click tracking, and every [unsubscribe link](/guides/unsubscribe/) is served from `API_PUBLIC_URL`.
+
+Ports are checked for collisions before anything is written. Last, the update check, which is one outbound call to the GitHub releases API and the only outbound call this instance makes on its own. There is no telemetry in Pegasusbound.
+
+</Step>
+
+<Step>
+
+### Review
+
+Every answer on one screen. Enter installs, `e` goes back to any section, `q` leaves without writing anything.
+
+</Step>
+
+</Steps>
+
+## See it first
+
+```bash
+curl -fsSL https://pegasusbound.com/install.sh | sh -s -- --demo
+```
+
+The real wizard and the real review, with the pull, the container creation and the health wait played rather than run. It writes no file, pulls no image, creates no container and needs no Docker, so it answers "what does this actually do" without a server to try it on.
+
+It takes about half a minute, paced so the phases are readable; a real install is several minutes, most of it the pull and the first boot's migrations. `PEGASUSBOUND_DEMO_FAST=1` collapses it to under ten seconds. From a checkout: `make installer-demo`.
+
+## For agents
+
+An agent should never drive the wizard: it reads raw keypresses and needs a
+terminal. Every answer is also a flag, so `--yes` with flags is silent,
+deterministic and idempotent, and `--print-env` and `--dry-run` show what a run
+would produce without producing it.
+
+The repository ships a `pegasusbound-install` skill under `skills/` covering exactly
+that, plus backups and moving an instance. Install it the way your agent
+expects, for example `cp -r skills/pegasusbound-install ~/.claude/skills/`.
+
+## Unattended
+
+Every answer is a flag and a `PEGASUSBOUND_*` environment variable, so the same script provisions from Ansible or cloud-init:
+
+```bash
+curl -fsSL https://pegasusbound.com/install.sh | sh -s -- --yes \
+  --dir /opt/pegasusbound \
+  --host pegasusbound.acme.com \
+  --tls caddy \
+  --data-root /mnt/data/pegasusbound \
+  --blobs s3 \
+  --retention-preset minimal \
+  --backup-dir /mnt/backups/pegasusbound \
+  --version v1.4.2
+```
+
+| Flag | Variable | Default |
+|---|---|---|
+| `--dir` | `PEGASUSBOUND_DIR` | `/opt/pegasusbound` |
+| `--host` | `PEGASUSBOUND_HOST` | `localhost` |
+| `--tls` | `PEGASUSBOUND_TLS` | `none` (`caddy`, `proxy`) |
+| `--data-root` | `PEGASUSBOUND_DATA_ROOT` | `<dir>/data` (or `volumes`) |
+| `--blobs` | `PEGASUSBOUND_BLOBS` | `filesystem` (`s3`) |
+| `--database-url` | `PEGASUSBOUND_DATABASE_URL` | bundled Postgres |
+| `--redis-url` | `PEGASUSBOUND_REDIS_URL` | bundled Redis |
+| `--components` | `PEGASUSBOUND_COMPONENTS` | `full` (`core`) |
+| `--version` | `PEGASUSBOUND_VERSION` | newest release |
+| `--channel` | `PEGASUSBOUND_CHANNEL` | `stable` (`dev`) |
+| `--registry` | `PEGASUSBOUND_IMAGE_PREFIX` | `ghcr.io/pegasusbound/pegasusbound` |
+| `--backup-dir` | `PEGASUSBOUND_BACKUP_DIR` | none |
+| `--backup-keep` | `PEGASUSBOUND_BACKUP_KEEP` | `14` |
+| `--retention-preset` | | `default` (`minimal`) |
+| `--no-update-check` | `PEGASUSBOUND_UPDATE_CHECK` | on |
+
+`--print-env` emits the `.env` and exits. `--dry-run` prints every file it would write and exits. `--demo` walks the whole thing and installs nothing.
+
+## Re-running it
+
+The installer is idempotent. A second run:
+
+- adopts the existing `.env` and never regenerates a secret, because a new `AUTH_SECRET` signs everyone out and a new `CREDENTIALS_ENCRYPTION_KEY` is permanent data loss
+- keeps the existing data root, because pointing an install at a new path is not a move, it is an empty instance next to a full one
+- keeps any keys you added to `.env` yourself, in a clearly marked block at the end
+- regenerates `docker-compose.yml`, keeping the previous one as `docker-compose.yml.bak`
+- refuses a directory it did not create, unless you pass `--force`
+
+Put your own compose changes in a `docker-compose.override.yml`, which compose merges on top and the installer never touches.
+
+## Updating
+
+Upgrade the backend first and confirm its database migrations complete before upgrading consumers. Consumers wait up to two minutes for the clean migration version required by their embedded code before starting database-dependent work. If the backend is still old or a migration failed, the consumer exits with an actionable schema-readiness error and can retry through the container restart policy. It does not run migrations or ignore missing tables.
+
+### Mailbox sync upgrade order
+
+For durable mailbox arrivals, upgrade the backend, let its migrations complete, then upgrade and start the consumer before upgrading workers. The backend admits each new provider map and its organization-encrypted arrival payload in one database transaction; the consumer delivers pending stages after restart. Workers continue using internal HTTP endpoints and do not need database access. Preserve the instance's organization keys and body storage with the database, as described in [data control](/development/data-control/#mailbox-sync-recovery-data).
+
+An old worker with a new backend still writes legacy map-only records. A new worker with an old backend falls back only when the durable internal endpoint is absent (HTTP 404 or 405). Neither mixed-version path has the new durable-admission guarantee. A backend failure or an acknowledgement without the durable marker is not treated as success. When a conflicting map has no retained pending payload, the backend fails closed instead of claiming a durable admission; this includes a retry after the pending row has already been delivered and removed. Ordinary map lookup still deduplicates that message.
+
+Existing completed imports and maps are preserved. Pre-upgrade maps contain no replay payload, so an old lost arrival cannot be reconstructed from the map alone. Bounded provider recovery covers supported recent history, not an unlimited historical repair. [Mailbox sync](/guides/mailboxes/#what-gets-synced) explains the provider limits.
+
+Keep the upgraded consumer running until all pending arrivals finish before downgrading. The migration refuses to remove the arrival table while any pending row remains. Do not delete queued rows or force a migration version to bypass that refusal. An older consumer cannot drain this queue. Pending arrivals are instance-local and do not move in a workspace export.
+
+Fleet auto-updates select releases no newer than the running backend. Existing fleet and node pins are checked again when answering heartbeats, so an incompatible stored target is not sent to nodes; new incompatible pins are rejected. Newly joined machines fall back to the backend's exact release, not the moving `prod` tag. Main builds use their published commit-SHA image tag. Unstamped custom builds must set `PEGASUSBOUND_VERSION` to their published image tag; unknown versions cannot be ordered safely. Upgrade the backend before moving the fleet to a newer release. This protection only takes effect after installing the compatibility release; it cannot change the behavior of an older backend already running.
+
+The dashboard discovers a separate realtime origin from the backend's existing public configuration at container startup or static build time. Bring the backend up first; if discovery warns that it is unavailable, restart the dashboard after backend readiness or rebuild the static deployment. See [configuration](/development/configuration/).
+
+The version pill in the admin panel, then **Update and restart**. On an install created this way the updater runs in image mode: it writes the new tag into `.env`, pulls, and recreates the containers whose image changed. Nothing is built. See [updates](/development/updates/).
+
+By hand, from the install directory:
+
+```bash
+docker compose -p pegasusbound pull && docker compose -p pegasusbound up -d
+```
+
+An update does not cut off work in progress. The generated stack gives each application container 60 seconds to stop (`stop_grace_period`), and in that time the backend finishes a mailbox connect already under way and the import rows it is connecting, and a worker finishes the send it is on. Anything still unfinished after that is picked up again by the new containers: a mailbox a worker was loading on its first heartbeat, and an import row once its 2-minute lease runs out. See [updates without lost work](/development/deployment-guide/#updates-without-lost-work).
+
+## Removing it
+
+```bash
+sh install.sh --uninstall
+```
+
+Stops and removes the containers and leaves every byte of data where it is. Adding `--purge-data` deletes the data root and the install directory as well, and asks you to type a phrase first, because that also destroys the only keys that could have opened a backup of it.
+
+## When it goes wrong
+
+| Symptom | Cause |
+|---|---|
+| `Docker is installed but not answering` | The daemon is not running, or your user is not in the `docker` group yet. `sudo systemctl start docker`, then log out and back in |
+| `Something already listens on 3000` | Another self-hosted tool. Change the published port in `docker-compose.yml` before starting |
+| `Could not pull the release images` | The tag does not exist, or this host cannot reach `ghcr.io`. Check [releases](https://github.com/pegasusbound/pegasusbound/releases) |
+| `The registry refused to serve the release images` | The images are not readable without an account, which is never how a release is meant to ship. Please [report it](https://github.com/pegasusbound/pegasusbound/issues). If you passed `--registry`, check it for a typo first: a namespace that does not exist is refused the same way. To get past it, point `--registry` at a mirror you can read, or `docker login ghcr.io` as someone who already has access to the packages. Logging in does not by itself grant it |
+| The API never answers | The first boot applies every migration. `docker compose -p pegasusbound logs -f backend` |
+| The consumer waits for backend migrations | Consumers wait up to two minutes for the database version required by their image to be clean, then verify that required warmup tables are visible. Update the backend first, check its migration logs and confirm both services use the same database and search path. A dirty migration needs investigation; do not force its version to make the consumer start. |
+| No claim link printed | The database already has accounts, so there is nothing to claim. See [first run](/development/first-run/) |
+
+More in [troubleshooting](/development/troubleshooting/) and [instance health](/development/instance-health/).
+
+## Mail on the same machine
+
+A self-hosted instance can connect a mailbox that only exists on the machine it runs on. [Proton Bridge](https://proton.me/mail/bridge) is the case that matters: it signs in to Proton Mail locally and re-serves the account as plain IMAP on `127.0.0.1:1143` and SMTP on `127.0.0.1:1025`, speaking no TLS a client can verify because it never listens on a network interface.
+
+Connecting one means choosing the **None** security mode in the connect form, which Pegasusbound offers only when the host is a loopback literal (`localhost`, `127.0.0.0/8`, `::1`) and only on a self-hosted instance. The credentials never leave the machine, which is the entire reason it is allowed; the worker checks the peer it actually dialled as well, so an edit to the stored host cannot widen it afterwards. Hosted Pegasusbound runs its workers in our infrastructure and never offers the mode.
+
+The worker has to be the one on that machine. A `docker compose` install puts it there by default; a [dedicated worker](/development/architecture/) on another host cannot reach the Bridge. Full detail in the [mailboxes guide](/guides/mailboxes/#local-mail-relays-proton-bridge).
+
+## Next
+
+- [First run](/development/first-run/): claiming the instance, the first owner, demo data
+- [Data control](/development/data-control/): where every store lives, what each retention window governs, backups, and moving an instance
+- [Configuration](/development/configuration/): every environment variable and every database-backed setting
+- [Whole-domain mailbox connects](/development/whole-domain-connect/): the Google service account and Microsoft app that let a workspace connect a whole Google Workspace domain or Microsoft 365 organization
+- [Self-hosting](/development/deployment-guide/): the full guide, including building from source

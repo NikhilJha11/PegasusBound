@@ -1,0 +1,299 @@
+---
+title: Split deployment
+description: Running the control plane on a container host, the fleet on machines you own, and the database, root key and object store in a cloud region, with what each piece costs.
+---
+
+The [self-hosting guide](/development/deployment-guide/) puts everything on one machine, which is the right answer until it is not. This page is the other shape: the control plane on a container host, the worker fleet on machines you own, and the durable pieces in a cloud region next to the control plane.
+
+It is the deployment Pegasusbound's own architecture describes. The control plane owns relational state and runs where a container host is convenient. The execution plane is a fleet of machines you rent, because a worker's value is being a distinct machine somewhere.
+
+```
+container host          machines you own        cloud region
+──────────────          ────────────────        ────────────
+backend                 worker                  Postgres
+consumer                worker                  KMS key
+realtime                nats + redis            S3 bucket
+tracking                                        SES
+forms
+web / admin
+```
+
+Everything here is env-var configuration and manifests in [`deploy/split-cloud/`](https://github.com/pegasusbound/pegasusbound/tree/main/deploy/split-cloud). No code changes, no fork.
+
+## What goes where, and why
+
+| Service | Plane | Why there |
+|---------|-------|-----------|
+| backend | control | Owns Postgres and applies migrations on boot |
+| consumer | control | Opens Postgres directly, so it belongs next to it |
+| realtime | control | Websocket fanout; needs Redis and a public hostname |
+| tracking | control | Public pixel and click endpoints on their own domain |
+| forms | control | Only if you use hosted forms |
+| web, admin | control | Static builds, configured at container start |
+| worker | execution | Sends and syncs from machines you control |
+| NATS, Redis | execution side | Both planes reach them; keeping them near the fleet keeps the noisy hop local |
+| Postgres, KMS, S3, SES | cloud | Durability, a root of trust, and shared blob storage |
+
+The consumer is the one people put in the wrong place. It is not a worker: it updates relational state, and it needs the database DSN a worker is deliberately never given. Running it beside the backend saves a database connection crossing the internet for every event.
+
+## Keep the three regions close
+
+The backend reaches Postgres and Redis on every request, so the round trips between the three providers are the latency floor of the whole product. Pick a container-host region, a cloud region, and a datacentre for the machines that are near each other, and confirm it before you build anything on top.
+
+## Two things that are not optional
+
+<Callout title="RDS needs AWS's certificate bundle">
+Amazon RDS presents a chain rooted in an RDS CA that is in no public trust store, so `sslmode=verify-full` fails with `x509: certificate signed by unknown authority` against the system bundle alone. The backend, consumer and realtime images ship AWS's truststore at `/etc/ssl/rds/global-bundle.pem`; point `sslrootcert` at it, as above. Realtime is Elixir and reads no DSN parameters, so it takes the same bundle through `DATABASE_SSL_CA_FILE` instead.
+
+`sslmode=require` is the fallback if you cannot. It still encrypts, and `rds.force_ssl=1` still forces TLS server side, but nothing verifies the server's identity, so a caller that reaches the wrong host will not notice.
+</Callout>
+
+<Callout type="warn" title="Redis has to be TLS here">
+The cache holds each organization's decrypted data key for the life of its entry. A plaintext connection across the internet publishes key material, and a password does not change that. On one machine the loopback bind was the protection; once the control plane is somewhere else, TLS is.
+</Callout>
+
+**Blobs have to be object storage.** A worker reads the message body the backend wrote. With `BLOB_PROVIDER=filesystem` it has neither the disk nor the permissions, and the failure arrives at the last step of a send with everything else looking healthy. `pegasusbound join` warns about this and starts the node anyway; the warning is the whole warning you get.
+
+## Nodes carry no cloud credentials
+
+A machine in the fleet needs two privileged things: opening the sealed data key for an organization, and reading and writing message bodies. Both would normally mean an AWS credential on every box, in a file `pegasusbound join` rewrites on each run.
+
+It does not work that way. When the control plane runs `KMS_PROVIDER=aws` or `BLOB_PROVIDER=s3`, a joining node is handed the brokered form instead:
+
+| Control plane | What a node is given |
+|---|---|
+| `KMS_PROVIDER=aws` | `KMS_PROVIDER=brokered` |
+| `KMS_PROVIDER=local` | `KMS_PROVIDER=local`, with the master key |
+| `BLOB_PROVIDER=s3` | `BLOB_PROVIDER=brokered` |
+| `BLOB_PROVIDER=filesystem` | `BLOB_PROVIDER=filesystem`, and a warning |
+
+A brokered provider authenticates with the internal API token the node already holds and asks the instance to perform the one privileged operation: unwrap this key, sign this blob operation. The instance token is scoped to one deployment and revocable from it, which an IAM access key on a rented machine is not.
+
+Blob bytes are not proxied. The control plane signs a URL and the node transfers directly against the object store, so a mailbox sync costs the backend one small request per object rather than the bytes.
+
+The cost is one HTTPS call per DEK open, which Redis caches, and one per blob operation. If you would rather a node talk to AWS directly, put `KMS_PROVIDER`, `BLOB_PROVIDER` and the credentials in `/etc/pegasusbound/node.local.env`, which a re-join does not overwrite.
+
+Two limits are worth knowing. A signed URL covers one verb on one key, and only for the prefixes a node reaches: transport bodies, campaign attachments, and the mailbox bodies a sync stores. Avatars, form assets and workspace export archives cannot be signed for at all, so the credential a node holds is not a credential for the bucket.
+
+That credential is `NODE_BROKER_TOKEN`, and it covers every internal route only a node calls: the key and blob brokers, the provider access token for a mailbox Pegasusbound Cloud manages, data keys, the message map, sync lookups, worker config and the heartbeat. It falls back to `INTERNAL_API_TOKEN`, but set it to its own value here: the tracking and forms services are internet-facing and carry `INTERNAL_API_TOKEN`, and with a separate node token what they hold reaches none of those routes. A node joined after it is set receives it in place of the shared token.
+
+Upgrading a fleet that already sets `NODE_BROKER_TOKEN` needs no extra step. A node on an older release may still send `INTERNAL_API_TOKEN`; its heartbeat is answered with the version it should run and nothing else, so it updates itself and comes back on `NODE_BROKER_TOKEN`, which its join already wrote to `node.env`. Until then its sync lookups are refused for the few minutes the update takes. A worker stays live meanwhile, because its Redis heartbeat needs no token, so its mailboxes are not moved. A node joined before `NODE_BROKER_TOKEN` was set has no copy of it and is only ever told its version, which the backend logs with the node's id: join it again. To keep older nodes syncing through the upgrade, set `NODE_ACCEPT_INTERNAL_TOKEN=true` on the control plane first and remove it once every node has updated.
+
+## Building it
+
+<Steps>
+
+<Step>
+
+### The cloud resources
+
+```bash
+scripts/aws-bootstrap.sh --domain example.com --region eu-central-1
+```
+
+That creates the KMS key and alias, a private bucket with encryption on, a Postgres instance, an SES domain identity, and an IAM user for the control plane with a least-privilege policy. It is idempotent, and `--dry-run` prints what it would do.
+
+Five things it deliberately leaves to you, because each is a decision rather than a default: an access key for the control-plane user, the database security group, `rds.force_ssl=1` in the parameter group, the DKIM records in DNS, and SES production access.
+
+<Callout type="warn" title="SES starts sandboxed">
+Until you request production access, SES only delivers to addresses you have verified, which means invitations and password resets silently reach nobody else. This is platform mail only: campaign and warmup mail goes out through the mailboxes your customers connect, and never touches SES.
+</Callout>
+
+</Step>
+
+<Step>
+
+### The bus and cache
+
+Point an A record at the machine first, then one command on it:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/pegasusbound/pegasusbound/main/deploy/split-cloud/bus/setup.sh
+sh setup.sh --domain bus.example.com
+```
+
+It downloads the rest of the bundle next to itself, installs Docker and certbot if they are missing, creates the group that may read the private key, generates the two credentials, obtains the certificate, installs the renewal hook, starts both services, waits for them to report healthy, proves a real client can connect over TLS with each credential and that a wrong one is refused, and prints the two lines your control plane needs.
+
+<Callout type="warn" title="On Cloudflare, the record must be DNS only">
+Grey cloud, not orange. Cloudflare's proxy passes HTTP and HTTPS on a fixed set of ports and nothing else, so a proxied record swallows 4222 and 6380 entirely. The script checks that the name resolves before spending a Let's Encrypt attempt, but it cannot tell you the answer came from a proxy.
+</Callout>
+
+It is idempotent. A second run adopts what is there: it never rotates a secret, never reissues a valid certificate, and never overwrites your `.env`. Re-running is how you pick up a change.
+
+Three flags worth knowing: `--verify` re-runs the connection checks against a box that is already up, `--print-env` prints the control plane lines again, and `--refresh` re-downloads the compose file and config to pick up a fix without touching your secrets.
+
+The renewal hook is the part that matters after day one. Neither service re-reads its certificate, so without it everything works for 90 days and then stops. Redis publishes only its TLS port; the plaintext port stays on the container network for a worker running on the same machine.
+
+</Step>
+
+<Step>
+
+### The control plane
+
+`deploy/split-cloud/control-plane.env.example` is every setting, annotated. The ones that decide whether a fleet can exist at all:
+
+```bash
+PRIMARY_DB=postgres://pegasusbound:...@db.us-east-1.rds.amazonaws.com:5432/pegasusbound?sslmode=verify-full&sslrootcert=/etc/ssl/rds/global-bundle.pem
+REDIS=rediss://:<password>@bus.example.com:6380
+NATS_URL=tls://<token>@bus.example.com:4222
+ENCRYPTED_KEYS_BACKEND_URL=https://api.example.com
+BLOB_PROVIDER=s3
+```
+
+<Callout title="A node inherits these addresses">
+`pegasusbound join` renders a node's configuration from the backend's own environment. A value that only resolves inside your container network produces a node that enrols cleanly and then cannot reach anything. Set these to addresses another machine can use before adding one.
+</Callout>
+
+Deploy the backend first: it applies the migrations. Then the consumer, realtime, tracking, and the two frontends.
+
+</Step>
+
+<Step>
+
+### The fleet
+
+```bash
+pegasusboundctl fleet join-token
+
+# on each machine, as root
+curl -fsSL https://api.example.com/join.sh | sh -s -- \
+  --url https://api.example.com \
+  --token <join-token> \
+  --role worker \
+  --region eu-central
+```
+
+Nothing connects back to the machine, then or later. It needs no inbound port and no SSH key, and re-running the same command re-joins it under the same identity, keeping its mailboxes.
+
+`deploy/split-cloud/node/` has the same thing as a compose file, for when you want a node's configuration in version control. A node run that way keeps itself current with `docker compose pull`; `pegasusboundctl fleet version` only moves nodes that were joined.
+
+</Step>
+
+</Steps>
+
+## The dashboard and admin panel on a static host
+
+`web` and `admin` are static builds, so they do not need a container. Serving them from a CDN is cheaper and faster than running two nginx containers on your container host.
+
+The one thing to know: both read `window.__PEGASUSBOUND_ENV__` from `/config.js`, which the container entrypoint renders from environment at start. A static host has no container start, so the same script renders it at build time instead.
+
+```
+Build command:      pnpm build:pages
+Build output:       dist
+Root directory:     web        (or admin)
+```
+
+`build:pages` runs the normal build and then the app's own entrypoint with `PEGASUSBOUND_CONFIG_OUT=dist/config.js`. One definition of the key set serves both paths, so the container and the static host cannot drift apart.
+
+Set these as build environment variables on the host:
+
+| `web` | `admin` |
+|---|---|
+| `PEGASUSBOUND_API_URL` | `PEGASUSBOUND_API_URL` |
+| `PEGASUSBOUND_APP_URL` | `PEGASUSBOUND_DASHBOARD_URL` |
+| `PEGASUSBOUND_TURNSTILE_KEY` | `PEGASUSBOUND_ENV_LABEL` |
+| `PEGASUSBOUND_POSTHOG_KEY` | `PEGASUSBOUND_POSTHOG_KEY` |
+| `PEGASUSBOUND_POSTHOG_SESSION_REPLAY` | `PEGASUSBOUND_POSTHOG_SESSION_REPLAY` |
+| `PEGASUSBOUND_SENTRY_DSN` | `PEGASUSBOUND_SENTRY_DSN` |
+| `PEGASUSBOUND_COMPANY_LOGOS` | |
+
+<Callout title="Both apps ship a _redirects">
+`/* /index.html 200`, copied into the build root. Without it every route below the root returns 404 on a refresh or a shared link, because the file genuinely does not exist and only the app knows the route. It is the static-host equivalent of nginx `try_files`.
+</Callout>
+
+Whichever origin you serve them from has to be in the backend's `CORS_ALLOW_ORIGINS`, or the dashboard loads and every API call fails preflight.
+
+### Deploy static frontends only on releases
+
+For Cloudflare Pages, keep your existing projects and custom domains. The repository's `Release` workflow can deploy any configured list of the dashboard, admin panel, marketing site, and docs after it successfully publishes a stable GitHub Release. Ordinary merges and prerelease tags do not run these deployment jobs. The workflow is opt-in, so forks and self-hosts do not need Cloudflare credentials.
+
+Each project gets its own build job, which checks out the exact release commit, reads that project's production branch and public production variables from the Cloudflare API, builds the selected app, and uploads its static output with Wrangler. The upload uses the project's production branch rather than the release tag as its branch name, so it updates production instead of creating a preview. Cloudflare remains the source of truth for frontend configuration; you do not need duplicate API URLs, Turnstile keys, or analytics settings in GitHub.
+
+| App | Build | Output | GitHub deployment environment |
+|---|---|---|---|
+| `web` | `pnpm build:pages` | `web/dist` | `dashboard-production` |
+| `admin` | `pnpm build:pages` | `admin/dist` | `admin-production` |
+| `site` | `pnpm build` | `site/dist` | `site-production` |
+| `docs` | `pnpm build` | `docs/out` | `docs-production` |
+
+<Callout type="warn" title="Configure GitHub before disabling automatic deployments">
+Each job reads public settings from its own **Pages > Settings > Environment variables > Production**. The dashboard requires `PEGASUSBOUND_API_URL`, `PEGASUSBOUND_APP_URL`, and `PEGASUSBOUND_TURNSTILE_KEY`; the admin panel requires `PEGASUSBOUND_API_URL`, `PEGASUSBOUND_DASHBOARD_URL`, and `PEGASUSBOUND_TURNSTILE_KEY`. Their remaining runtime keys, including analytics settings, are read from each app's entrypoint. The marketing site imports `PUBLIC_*` variables, and docs imports `NEXT_PUBLIC_*` variables. These values are shipped to browsers and must be plaintext Pages variables, not encrypted secrets. Missing required settings or encrypted public values fail before building. Unrelated variables and secrets are not imported.
+</Callout>
+
+1. In GitHub, open **Settings > Secrets and variables > Actions**. Under **Secrets**, add `CLOUDFLARE_API_TOKEN`. Create a Cloudflare custom API token with **Pages Read and Pages Write** (also called **Account > Cloudflare Pages > Edit**), restricted to the account containing your projects. No DNS or Workers permissions are needed.
+2. Under **Variables**, add:
+
+   | Variable | Value |
+   |---|---|
+   | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID containing the existing projects |
+   | `CLOUDFLARE_PAGES_PROJECTS` | A JSON array of app/project mappings, shown below |
+
+   ```json
+   [
+     { "app": "web", "project": "your-dashboard-project" },
+     { "app": "admin", "project": "your-admin-project" },
+     { "app": "site", "project": "your-marketing-project" },
+     { "app": "docs", "project": "your-docs-project" }
+   ]
+   ```
+
+   Use actual Pages project names, not custom domains. Add only the projects you want deployed. Multiple entries can build the same app for different projects, each using its own production settings. A project must appear only once. GitHub permits up to 256 matrix entries. The list must be a repository-level variable because the target list is resolved before deployment environments are loaded.
+
+   Existing single-dashboard setups can keep the repository variable `CLOUDFLARE_PAGES_PROJECT_NAME` instead. When `CLOUDFLARE_PAGES_PROJECTS` is set, it takes precedence.
+
+3. Optionally configure the GitHub deployment environments in the table above under **Settings > Environments**, with approvals if needed. Allow release tags such as `v*` if restricting deployment branches and tags. Account variables and the token can be environment-scoped instead; otherwise repository-level values are shared. Optional source-map uploads use `SENTRY_ORG`, the app-specific `SENTRY_PROJECT_WEB` or `SENTRY_PROJECT_ADMIN`, `POSTHOG_CLI_PROJECT_ID`, and `POSTHOG_CLI_HOST`, with the secrets `SENTRY_AUTH_TOKEN` and `POSTHOG_CLI_API_KEY`. Environment-scoped values allow different upload projects for each app. The Sentry release identity is the release tag. See [source maps](/development/configuration/#source-maps).
+
+4. For every listed Cloudflare project, go to **Workers & Pages > your project > Settings > Builds & deployments > Configure Production deployments**, uncheck **Enable automatic production branch deployments**, and save. Keep preview branch deployments enabled if you want PR previews, with their existing Pages build configuration. Do not switch or recreate projects as Direct Upload projects: Git-integrated projects also accept Wrangler uploads.
+5. In GitHub's **Settings > Secrets and variables > Actions > Variables**, set the **repository-level** variable `CLOUDFLARE_PAGES_DEPLOY_ENABLED` to `true`. This toggle must be repository-level because GitHub evaluates the job condition before loading environment-level variables.
+6. Publish the next stable release using the normal version-tag flow. In **Actions > Release**, confirm each **Deploy ... to Pages** job succeeds and every production deployment in Pages shows the release commit.
+
+The deployment is part of the existing release workflow, not a separate `release: published` workflow. Releases created with `GITHUB_TOKEN`, as this workflow does, do not trigger another release-event workflow.
+
+A Pages deploy hook would reuse Cloudflare's build configuration too, but it builds the latest commit on its configured branch. These jobs deliberately build the tagged release commit instead, so changes merged while a release is building cannot slip into production. Retries use the same release commit with the current Pages production configuration. Builds use the repository's scripts and output paths in the table, not arbitrary build commands stored in Cloudflare.
+
+Projects deploy independently, not atomically: one failed build or upload leaves that project's previous deployment live and does not cancel the other projects. After fixing the configuration, use **Re-run failed jobs** on that release run to retry the same release commit without creating another tag or rebuilding successful jobs. Do not retry an older release after a newer one has deployed unless you intend a rollback. To pause release uploads, set `CLOUDFLARE_PAGES_DEPLOY_ENABLED` to `false`; this leaves current deployments live and does not re-enable Cloudflare's automatic deployments. This workflow deploys only the listed static frontends; it does not deploy backend services.
+
+## Anything the control plane cannot know
+
+`pegasusbound join` writes `/etc/pegasusbound/node.env` from the control plane's answer and rewrites it on every join. Next to it, `/etc/pegasusbound/node.local.env` is created once and never written again, and the container reads it second, so a name repeated there wins.
+
+That is the place for a value this instance does not hold: a DSN kept in a secret manager rather than the environment, credentials for infrastructure of your own, a per-machine tuning knob.
+
+```bash
+printf 'PRIMARY_DB=%s\n' "postgres://..." >> /etc/pegasusbound/node.local.env
+systemctl restart pegasusbound-consumer
+```
+
+## Sizing the fleet
+
+A worker defaults to a planning target of `100` assigned mailboxes. Every assigned mailbox counts as one, regardless of provider or whether warmup is enabled.
+
+The target is a local planning value, not a sending quota or a tested maximum. Google and Microsoft enforce their sending and API limits per mailbox, tenant, or API project. Set `PEGASUSBOUND_WORKER_CAPACITY` in a machine's `/etc/pegasusbound/node.local.env` when benchmarks show that host should carry more or less than the conservative default, then restart the worker. Placement spreads mailbox counts, limits provider and tenant concentration, and keeps a mailbox on its existing worker when capacity allows so its provider sees a stable login address.
+
+Give NATS and Redis their own machine once you have more than one worker. Until then the control plane depends on a box that also runs a worker, and restarting that worker takes the bus with it.
+
+## What it costs
+
+A starting instance, with one machine running the bus and the first worker:
+
+| | Item | Monthly |
+|---|---|---|
+| Machines | One small VPS: bus, cache, first worker | ~$5 |
+| Cloud | Postgres, smallest burstable instance with 20 GB | $13-15 |
+| | KMS: one key plus requests, which Redis caches away | ~$1 |
+| | Object storage: a few GB | ~$0.20 |
+| | Platform mail: hundreds of messages | ~$0.05 |
+| Container host | The control plane's actual usage | $5-10 |
+| | **Total** | **~$25-32** |
+
+Two things move that number. A cloud account under twelve months old gets the smallest database instance free, which takes roughly $14 off. Turning on a standby doubles the database line, so leave it off at the start and take snapshots instead.
+
+The line that grows quietly is egress. Every query result and every message body a node reads crosses the internet, billed past the first 100 GB a month. It is invisible at launch and becomes the second-largest cloud line once mailbox sync is moving real volume.
+
+## Where things run out
+
+**One bus machine is one failure domain.** Nothing sends while it is down. Snapshots and a documented rebuild are the honest answer at this size; NATS clustering is the answer when the instance is worth more than the afternoon it costs.
+
+**The database is reachable from the internet.** That is what makes a container host and a fleet able to share it. Restrict the security group to the addresses that need it, force TLS, and treat the master password as the credential it is.
+
+**Auto-update covers nodes, not the control plane.** The backend is what tells every node which version to be, so it upgrades the way the rest of your container host does. Upgrade it, and the fleet follows.

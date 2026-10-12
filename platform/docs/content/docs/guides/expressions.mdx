@@ -1,0 +1,279 @@
+---
+title: "Personalization & Expressions"
+description: "Merge fields, conditionals, fallbacks, functions, spintax, and automation expressions: the templating language shared by campaign emails and automations."
+---
+
+Personalization lets you write one email that comes out tailored for every contact, using merge fields like `{{.FirstName}}`. The same language also powers automation conditions and action text, and needs no programming knowledge.
+
+## Personalize an email
+
+<Steps>
+
+<Step>
+
+In a campaign step's subject or body, type a merge field such as `{{.FirstName}}`.
+
+</Step>
+
+<Step>
+
+Give fields that may be empty a fallback: `{{.FirstName | default "there"}}`.
+
+</Step>
+
+<Step>
+
+Open the Preview to check it renders as expected, with no leftover `{{...}}` tokens.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- Field names are case-sensitive: `{{.FirstName}}` works, `{{.firstname}}` does not.
+- Unknown variables render empty rather than erroring.
+- Every `{{if}}` must close with `{{end}}`. A broken one blocks launching the campaign.
+- Spintax such as `{Hi|Hey|Hello}` varies wording in campaign subjects and bodies only.
+- Automations use the trigger's lowercase keys, such as `{{.contact_email}}`, still with the leading dot.
+
+<Fold>
+
+## What personalization is for
+
+Write one email and have it come out personalized for every contact, using merge fields like `{{.FirstName}}` plus helpers for fallbacks, conditions, and math. No programming knowledge needed; match the patterns below.
+
+</Fold>
+
+<Fold>
+
+## Quick reference
+
+| You want to | Write |
+| --- | --- |
+| Insert a first name | `{{.FirstName}}` |
+| Insert the sending mailbox's name | `{{.Sender.Name}}` |
+| Insert the actual From address | `{{.Sender.Email}}` |
+| Back up an empty field | `{{.FirstName \| default "there"}}` |
+| Branch on a condition | `{{if eq .Company "Acme"}}...{{else}}...{{end}}` |
+| Randomize wording (campaigns only) | `{a\|b\|c}` |
+| Filter an automation by a number | `gtf .confidence 0.8` |
+
+</Fold>
+
+<Fold>
+
+## Variables
+
+### Contact fields (campaigns)
+
+Exact names, **capitalized**, with a leading dot: `{{.FirstName}}`, `{{.LastName}}`, `{{.Email}}`, `{{.Company}}`, `{{.Phone}}`.
+
+```
+Hi {{.FirstName}}, I noticed {{.Company}} is hiring and wanted to reach out.
+```
+
+<Callout type="warn" title="Field names are case-sensitive">
+`{{.FirstName}}` works. `{{.firstname}}`, `{{.firstName}}`, and `{{.FIRSTNAME}}` do not, and leave an empty value or a leftover token in your email.
+</Callout>
+
+**Custom fields** work the same way with a dot: `{{.industry}}`, `{{.account_owner}}`. Names containing spaces or dashes also work as written (`{{if .job title}}...{{end}}`) and resolve everywhere, including inside conditions and helpers, because Pegasusbound rewrites them to an `index` lookup for you.
+
+### Sender fields (emails)
+
+`Sender` is a structured mailbox object. Use Go template field access, such as `{{.Sender.Name}}`, in the subject, HTML body or plain-text body:
+
+```
+Hi {{.FirstName}}, I'm {{.Sender.Name}} from our team.
+You can reach me at {{.Sender.Email}}.
+```
+
+Values come from the **mailbox actually sending that message**, including campaign sender rotation and A/B variants. Campaign test emails, placement tests and server previews use their selected mailbox. The campaign preview's **From** line uses the same identity. A local sample preview uses example data, not a live mailbox.
+
+`{{.Sender.Email}}` is the recipient-visible From address, including a configured send-as alias. `{{.Sender.MailboxEmail}}` is the underlying connected mailbox address. `{{.Sender.ReplyTo}}` is the explicit Reply-To header; it is empty when replies simply go to the sender.
+
+Every field is case-sensitive. Prefix each name below with `.Sender.`, for example `{{.Sender.Provider}}`:
+
+| Details | Fields |
+| --- | --- |
+| Identity | `Name`, `Email`, `MailboxEmail`, `SendAsEmail`, `ReplyTo`, `AvatarURL` |
+| Signature | `SignaturePlain`, `SignatureHTML`, `SignatureSync`, `SignatureCode` |
+| Connection | `Provider`, `Status`, `MailHost`, `AuthMethod`, `Vendor` |
+| Sending settings | `Timezone`, `CampaignLimit`, `MinWaitTime`, `SaveToSent`, `RelayFolderMoves`, `Tags` |
+| Tracking | `TrackingDomain`, `TrackingDomainVerified`, `TrackingDomainVerifiedAt`, `TrackDirectMail` |
+| Domain authentication | `AuthState`, `AuthSPF`, `AuthDKIM`, `AuthDMARC`, `AuthDMARCPolicy`, `AuthReason`, `AuthCheckedAt`, `AuthFailingSince` |
+| Warmup | `Warmup`, `WarmupPausedAt`, `WarmupBase`, `WarmupMax`, `WarmupIncrease`, `WarmupReplyRate`, `WarmupTag`, `WarmupPoolType`, `WarmupStartTime`, `WarmupEndTime`, `WarmupDays`, `WarmupPlacement`, `WarmupFolder`, `WarmupRetentionDays` |
+| Lifecycle | `LastSyncedAt`, `CreatedAt`, `UpdatedAt` |
+
+Limits, gaps, volumes, reply rate, days and retention are numbers. `MinWaitTime` is in seconds, `WarmupDays` is the configured sending-days bitmask, and `WarmupRetentionDays` is in days (zero uses the instance default). Flags such as `SignatureSync`, `SaveToSent` and `AuthSPF` are booleans, so use `{{if .Sender.SignatureSync}}...{{end}}`. `AuthDKIM` false means unverified, not that a DKIM record is missing. `Timezone` falls back to the workspace timezone; an empty timezone means UTC. Warmup/tracking settings are the stored mailbox settings, not inferred campaign overrides.
+
+Timestamps, including `Warmup` (when warmup was enabled), render as UTC RFC 3339 strings such as `2026-10-05T15:00:00Z`, or empty when unset. `Tags` is a list and supports native iteration:
+
+```
+{{range .Sender.Tags}}{{.}} {{end}}
+{{.Sender.Name | default "our team"}}
+```
+
+Without a selected mailbox, sender strings are empty, flags are false, numbers are zero and tags are empty. These fields are available in campaign and placement email rendering, not automation trigger data, deal names or inbox reply-template rendering. Unknown sender fields remain unresolved so previews can flag them. `Sender` is reserved and cannot be replaced by a contact custom field.
+
+<Callout title="Safe mailbox details only">
+Credentials, OAuth tokens, passwords, internal IDs, worker routing and sync cursors are never exposed. The object has no mailbox methods. If you insert `SignatureHTML` or `SignaturePlain` yourself, disable automatic signatures for that mailbox to avoid a duplicate sign-off.
+</Callout>
+
+### Trigger variables (automations)
+
+Automations carry the trigger's data rather than a contact's saved fields, keyed in lowercase and referenced with the required leading dot:
+
+```
+New reply from {{.contact_email}} on campaign {{.campaign_id}} ({{.intent}})
+```
+
+| Trigger | Variables |
+| --- | --- |
+| Reply received | `contact_email`, `contact_id`, `campaign_id`, `intent`, `confidence`, `subject`, `snippet` |
+| Contact created | `contact_email`, `contact_id`, `first_name`, `last_name`, `company`, `phone`, `subscribed`, `source`, `source_detail`, `custom_fields` (a map: `{{.custom_fields.industry}}`), `campaign_ids`, `category_ids` |
+| Form submitted | `contact_email`, `contact_id`, `first_name`, `last_name`, `company`, `phone`, `form_id`, `form_name`, `submission_id`, `source_url`, `campaign_id`, `data` (every answer by its key: `{{.data.team_size}}`) |
+| Meeting booked / rescheduled | `invitee_name`, `invitee_email`, `event_name`, `scheduled_for`, `join_url`, `source`, `contact_id` |
+| Meeting canceled | Same, without `join_url` |
+| Email bounced, Deliverability complaint | `contact_email`, `campaign_id`, `contact_id`, `event_type`, `provider`, `reason` |
+| Unsubscribed | `contact_email`, `contact_id`, `campaign_id`, `source` |
+| Warmup health changed | `email`, `new_state`, `previous_state`, `reason` |
+| Campaign action | `contact_email`, `contact_id`, `campaign_id`, `campaign_name`, `first_name`, `last_name`, `company`, `phone` |
+
+Action text is a **full template, not token substitution**: conditionals, pipelines, helpers, `{{range}}`, and nested fields (`{{.lead.company}}`) all work, and values keep their type. Because numbers stay numbers, `{{if gt .confidence 0.8}}` works directly in a message body. A malformed template never blocks the action; it falls back to plain `{{.key}}` substitution. Unknown keys render empty. `{{range}}` loops over a field of the data (`{{range .lead.tags}}`), never a number or a function's result, and nests at most two deep; `{{template}}` and `{{block}}` are not supported, and output is capped at 1 MB. A template past any of these limits falls back the same way.
+
+</Fold>
+
+<Fold>
+
+## Fallbacks
+
+Put the field first, then a pipe, then `default` and your backup in quotes:
+
+```
+Hi {{.FirstName | default "there"}},
+Hope things are going well at {{.Company | default "your company"}}.
+```
+
+</Fold>
+
+<Fold>
+
+## Conditionals
+
+`{{if}}` includes text only when something is true, `{{else}}` handles the other case, and every `{{if}}` must close with `{{end}}`.
+
+```
+{{if .Company}}I see you're at {{.Company}}.{{end}}
+{{if eq .Company "Acme"}}Great to connect with the Acme team.{{else}}Great to connect.{{end}}
+```
+
+`eq` is equals and `ne` is not-equals. Quote your text values.
+
+</Fold>
+
+<Fold>
+
+## Functions
+
+The same helpers work in campaign emails, automation conditions, and action text.
+
+| Math | Meaning | String | What it does |
+| --- | --- | --- | --- |
+| `add` `sub` `mul` `div` `mod` | Arithmetic | `lower` `upper` `title` | Change case |
+| `num a` | Force a value to a number | `trim` | Remove surrounding spaces |
+| | | `contains` | Contains, case-insensitive |
+| | | `hasPrefix` `hasSuffix` | Starts or ends with, case-sensitive |
+
+Division or modulo by zero returns 0 rather than erroring, so these never break an email.
+
+### Comparing numbers
+
+- **Native**: `gt`, `lt`, `ge`, `le`, `eq`, `ne` compare as-is, and work when the value is already a number (typical of automation data like `confidence`).
+- **Coercing**: `gtf`, `ltf`, `gef`, `lef` read both sides as numbers first. Use these when a value might be text (typical of contact custom fields).
+
+<Callout title="Rule of thumb">
+Comparing automation numbers? Native `gt` / `ge` works. Comparing a custom field or anything that might be text? Use the `f` versions so `"42"` reads as 42. When in doubt, the `f` versions are safe.
+</Callout>
+
+```
+{{if gtf .deal_size 10000}}Enterprise prospect{{end}}
+{{if hasSuffix .Email ".edu"}}As someone in academia, {{end}}I thought this might help.
+```
+
+</Fold>
+
+<Fold>
+
+## Spintax
+
+Alternatives in single braces separated by pipes, so a batch of sends does not look identical:
+
+```
+{Hi|Hey|Hello} {{.FirstName}}, {hope you're well|hope things are good}.
+```
+
+<Callout type="warn" title="Spintax rules">
+Campaign subject and body only; it does not run in automations. Use **single** braces, not the double braces of merge fields. Only groups containing a pipe count, so a brace run without one (CSS or JSON in an HTML email) is left exactly as written.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Advanced automation expressions
+
+For anything the visual picker cannot express. An expression passes when it renders to something truthy; it is **false** when empty, `false`, `0`, `no`, `off`, or `<no value>`, and a broken expression is false rather than silently passing.
+
+Write it bare (recommended) or as a full template when you need `{{else}}`:
+
+```
+gt .confidence 0.8
+{{if gt .confidence 0.8}}yes{{end}}
+```
+
+```
+and (gtf .confidence 0.8) (eq .intent "positive")
+or (eq .intent "positive") (eq .intent "neutral")
+not (eq .intent "negative")
+hasSuffix .contact_email "@acme.com"
+```
+
+`and`, `or`, and `not` take whole tests as inputs, so wrap each in parentheses when mixing groups.
+
+</Fold>
+
+<Fold>
+
+## Where each thing applies
+
+| Surface | Variables | Conditionals / functions | `default` | Spintax |
+| --- | --- | --- | --- | --- |
+| Campaign subject & body | Contact fields | Yes | Yes | Yes |
+| Automation condition | Trigger keys | Yes | Yes | No |
+| Automation action text | Trigger keys, with the dot | Yes | Yes | No |
+
+</Fold>
+
+<Fold>
+
+## Gotchas
+
+- Standard fields are case-sensitive: `{{.FirstName}}`, not `{{.firstname}}`.
+- `{a|b}` is spintax (campaigns only); `{{...}}` is a variable, condition, or function.
+- Always close `{{if}}` with `{{end}}`, and quote text values.
+- If a comparison on a custom field behaves oddly, switch `gt`/`lt` to `gtf`/`ltf`, or wrap the value in `num`.
+- Unknown variables render empty rather than erroring. A leftover `{{...}}` usually means a typo or wrong capitalization.
+- In action text keep the leading dot. It is standard Go `text/template`, so a bare `{{contact_email}}` is invalid.
+
+</Fold>
+
+<Fold>
+
+## Preview and validation
+
+**Campaigns**: the composer's live Preview renders against a sample contact exactly as the real send does (variables, conditionals, functions, then spintax). It flags errors like a broken `{{if}}`, which block launching, and unresolved tokens left after rendering.
+
+**Automations**: an advanced expression is validated on save, so a condition that does not parse cannot be saved. The **Reference** button lists every variable and function inline.
+
+</Fold>

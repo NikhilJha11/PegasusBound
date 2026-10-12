@@ -1,0 +1,27 @@
+# pnpm 11+ moved settings out of package.json. This is its new home.
+# Trust the install-time build scripts of these packages so pnpm doesn't
+# refuse to run them. esbuild is pulled in transitively by vite/vitest
+# and needs to compile its native binary at install time.
+allowBuilds:
+  # The Sentry Vite plugin shells out to @sentry/cli, so its install script
+  # (which fetches the binary) has to run or the optional source-map upload
+  # has nothing to invoke.
+  '@sentry/cli': true
+  # posthog-js pulls core-js in transitively; its postinstall only prints a
+  # funding banner, so there is nothing to run.
+  core-js: false
+  esbuild: true
+
+# Overrides used to live under `pnpm.overrides` in package.json but
+# pnpm 11 ignores that block, which broke the web container's install
+# (rolldown-vite was being requested as plain `vite@7.1.14`, which doesn't
+# exist on the registry).
+overrides:
+  picomatch: ^4.0.4
+  # Floor transitive dependencies at their patched releases.
+  linkify-it: ^5.0.2
+  js-yaml: ^4.3.1
+  nanoid: ^3.3.17
+  dompurify: ^3.4.16
+  seroval: ^1.6.3
+  source-map-js: ^1.2.2

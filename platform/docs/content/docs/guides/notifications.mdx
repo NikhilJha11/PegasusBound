@@ -1,0 +1,153 @@
+---
+title: "Notifications"
+description: "In-app notification feed and per-category preferences."
+---
+
+The bell in the dashboard shows your unread notifications, such as bounces, spam complaints, worker downtime and billing alerts. Each person chooses which ones they get and how.
+
+## Choose your notifications
+
+<Steps>
+
+<Step>
+
+Open **Settings > Notifications**.
+
+</Step>
+
+<Step>
+
+Turn each category on or off. Changes save automatically.
+
+</Step>
+
+<Step>
+
+Under Email delivery, pick how often unread notifications are emailed to you.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- Feeds are per user, not shared across the workspace.
+- Health alerts are on by default. **Reply received** is off by default, so a large campaign does not flood the feed.
+- Nothing is emailed the moment it happens: unread notifications go out as one bundled email, every 30 minutes by default.
+- Anything you read in the dashboard before the email goes out is never emailed.
+- Every reply still lands in the [Unibox](/guides/unibox/), even with reply notifications off.
+
+<Fold>
+
+## How the bell and feed work
+
+The bell in the dashboard chrome shows your unread count. Every time you open it, it starts on **Unread**, showing only notifications you have not read, newest first. If there is nothing new, it shows "You're all caught up." Switch to **All** to see recent history, including items already read. Each notification has a title, optional detail, and a link to the thing it is about. Reading one clears it from **Unread** and the count.
+
+**Feeds are per user**, not shared across the workspace, so two teammates see different things depending on what they own and what they enabled.
+
+The feed floats above the dashboard instead of being clipped by the header or page. It stays within the screen on narrow displays, with the list scrolling while its filters and settings link remain accessible. Press outside it, press Escape, or open another dashboard menu to close it.
+
+<Callout type="info" title="Realtime by default">
+The feed and the bell count update live, without refreshing.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Categories and defaults
+
+| Category | Group | Default | Raised when |
+| --- | --- | --- | --- |
+| Bounce detected | Health | On | A campaign starts bouncing |
+| Spam complaint | Health | On | A complaint lands on a campaign |
+| Worker downtime | Health | On | A sender worker stops responding |
+| Mail that needs action | Health | On, including email | [Automatic inbox tagging](/guides/inbox-tagging/#mail-that-needs-your-action) found automated mail in a mailbox that needs someone to act, such as a failed payment, a suspended account or a suspicious sign-in |
+| Campaign auto-paused | Health | On, including email | An [auto-pause guardrail](/guides/campaigns/) stopped a campaign |
+| Placement monitor alert | Health | On, including email | A campaign's scheduled [placement test](/guides/placement-tests/#campaign-placement-monitors) landed less of its mail in the primary inbox than the monitor's threshold |
+| Placement test finished | Health | On | A [placement test](/guides/placement-tests/) you started has a verdict for every copy |
+| New sign-in | Security | On | Your account is accessed from a new device, with browser, OS, and rough location |
+| Billing alerts | Billing | On, including email | A trial expired or sending was paused for billing |
+| Teammate joined | Team | On | Someone accepted an invitation |
+| Reply received | Inbound | Off | A recipient replied to a cold email |
+| Out-of-office detected | Inbound | Off | An auto-responder hit one of your sends |
+
+Health defaults **on** because those alerts are operationally important and low volume. Inbound defaults **off** because a large campaign would generate one notification per recipient and flood the feed. Turn **Reply received** on only for smaller, higher-touch campaigns.
+
+<Callout type="info" title="Who gets notified">
+Workspace events never fan out to everyone. Reply and bounce alerts go to the owner of the mailbox or campaign, worker downtime to members who can manage mailboxes, mailbox mail that needs action to members who can both manage mailboxes and use the inbox, a finished placement test to whoever started it, a placement monitor alert to members who can view campaigns, billing to those who can manage billing, and team changes to those who can manage the team. The person who joined is not notified about themselves.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Notifications about a message follow it
+
+A **Reply received**, **Out-of-office detected** or **Mail that needs action** notification is about one message in the [Unibox](/guides/unibox/), and it stays in step with it:
+
+- **Clicking it opens that conversation**, not the inbox in general.
+- **Reading the message reads the notification**, wherever you read it: in the Unibox, through the API, or in Gmail or Outlook, which Pegasusbound picks up on the next sync. A notification read this way is not emailed later either.
+- **Removing the message removes the notification.** Deleted mail, and mail later confirmed to be [warmup](/guides/warmup/), takes its notification out of the feed and the bell count. Warmup never raises one in the first place; this covers anything identified after it arrived. A push or Slack message already delivered cannot be recalled.
+- **Routine automated mail is not a reply.** DMARC aggregate reports, delivery failures and other system notices do not raise **Reply received** or **Out-of-office detected** alerts. If a message is identified as routine automated mail later, its false reply alert disappears from the feed and bell count, and its pending email is cancelled. Genuine out-of-office and automatic replies still use **Out-of-office detected** when enabled. Automated mail that needs your action keeps its separate **Mail that needs action** alert, and bounce and domain-authentication health alerts are unchanged.
+
+<Callout type="info" title="Where to read replies">
+Even with reply notifications off you never miss anything: every reply still lands in the [Unibox](/guides/unibox/). The notification is only an optional ping.
+</Callout>
+
+Toggle each category under **Settings > Notifications**. Changes save automatically.
+
+</Fold>
+
+<Fold>
+
+## Channels
+
+| Channel | Behavior |
+|---------|----------|
+| **In-app** | The bell. Always on, governed by the category toggles |
+| **Mobile push** | iOS app devices, registered automatically when you allow notifications. Batched: the first alert in a quiet stretch goes immediately, and anything inside the window (five hours by default) is held and sent as one summary like "3 new replies" |
+| **Email** | Your account email, batched by the digest rules below |
+| **Slack** | Posts to the workspace's connected Slack: the channel set for that category, else the default channel, both chosen under [Slack](/guides/slack/#notifications). A notification for several teammates is posted once. If you linked your Slack account and turned on personal DMs, you also get it as a DM from the bot. With no channel set the toggle still saves, and only personal DMs are delivered. To have every reply posted to a channel as a thread the team can answer from, use the [inbox channel](/guides/slack/#inbox-in-slack) instead |
+
+</Fold>
+
+<Fold>
+
+## Email digest
+
+Nothing is emailed the moment it happens. Three rules govern what reaches your inbox:
+
+- **Read means no email.** Anything you read in the dashboard or mobile app before the hold expires is never emailed, so living in the dashboard keeps this channel almost silent.
+- **One email, not a stream.** When the hold expires, everything still unread goes out as one bundled email with links back into the app.
+- **Shared events share one email.** An event concerning several teammates (a worker outage, a trial expiring) sends one email with everyone in To, so each person sees who else was told.
+
+Pick the window under **Settings > Notifications**, Email delivery: presets from every 30 minutes up to once a day, default 30 minutes. **There is deliberately no per-event option**, so the email channel can never become one email per alert.
+
+Security sign-in alerts ignore the window and always send immediately.
+
+Notification emails carry only text Pegasusbound wrote or your workspace chose. A reply or auto-reply email names who wrote but leaves out the subject they gave it, which the dashboard and mobile feed still show, and a campaign name that reads as a web address or an email address appears as "A campaign".
+
+Each person also has a rolling 24-hour budget of notification emails (25 by default, configurable when self-hosting). Past it, alerts stay in the feed. With bundling, normal use never approaches this.
+
+For event-specific routing with custom messages, branching, or multiple destinations, use [Automations](/guides/automations/) instead.
+
+</Fold>
+
+<Fold>
+
+## Tips
+
+- Leave the three health categories on. They stay quiet unless something is genuinely wrong.
+- A rising count of **Bounce** or **Spam complaint** entries is your cue to open [Deliverability](/guides/deliverability/) and find the campaign behind it.
+- Preferences are per user, so if a teammate is not seeing alerts you expect them to act on, check their own settings.
+
+</Fold>
+
+## Related guides
+
+<Cards>
+  <Card title="Deliverability" href="/guides/deliverability/" />
+  <Card title="Unibox" href="/guides/unibox/" />
+  <Card title="Automations" href="/guides/automations/" />
+</Cards>

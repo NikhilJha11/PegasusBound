@@ -1,0 +1,32 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import Photo from '../components/Photo.astro';
+
+const links = [
+  { t: 'Warmup', href: '/warmup/' },
+  { t: 'Campaigns', href: '/campaigns/' },
+  { t: 'Pricing', href: '/pricing/' },
+  { t: 'Blog', href: '/blog/' },
+];
+---
+<Layout title="Page Not Found | Pegasusbound" description="The page you are looking for does not exist." noIndex>
+  <section class="container-page pt-14 md:pt-24 pb-20 md:pb-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1fr_1fr] lg:gap-16">
+      <div>
+        <div class="font-mono text-[14px] text-slate-400">404</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">This page didn’t land.</h1>
+        <p class="mt-6 max-w-md text-[17px] md:text-[19px] leading-[1.55] text-slate-500">The page you are looking for doesn’t exist or has moved. These might help:</p>
+        <ul class="mt-8 flex flex-wrap gap-2">
+          {links.map((l) => <li><a href={l.href} class="inline-flex h-10 items-center rounded-full px-4 text-[15px] text-slate-700 ring-1 ring-slate-200 transition-colors hover:text-slate-900 hover:ring-slate-300">{l.t}</a></li>)}
+        </ul>
+        <a href="/" class="mt-10 inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+          <Icon name="arrowRight" size={14} class="rotate-180" /> Back to the home page
+        </a>
+      </div>
+      <div class="relative aspect-[4/3] overflow-hidden rounded-[6px] bg-slate-100">
+        <Photo name="lake-mist" priority sizes="(min-width: 1024px) 50vw, 100vw" class="absolute inset-0 h-full w-full object-cover" />
+      </div>
+    </div>
+  </section>
+</Layout>

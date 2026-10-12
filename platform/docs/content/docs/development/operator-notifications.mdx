@@ -1,0 +1,91 @@
+---
+title: Operator notifications
+description: Send instance events to Discord, Slack, a signed webhook, or an email address.
+---
+
+Your instance can tell you when something happens on it: a new signup, a worker going offline, a workspace asking for more capacity. Configure the destinations in the admin panel under **Instance > Configuration > Notifications**, also reachable from **Notifications** in the account menu at the bottom of the sidebar and from the `Cmd K` palette.
+
+These are operator alerts, not customer alerts. They are instance-wide and go to you. The per-workspace event delivery your customers configure is [Webhooks](/guides/webhooks/), which is a separate, queued and retried system.
+
+## Channels
+
+A channel is one destination. You can add up to 25.
+
+| Type | What to paste | Notes |
+| --- | --- | --- |
+| Discord | An incoming webhook URL | Server settings, then Integrations, then New Webhook |
+| Slack | An incoming webhook URL | Create a Slack app with an incoming webhook |
+| Webhook | Any HTTPS endpoint | Receives the event as JSON, optionally signed |
+| Email | An address | Needs a working platform mail transport |
+
+Each channel picks which events it wants. Leave every event unchecked and it receives all of them, including ones added in later versions, except **Admin signed in**, which goes only to a channel that ticks it.
+
+Use **Test** on a channel to deliver a sample alert immediately. A test ignores the channel's on/off switch and its event selection, so it always sends, and it reports the transport error directly when delivery fails.
+
+### URL safety
+
+Webhook URLs must be HTTPS and resolve to a publicly routable host. Inline credentials are rejected. This is the same posture customer webhooks use, and it exists so a notification channel cannot be pointed at your internal network.
+
+To point a channel at a host on your own network, set `PEGASUSBOUND_ALLOW_UNSAFE_WEBHOOK_URLS=true`. That also permits plain HTTP. Only do this on a deployment where you control the network.
+
+### Signing
+
+A `webhook` channel with a signing secret sends:
+
+```
+X-Pegasusbound-Signature: t=<unix>,v1=<hex>
+X-Pegasusbound-Event: <event key>
+```
+
+`v1` is `HMAC-SHA256(secret, "<unix>." + body)`, the same scheme as customer webhooks, so an existing verifier works unchanged. The body is:
+
+```json
+{
+  "event": "worker.offline",
+  "title": "Worker stopped responding",
+  "summary": "Some affected mailboxes were moved; the remaining mailboxes are paused.",
+  "severity": "urgent",
+  "fields": [{ "label": "Worker", "value": "…" }],
+  "link": "https://app.example.com",
+  "timestamp": "2026-01-01T00:00:00Z"
+}
+```
+
+### Credentials
+
+A chat webhook URL is a bearer credential: anyone holding it can post to that channel. The admin API never returns one in full. A saved channel reads back with its URL reduced to a host and the tail of its path, and its signing secret replaced by a placeholder. Sending those values back unchanged means "keep what is stored", so saving an unrelated toggle cannot wipe a credential. To change a URL or secret, type the new value in full.
+
+## Events
+
+| Event | Fires when |
+| --- | --- |
+| Enterprise inquiry submitted | Someone asks for enterprise pricing from the plan chooser |
+| Limit increase requested | A workspace asks for more capacity than its plan allows |
+| Payment failed | Stripe could not collect an invoice |
+| Workspace created | A new organization is created |
+| User registered | A new account finishes signing up |
+| Worker went offline | A worker stops heartbeating; the alert reports complete, partial, or failed recovery with moved and paused mailbox counts |
+| Persistent warmup loading failures | Repeated loading failures span at least an hour, the latest failure is under an hour old, and no later warmup send is confirmed |
+| Warmup dispatch is overdue | Active, sending-enabled mailboxes have pending warmup tasks at least an hour past their intended schedule; this is not a provider-error diagnosis |
+| Warmup ban appealed | A blocked mailbox asks to rejoin the warmup pool |
+| Workspace risk escalated | Risk scoring moves a workspace into a different posture |
+| Admin signed in | An account holding platform admin access starts a new session, in the admin panel or the dashboard. The alert names the account, sign-in method, whether a second factor was presented, the device (flagged when it is new), the location and the IP address. Sent only to channels that tick it |
+| Admin access changed | Admin permissions are granted to, changed for, or revoked from an account in the admin panel, with who made the change. Saving permissions unchanged sends nothing. A change made with `pegasusboundctl` on the server is not reported |
+
+A self-hosted instance is offered the subset that means something without billing, so the panel never lists an event that cannot fire there.
+
+Sign-in alerts are not deduplicated: every admin sign-in is reported, because an unexpected one is exactly what the alert exists to catch. A session re-issued after a password change is not a sign-in and is not reported.
+
+Worker and risk alerts are deduplicated: a worker that stays down does not re-alert for six hours, and a risk alert only fires on an actual change of posture.
+
+Warmup operations are checked every five minutes. Loading and overdue-dispatch alerts cover every active participating mailbox and aggregate affected mailbox, workspace and worker counts. Failures on the same worker share an alert. At least ten affected mailboxes across multiple worker assignments are reported as fleet-wide impact; unassigned mailboxes have a separate group. Each category and group has a shared Redis cooldown of six hours across backend replicas. Recovery stops further loading alerts when a later provider-confirmed send exists; stale loading observations do not keep an incident active forever. Overdue alerts stop once no matching pending task remains.
+
+The event keys are `warmup.worker_loading` and `warmup.dispatch_overdue`. Existing catch-all channels receive them automatically. Channels restricted to selected events must opt into the new events. If no destination is configured, there is no administrator message to deliver; configure one under **Instance > Configuration > Notifications**. Delivery remains best effort, like other operator alerts.
+
+The same deduplicated signals go through the central error reporter to configured PostHog/Sentry destinations, or local logs when neither is configured. Error tracking includes the category and aggregate counts/delay only, never mailbox addresses, credentials, message content or worker/workspace IDs. Operator destinations can include the affected worker ID for investigation. A Redis outage is recorded as a monitor failure rather than producing an undeduplicated alert on every retry. See [Configuration](/development/configuration/) for reporter settings.
+
+## Delivery behaviour
+
+Delivery is best effort and deliberately so. An alert never blocks or fails the request that produced it, and a chat server that is slow or unreachable is not allowed to slow the product down. There is no retry queue. If a channel is down when an event fires, that alert is lost.
+
+If alerts stop arriving, use **Test** first: it is synchronous and tells you exactly what the transport said.

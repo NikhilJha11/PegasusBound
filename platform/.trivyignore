@@ -1,0 +1,3 @@
+# Advisories Trivy should not fail on, one id per line. Each one needs a
+# written decision in the CASA evidence pack (kept outside this repository).
+# Nothing is listed today.

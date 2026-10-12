@@ -1,0 +1,193 @@
+// Workspace warmup placement on the deliverability page: inbox vs spam over
+// time, per recipient provider, and every mailbox ranked worst first.
+import { useMemo, type ReactNode } from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { browseBoolean, placementGroupFilter } from "@/lib/browse-accounts-analytics";
+import { useNavigate } from "@tanstack/react-router";
+import { ChevronRightIcon } from "lucide-react";
+import { EmptyBlock, SectionBar, Stat, StatStrip } from "@/components/layout/Page";
+import useWarmupPlacement from "@/lib/api/hooks/app/analytics/useWarmupPlacement";
+import type { PlacementGroup, PlacementMailbox } from "@/lib/api/models/app/analytics/WarmupPlacement";
+import { cn } from "@/lib/utils";
+import { BAND, GROUP_LABEL, GROUP_ORDER, bandForRate, fmtNum, fmtPct, otherHostsNote, rateSentence, totals, utcWindow, viewDays, type GroupFilter } from "./placement";
+import {
+    BandChip,
+    GroupFilterChips,
+    LandedLegend,
+    PlacementColumns,
+    PlacementRateBadge,
+    ProviderBreakdown,
+    RateSpark,
+    RateTrend,
+} from "./PlacementCharts";
+
+const PAGE = 25;
+
+export default function WarmupPlacementSection({ days }: { days: number }) {
+    const { from, to } = useMemo(() => utcWindow(days), [days]);
+    const q = useWarmupPlacement(undefined, from, to);
+    const report = q.data;
+    const [group, setGroup] = useBrowseState<GroupFilter>("deliverability.placement.group", "all", placementGroupFilter);
+    const [attentionOnly, setAttentionOnly] = useBrowseState("deliverability.placement.attentionOnly", false, browseBoolean);
+    const [showAll, setShowAll] = useBrowseState("deliverability.placement.showAll", false, browseBoolean);
+    const navigate = useNavigate();
+
+    const groups = useMemo<PlacementGroup[]>(
+        () => GROUP_ORDER.filter((g) => report?.providers.some((p) => p.group === g && (p.observed_receipts ?? p.delivered) > 0)),
+        [report],
+    );
+    const activeGroup: GroupFilter = group !== "all" && !groups.includes(group) ? "all" : group;
+    const view = useMemo(
+        () => (report ? viewDays(report.daily, activeGroup, report.rate.min_sample, report.rate.window_days) : []),
+        [report, activeGroup],
+    );
+    const t = useMemo(() => totals(view), [view]);
+
+    const mailboxes = report?.mailboxes ?? [];
+    const attention = mailboxes.filter((m) => m.rate.band === "poor" || m.rate.band === "fair");
+    const listed = attentionOnly ? attention : mailboxes;
+    const shown = showAll ? listed : listed.slice(0, PAGE);
+
+    if (q.isPending) {
+        return (
+            <>
+                <SectionBar label="Warmup inbox placement" />
+                <div className="px-5 py-4">
+                    <div className="h-[180px] rounded-md bg-slate-50 animate-pulse" />
+                </div>
+            </>
+        );
+    }
+    if (!report || (report.summary.observed_receipts ?? report.summary.delivered) === 0) {
+        return (
+            <>
+                <SectionBar label="Warmup inbox placement" />
+                <EmptyBlock
+                    title={q.isError ? "Couldn't load warmup placement" : "No warmup receipts observed in this window"}
+                    body="Partner mailbox observations are separate from connector submissions. No observations does not prove delivery failure."
+                />
+            </>
+        );
+    }
+
+    const rate = report.rate;
+    const filtered = activeGroup !== "all";
+
+    return (
+        <>
+            <SectionBar label="Warmup inbox placement">
+                <GroupFilterChips value={activeGroup} onChange={setGroup} groups={groups} className="max-w-full" />
+            </SectionBar>
+
+            <StatStrip cols={5}>
+                <Stat
+                    label="Non-spam share · 7 days"
+                    value={<span className={BAND[rate.band].text}>{rate.inbox_rate != null ? fmtPct(rate.inbox_rate) : "—"}</span>}
+                    sub={rate.inbox_rate != null ? (otherHostsNote(rate, true) ?? BAND[rate.band].label) : rateSentence(rate)}
+                />
+                <Stat
+                    label="Non-spam share · window"
+                    value={<span className={BAND[bandForRate(t.inboxRate)].text}>{fmtPct(t.inboxRate)}</span>}
+                    sub={filtered ? `at ${GROUP_LABEL[activeGroup]}` : `${fmtNum(t.inbox)} primary · ${fmtNum(t.tabs)} tabs`}
+                />
+                <Stat label="Classified receipts" value={t.delivered} sub={filtered ? "sends are not split by provider" : `of ${fmtNum(t.sent)} submissions`} />
+                <Stat
+                    label="Spam"
+                    value={<span className={t.spam > 0 ? "text-rose-600" : undefined}>{fmtNum(t.spam)}</span>}
+                    sub={`${fmtPct(t.spamRate)} · ${fmtNum(t.rescued)} rescue requests`}
+                />
+                <Stat label="Unconfirmed" value={filtered ? "—" : t.unconfirmed} sub="sent 24h+ ago, not seen yet" last />
+            </StatStrip>
+            <p className="px-5 py-3 text-[11.5px] text-slate-500 leading-relaxed">
+                Controlled partner observations, not real-customer inbox probability. Unclassified receipts:
+                {report.summary.unknown == null ? " unavailable on this API version" : ` ${fmtNum(report.summary.unknown)} unknown, ${fmtNum(report.summary.archived)} archive, ${fmtNum(report.summary.custom)} custom folder`}.
+                {report.summary.legacy_uninstrumented_receipts != null && ` ${fmtNum(report.summary.legacy_uninstrumented_receipts)} historical receipts lack first-observation instrumentation.`}
+                {!filtered && report.summary.non_spam_metric && ` Non-spam numerator/denominator: ${report.summary.non_spam_metric.numerator}/${report.summary.non_spam_metric.denominator} classified receipts.`}
+                {!filtered && report.summary.non_spam_metric?.wilson_95_independence_interval && ` Independence-based Wilson 95% interval: ${fmtPct(report.summary.non_spam_metric.wilson_95_independence_interval.lower)} to ${fmtPct(report.summary.non_spam_metric.wilson_95_independence_interval.upper)}. Repeated observations are correlated; this is not causal efficacy evidence.`}
+            </p>
+
+            <div className="grid lg:grid-cols-2 border-b border-slate-200/60">
+                <div className="px-5 py-4 lg:border-r lg:border-slate-200/60">
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                        <Eyebrow>Where warmup mail landed</Eyebrow>
+                        <LandedLegend />
+                    </div>
+                    <PlacementColumns days={view} height={140} />
+                </div>
+                <div className="px-5 py-4">
+                    <div className="mb-3">
+                        <Eyebrow>Non-spam share over time</Eyebrow>
+                    </div>
+                    <RateTrend days={view} windowDays={rate.window_days} height={130} />
+                </div>
+            </div>
+
+            <SectionBar label="Warmup placement by provider" count={report.providers.length || undefined} />
+            <ProviderBreakdown providers={report.providers} browseScope="deliverability.placement" />
+            <p className="px-5 py-3 text-[11.5px] text-slate-500 leading-relaxed border-t border-slate-200/60">
+                Warmup partner selection reads these numbers per mail host: a mailbox landing in spam at one host is sent
+                fewer partners there while the rate stays high, and more again once it recovers. It is never cut off
+                entirely, because a sender that stops mailing a host can never find out that it recovered.
+            </p>
+
+            <SectionBar label="Mailboxes by inbox rate" count={listed.length || undefined}>
+                <button
+                    type="button"
+                    onClick={() => setAttentionOnly((v) => !v)}
+                    className={cn(
+                        "h-6 px-2 rounded text-[11px] font-medium transition-colors border",
+                        attentionOnly ? "bg-amber-50 text-amber-700 border-amber-200" : "text-slate-500 border-slate-200 hover:text-slate-900",
+                    )}
+                >
+                    Below 90% only{attention.length > 0 ? ` · ${attention.length}` : ""}
+                </button>
+            </SectionBar>
+            {listed.length === 0 ? (
+                <EmptyBlock
+                    title={attentionOnly ? "Every mailbox is at 90% or better" : "No mailbox had warmup deliveries in this window"}
+                    body="Mailboxes are ranked by their inbox rate over the last 7 days, worst first."
+                />
+            ) : (
+                <div className="divide-y divide-slate-200/60">
+                    {shown.map((m) => (
+                        <MailboxRow key={m.email_account_id} m={m} onOpen={() => navigate({ to: "/app/emails", search: { mailbox: m.email_account_id, tab: "deliverability" } })} />
+                    ))}
+                    {listed.length > PAGE && (
+                        <button
+                            type="button"
+                            onClick={() => setShowAll((v) => !v)}
+                            className="w-full h-9 text-[11.5px] text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition-colors"
+                        >
+                            {showAll ? "Show fewer" : `Show all ${listed.length}`}
+                        </button>
+                    )}
+                </div>
+            )}
+        </>
+    );
+}
+
+function MailboxRow({ m, onOpen }: { m: PlacementMailbox; onOpen: () => void }) {
+    return (
+        <button type="button" onClick={onOpen} className="group w-full h-11 px-5 flex items-center gap-3 text-left hover:bg-slate-50/80 transition-colors">
+            <span className={cn("size-1.5 rounded-full shrink-0", BAND[m.rate.band].dot)} />
+            <span className="text-[12.5px] font-medium text-slate-900 truncate min-w-0 flex-1">{m.email}</span>
+            <span className="hidden md:block" title="Daily inbox rate in this window">
+                <RateSpark values={m.daily_inbox_rate} />
+            </span>
+            <span className="hidden sm:flex items-center gap-3 font-mono text-[11px] tabular-nums text-slate-500 shrink-0">
+                <span title="Classified receipts in this window" className="w-16 text-right">{fmtNum(m.delivered)} obs</span>
+                <span title="Spam in this window" className={cn("w-14 text-right", m.spam > 0 ? "text-rose-600" : "text-slate-400")}>{fmtNum(m.spam)} spam</span>
+            </span>
+            <span className="w-12 text-right shrink-0">
+                <PlacementRateBadge rate={m.rate} />
+            </span>
+            <BandChip band={m.rate.band} className="hidden lg:inline-flex w-[118px] justify-center" />
+            <ChevronRightIcon className="w-3.5 h-3.5 text-slate-300 group-hover:text-slate-500 shrink-0" />
+        </button>
+    );
+}
+
+function Eyebrow({ children }: { children: ReactNode }) {
+    return <span className="text-[10px] uppercase tracking-[0.14em] text-slate-400 font-medium">{children}</span>;
+}

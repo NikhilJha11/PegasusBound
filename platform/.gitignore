@@ -1,0 +1,120 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+#
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/consumer
+/worker
+/backend
+/seed
+/migrate
+/updater
+/pegasusboundctl
+/pegasusbound
+/cli
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Dependency directories (remove the comment below to include it)
+vendor/
+
+# Local CLI builds (make pegasusbound / make pegasusbound-dist)
+/bin/
+/dist/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+# Editor/IDE
+.idea/
+.vscode/
+
+# MacOS
+.DS_Store
+# AppleDouble sidecars, created whenever the repo lives on a non-HFS volume
+._*
+
+# Geo Location
+*.mmdb
+
+# MCP servers
+.mcp.json
+
+# Local Go build cache
+.gocache/
+
+# Node dependencies (per-tree .gitignores cover admin/site/docs/web; this
+# also catches a stray root-level install / pnpm store)
+node_modules/
+
+# Local pnpm store created by dockerized frontend installs
+web/.pnpm-store/
+
+# Astro generated types. site/ ignores its own; this catches an astro run
+# from the repo root, which writes them here instead.
+/.astro/
+
+# Stray root-level Node install (every frontend tree owns its own manifest
+# and lockfile; there is no root workspace).
+/package.json
+/pnpm-lock.yaml
+
+# Local worktree tooling config
+/paseo.json
+
+# Temp/test output directories
+.tmp-tests/
+test-results/
+web/.tmp/
+
+# air (dev hot-reload) build artifacts. The dev container writes its
+# rebuilt Go binaries to /app/tmp/main, which is the bind-mounted
+# worktree — so they show up here on the host.
+tmp/
+build-errors.log
+
+# AI assistant local state
+.claude/
+.claude.json
+.aider*
+.cursor/
+.cursorrules
+.cursorignore
+.windsurfrules
+.windsurf/
+.continue/
+.codeium/
+.copilot/
+.gemini/
+.codex/
+.zed/
+.roo/
+.cline/
+
+# Xcode per-user state (ios/)
+xcuserdata/
+.DS_Store
+/.worktrees/
+
+# The CASA evidence pack lives outside this repository on purpose: it maps every
+# control to its file and lists the advisories still open. See AGENTS.md.
+compliance/
+.dev-credentials
+.demo-credentials
+docker-compose.local.yml
+.env.local

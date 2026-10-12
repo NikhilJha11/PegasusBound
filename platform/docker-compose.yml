@@ -1,0 +1,767 @@
+# Pegasusbound: truly local, no-cloud self-host stack.
+#
+#   docker compose up --build
+#
+# Brings up the whole platform with NO cloud account of any kind: no AWS, no
+# GCP, no Stripe, no Kafka, no Astra. One command, everything local:
+#
+#   Postgres   relational store
+#   Redis      cache + realtime pub/sub bridge
+#   NATS       event bus (JetStream); a single ~15MB binary, not Kafka+ZK+SR
+#   backend    API (:8080), applies migrations on boot
+#   consumer   event consumer
+#   worker     send/sync executor (add more for scale; see docs)
+#   tracking   open/click pixels (:3000)
+#   realtime   websocket fanout (:4000)
+#   web        dashboard (:5173)      admin: control panel (:5174)
+#   mailpit    local SMTP sink + web UI (:18025) for testing outbound mail
+#
+# Providers (all local): EVENTBUS_PROVIDER=nats, KMS_PROVIDER=local,
+# BLOB_PROVIDER=filesystem, TASKS_PROVIDER=local, CODEC_PROVIDER=json,
+# BILLING_PROVIDER=none, CAPTCHA_PROVIDER=none, PUBSUB_ENABLED=false.
+#
+# ONE .env NEXT TO THIS FILE CONFIGURES EVERYTHING. Every variable below is
+# ${VAR:-default}, so an absent or empty .env still boots the full no-cloud
+# stack and you set only what you want to change. Copy deploy/config/env.example
+# to .env as a starting point.
+#
+# For a real deployment set at least:
+#   AUTH_SECRET, KMS_LOCAL_MASTER_KEY (base64 32 bytes; `make gen-key`),
+#   CREDENTIALS_ENCRYPTION_KEY (64 hex), INTERNAL_API_TOKEN, SECRET_KEY_BASE,
+#   plus BOX_GOOGLE_* / BOX_OUTLOOK_* to connect Gmail/Microsoft mailboxes.
+#
+# LOSING KMS_LOCAL_MASTER_KEY OR CREDENTIALS_ENCRYPTION_KEY IS UNRECOVERABLE:
+# every stored mailbox credential is sealed with them. Back them up.
+#
+# To run on Kafka + S3 instead, set the provider vars above and rebuild the Go
+# images with --build-arg GO_TAGS=kafka (tracking: --build-arg CARGO_FEATURES=kafka).
+#
+# EVERY APP SERVICE CARRIES BOTH image: AND build:, so this one file serves both
+# installs. `docker compose pull && docker compose up -d` runs the published
+# release images and compiles nothing; `docker compose up --build` still builds
+# from this checkout. Pin a release with PEGASUSBOUND_TAG=v1.4.2 in .env, or point
+# PEGASUSBOUND_IMAGE_PREFIX at your own registry.
+#
+# EVERY STORE'S VOLUME SOURCE IS A VARIABLE. Compose reads a source starting
+# with / or . as a bind mount and anything else as a named volume, so
+# PEGASUSBOUND_PG_DATA=/mnt/ssd/pegasusbound/postgres puts the database on a path you can
+# rsync and snapshot, while the default keeps the named volume. The full set is
+# PEGASUSBOUND_PG_DATA, PEGASUSBOUND_REDIS_DATA, PEGASUSBOUND_NATS_DATA, PEGASUSBOUND_BLOBS,
+# PEGASUSBOUND_WORKER_STATE and PEGASUSBOUND_UPDATER_STATE.
+
+# Everything below is overridable from a single .env next to this file. The
+# defaults are the no-cloud stack, so an empty .env still boots; set only what
+# you want to change. See docs.pegasusbound.com/development/deployment-guide/.
+x-selfhost-env: &selfhost-env
+  APP_ENV: ${APP_ENV:-dev}
+  AWS_CONFIG_ENABLED: ${AWS_CONFIG_ENABLED:-false}
+  # Both are read by the published-default-secrets check. Without the
+  # passthrough it could neither detect SECRET_KEY_BASE nor be overridden.
+  SECRET_KEY_BASE: ${SECRET_KEY_BASE:-local-development-secret-key-base-minimum-64-characters-for-phoenix}
+  ALLOW_INSECURE_DEFAULTS: ${ALLOW_INSECURE_DEFAULTS:-}
+
+  # Event bus + serialization. Kafka needs images built with GO_TAGS=kafka.
+  EVENTBUS_PROVIDER: ${EVENTBUS_PROVIDER:-nats}
+  NATS_URL: ${NATS_URL:-nats://nats:4222}
+  CODEC_PROVIDER: ${CODEC_PROVIDER:-json}
+  KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-}
+  KAFKA_SASL_USERNAME: ${KAFKA_SASL_USERNAME:-}
+  KAFKA_SASL_PASSWORD: ${KAFKA_SASL_PASSWORD:-}
+  SCHEMA_REGISTRY_URL: ${SCHEMA_REGISTRY_URL:-}
+
+  # Encryption. Back up both keys; losing them is unrecoverable.
+  KMS_PROVIDER: ${KMS_PROVIDER:-local}
+  KMS_LOCAL_MASTER_KEY: ${KMS_LOCAL_MASTER_KEY:-Xr0JA7gqF2POy29a7MRByyqddivTNt8WOyKsOXklazk=}
+  KMS_AWS_KEY_ID: ${KMS_AWS_KEY_ID:-}
+  CREDENTIALS_ENCRYPTION_KEY: ${CREDENTIALS_ENCRYPTION_KEY:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}
+
+  # Blob storage. s3 also needs BLOB_BUCKET + the AWS_* values below.
+  BLOB_PROVIDER: ${BLOB_PROVIDER:-filesystem}
+  BLOB_FS_ROOT: ${BLOB_FS_ROOT:-/data/blobs}
+  BLOB_BUCKET: ${BLOB_BUCKET:-}
+  BLOB_PUBLIC_BASE_URL: ${BLOB_PUBLIC_BASE_URL:-${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}/public}
+  AWS_REGION: ${AWS_REGION:-}
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_ENDPOINT_URL_S3: ${AWS_ENDPOINT_URL_S3:-}
+
+  TASKS_PROVIDER: ${TASKS_PROVIDER:-local}
+  PUBSUB_ENABLED: ${PUBSUB_ENABLED:-false}
+
+  # Billing. stripe requires all three keys or the backend exits at boot.
+  BILLING_PROVIDER: ${BILLING_PROVIDER:-none}
+  STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+  STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+  STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+
+  # Captcha. Set both to turn Turnstile on. The site key also lets hosted
+  # form pages render the widget when a form enables spam protection.
+  CAPTCHA_PROVIDER: ${CAPTCHA_PROVIDER:-none}
+  TURNSTILE_SECRET: ${TURNSTILE_SECRET:-}
+  TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+
+  # Hosted forms. The public host routed to the forms service; share links
+  # and embed codes point here. Unset leaves forms without a public URL.
+  FORMS_DOMAIN: ${FORMS_DOMAIN:-}
+
+  # Deployment mode. Picks the auth defaults below; every one stays
+  # individually overridable.
+  DEPLOYMENT_MODE: ${DEPLOYMENT_MODE:-self_hosted}
+
+  # ── Platform email (login codes, resets, invitations, digests) ──────────
+  #
+  # log is the default so a fresh install can complete first login with no
+  # relay: the code is printed to `docker compose logs backend`. Switch to smtp
+  # before anyone else uses this instance.
+  #
+  #   MAIL_TRANSPORT=smtp
+  #   SMTP_HOST=smtp.example.com  SMTP_USERNAME=...  SMTP_PASSWORD=...
+  #
+  # SMTP_SECURITY is starttls (587), tls (implicit, 465) or none (a local sink
+  # only). The port defaults per mode, and credentials are never sent over an
+  # unencrypted connection.
+  MAIL_TRANSPORT: ${MAIL_TRANSPORT:-log}
+  EMAIL_NAME: ${EMAIL_NAME:-Pegasusbound}
+  EMAIL_ADDRESS: ${EMAIL_ADDRESS:-noreply@localhost}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-}
+  SMTP_USERNAME: ${SMTP_USERNAME:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+  SMTP_SECURITY: ${SMTP_SECURITY:-}
+  SMTP_AUTH: ${SMTP_AUTH:-auto}
+  SMTP_EHLO_NAME: ${SMTP_EHLO_NAME:-}
+  SMTP_TLS_INSECURE_SKIP_VERIFY: ${SMTP_TLS_INSECURE_SKIP_VERIFY:-false}
+
+  # ── Auth policy ────────────────────────────────────────────────────────
+  #
+  # AUTH_LOGIN_CODE is always, new_device or off. Self-host defaults to off:
+  # emailing a code on every login makes the relay a single point of failure
+  # for all authentication, and neither NIST SP 800-63B nor OWASP ASVS counts
+  # email as a second factor. TOTP and passkeys both remain available.
+  AUTH_LOGIN_CODE: ${AUTH_LOGIN_CODE:-}
+  REQUIRE_EMAIL_VERIFICATION: ${REQUIRE_EMAIL_VERIFICATION:-}
+  # true | false | invite_only. Self-host defaults to invite_only, with a
+  # first-launch exemption so the very first signup always works: while the
+  # users table is EMPTY any signup is allowed, and seeding spends that for
+  # good. invite_only does not mean "closed": an invitation link creates the
+  # account, because the link carries the token that permits the signup. A
+  # stranger without one cannot register. true closes both paths, and members
+  # can no longer mint invitations either.
+  # https://docs.pegasusbound.com/development/accounts-and-access/
+  DISABLE_REGISTRATION: ${DISABLE_REGISTRATION:-}
+  DISABLE_PASSWORD_LOGIN: ${DISABLE_PASSWORD_LOGIN:-false}
+  # Lets a verified identity-provider assertion create an account regardless of
+  # DISABLE_REGISTRATION. Off by default, so configuring OIDC never silently
+  # reopens signup.
+  SSO_AUTO_PROVISION: ${SSO_AUTO_PROVISION:-}
+  AUTH_IP_RATE_LIMIT: ${AUTH_IP_RATE_LIMIT:-60}
+  # CIDRs allowed to set X-Forwarded-For. Empty trusts nothing, which is
+  # correct for a directly exposed backend; set it when you run a proxy.
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
+
+  # First owner, read only while the users table is empty. Leave unset and the
+  # backend prints a single-use setup link to its logs instead.
+  PEGASUSBOUND_BOOTSTRAP_EMAIL: ${PEGASUSBOUND_BOOTSTRAP_EMAIL:-}
+  PEGASUSBOUND_BOOTSTRAP_PASSWORD_HASH: ${PEGASUSBOUND_BOOTSTRAP_PASSWORD_HASH:-}
+  PEGASUSBOUND_BOOTSTRAP_PASSWORD: ${PEGASUSBOUND_BOOTSTRAP_PASSWORD:-}
+  PEGASUSBOUND_BOOTSTRAP_ORG: ${PEGASUSBOUND_BOOTSTRAP_ORG:-}
+
+  # Generic OpenID Connect. The one sign-in path with no mail dependency, so
+  # it is the recommended posture for a deployment with no relay.
+  OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+  OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+  OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
+  OIDC_SCOPES: ${OIDC_SCOPES:-}
+  OIDC_ALLOWED_DOMAINS: ${OIDC_ALLOWED_DOMAINS:-}
+  OIDC_DEFAULT_ORG: ${OIDC_DEFAULT_ORG:-}
+  OIDC_PROVIDER_NAME: ${OIDC_PROVIDER_NAME:-}
+
+  # Transactional email branding. A self-hosted install should not send mail
+  # attributed to someone else's company.
+  EMAIL_BRAND_NAME: ${EMAIL_BRAND_NAME:-}
+  EMAIL_BRAND_LEGAL_ENTITY: ${EMAIL_BRAND_LEGAL_ENTITY:-}
+  EMAIL_BRAND_COMPANY_NUMBER: ${EMAIL_BRAND_COMPANY_NUMBER:-}
+  EMAIL_BRAND_PLACE_OF_REG: ${EMAIL_BRAND_PLACE_OF_REG:-}
+  EMAIL_BRAND_ADDRESS: ${EMAIL_BRAND_ADDRESS:-}
+  EMAIL_BRAND_WEBSITE_URL: ${EMAIL_BRAND_WEBSITE_URL:-}
+  EMAIL_BRAND_SUPPORT_EMAIL: ${EMAIL_BRAND_SUPPORT_EMAIL:-}
+  EMAIL_BRAND_TERMS_URL: ${EMAIL_BRAND_TERMS_URL:-}
+  EMAIL_BRAND_PRIVACY_URL: ${EMAIL_BRAND_PRIVACY_URL:-}
+
+  PRIMARY_DB: ${PRIMARY_DB:-postgres://pegasusbound:pegasusbound@postgres:5432/pegasusbound_dev?sslmode=disable}
+  REDIS: ${REDIS:-redis://redis:6379}
+  AUTH_SECRET: ${AUTH_SECRET:-local-dev-auth-secret-minimum-32-characters-long}
+  INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-dev-internal-token}
+  # Pegasusbound Intelligence sidecar (experiments, learning, memory).
+  INTELLIGENCE_ENABLED: ${INTELLIGENCE_ENABLED:-true}
+  INTELLIGENCE_URL: ${INTELLIGENCE_URL:-http://intel:8097}
+  # The broker routes (open a data key, sign a blob operation, mint a managed
+  # mailbox's access token). Optional; empty falls back to the token above, and
+  # every service that needs it reads it from here so the two never disagree.
+  NODE_BROKER_TOKEN: ${NODE_BROKER_TOKEN:-}
+
+  # AI assistant. Omit AI_PROVIDER to run with AI off (endpoints return 503).
+  AI_PROVIDER: ${AI_PROVIDER:-}
+  AI_API_KEY: ${AI_API_KEY:-}
+  AI_MODEL: ${AI_MODEL:-}
+  AI_MODEL_TRIAL: ${AI_MODEL_TRIAL:-}
+  AI_MODEL_PAID: ${AI_MODEL_PAID:-}
+  AI_BASE_URL: ${AI_BASE_URL:-}
+  AI_FREE: ${AI_FREE:-}
+
+  # Pre-send verification. The HELO name must be a public FQDN for this host,
+  # or the probe is skipped and every address stays unknown.
+  EMAIL_VERIFY_HELO_HOST: ${EMAIL_VERIFY_HELO_HOST:-}
+  EMAIL_VERIFY_MAIL_FROM: ${EMAIL_VERIFY_MAIL_FROM:-}
+  EMAIL_VERIFY_MILLIONVERIFIER_API_KEY: ${EMAIL_VERIFY_MILLIONVERIFIER_API_KEY:-}
+
+  SEARCH_PROVIDER: ${SEARCH_PROVIDER:-}
+  SEARCH_API_URL: ${SEARCH_API_URL:-}
+  SEARCH_API_KEY: ${SEARCH_API_KEY:-}
+
+  # Slack app. The OAuth pair lets workspaces connect for notifications; the
+  # signing secret turns on the assistant, the inbox and buttons.
+  SLACK_OAUTH_CLIENT_ID: ${SLACK_OAUTH_CLIENT_ID:-}
+  SLACK_OAUTH_CLIENT_SECRET: ${SLACK_OAUTH_CLIENT_SECRET:-}
+  SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+
+  # Mobile push. Partial config disables push with a warning, never a crash.
+  APNS_KEY: ${APNS_KEY:-}
+  APNS_KEY_ID: ${APNS_KEY_ID:-}
+  APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+  APNS_TOPIC: ${APNS_TOPIC:-}
+  NOTIFICATION_PUSH_WINDOW: ${NOTIFICATION_PUSH_WINDOW:-}
+  NOTIFICATION_EMAIL_DAILY_CAP: ${NOTIFICATION_EMAIL_DAILY_CAP:-}
+
+  # Error tracking and server-side product analytics, one key for both. Unset
+  # (the default, and what every self-host has) means no client is built and
+  # nothing is ever sent. POSTHOG_ERROR_TRACKING=false keeps the key for
+  # analytics and reports no exceptions, which is what an instance already
+  # reporting to Sentry wants.
+  POSTHOG_KEY: ${POSTHOG_KEY:-}
+  POSTHOG_HOST: ${POSTHOG_HOST:-}
+  POSTHOG_ERROR_TRACKING: ${POSTHOG_ERROR_TRACKING:-}
+
+  # The other error-tracking backend. Either, both or neither.
+  SENTRY_DSN: ${SENTRY_DSN:-}
+
+services:
+
+  # ─── infrastructure ───────────────────────────────────────────────────
+
+  postgres:
+    restart: unless-stopped
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: pegasusbound
+      POSTGRES_PASSWORD: pegasusbound
+      POSTGRES_DB: pegasusbound_dev
+    ports: ["15432:5432"]
+    volumes:
+      - ${PEGASUSBOUND_PG_DATA:-postgres_data}:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pegasusbound"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    restart: unless-stopped
+    image: redis:7-alpine
+    ports: ["16379:6379"]
+    volumes:
+      - ${PEGASUSBOUND_REDIS_DATA:-redis_data}:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nats:
+    restart: unless-stopped
+    image: nats:2.10-alpine
+    # -js: JetStream (durable streams). -m 8222: HTTP monitoring for healthcheck.
+    command: ["-js", "-sd", "/data", "-m", "8222"]
+    ports: ["4222:4222", "8222:8222"]
+    volumes:
+      - ${PEGASUSBOUND_NATS_DATA:-nats_data}:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # SMTP sink for testing campaign sends without a real mailbox.
+  #
+  # In the `sandbox` profile, so `make up` never starts it: platform mail goes
+  # to the logs (MAIL_TRANSPORT=log) or to your relay, and a real install sends
+  # campaign mail through the mailboxes you connect. `make sandbox`, `make dev`
+  # and `make infra` start it by naming it explicitly.
+  #
+  # Bound to loopback when it does run. Its web UI has no authentication, so
+  # publishing it would hand every captured message to anyone who can reach the
+  # host. Set MAILPIT_BIND=0.0.0.0 if you deliberately want it reachable.
+  mailpit:
+    restart: unless-stopped
+    image: axllent/mailpit:latest
+    profiles: ["sandbox"]
+    ports:
+      - "${MAILPIT_BIND:-127.0.0.1}:18025:8025"
+      - "${MAILPIT_BIND:-127.0.0.1}:11025:1025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+
+  # Local IMAP host for the sandbox demo (`make sandbox`): the mailbox that
+  # every seeded sender syncs from, so replies and warmup mail actually land in
+  # the unified inbox. Any username logs in with the static password "sandbox";
+  # the self-signed cert is fine because sandbox clients set MAIL_TLS_INSECURE.
+  # In the `sandbox` profile so the lean `make up` self-host never pulls it.
+  # `make sandbox` / `make infra` start it by naming it explicitly.
+  dovecot:
+    restart: unless-stopped
+    image: dovecot/dovecot:latest
+    profiles: ["sandbox"]
+    environment:
+      USER_PASSWORD: "{PLAIN}sandbox"
+    ports:
+      - "10143:31143"  # IMAP (cleartext; debugging only)
+      - "10993:31993"  # IMAPS (self-signed cert; the sandbox worker + simulator dial this)
+    healthcheck:
+      test: ["CMD", "doveadm", "service", "status", "imap-login"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ─── application ──────────────────────────────────────────────────────
+
+  backend:
+    restart: unless-stopped
+    # Time for a connect or send in flight to finish before a stop kills it.
+    stop_grace_period: 60s
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/backend:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: .
+      dockerfile: deploy/docker/backend.Dockerfile
+      args:
+        VERSION: ${PEGASUSBOUND_BUILD_VERSION:-}
+        COMMIT: ${PEGASUSBOUND_BUILD_COMMIT:-}
+        BUILT_AT: ${PEGASUSBOUND_BUILD_TIME:-}
+    ports: ["8080:8080"]
+    environment:
+      <<: *selfhost-env
+      API_HOST: "0.0.0.0:8080"
+      GIN_MODE: release
+      # To reach Pegasusbound from another machine, set PUBLIC_HOST=<ip-or-domain> in
+      # .env and every URL below derives from it. Or set each URL explicitly.
+      APP_URL: ${APP_URL:-http://${PUBLIC_HOST:-localhost}:5173}
+      # The backend's own public base. Remote workers enrolled from here get it
+      # as ENCRYPTED_KEYS_BACKEND_URL, so it must be reachable from the worker.
+      API_PUBLIC_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
+      CORS_ALLOW_ORIGINS: ${CORS_ALLOW_ORIGINS:-http://${PUBLIC_HOST:-localhost}:5173,http://${PUBLIC_HOST:-localhost}:5174}
+      WEBSOCKET_URL: ${WEBSOCKET_URL:-ws://${PUBLIC_HOST:-localhost}:4000/socket/websocket}
+      ENCRYPTED_KEYS_PROVIDER: postgres
+      # Mail and auth policy live in the shared anchor above, so the consumer
+      # gets them too. It previously received neither, which silently disabled
+      # every notification and digest email in this stack.
+      TRACKING_DOMAIN: ${TRACKING_DOMAIN:-${PUBLIC_HOST:-localhost}:3000}
+      GEODB_PATH: ${GEODB_PATH:-/app/data/GeoLite2-City.mmdb}
+      GEODB_URL: ${GEODB_URL:-}
+      # Automatic inbox tagging. Optional and off: the backend only serves the
+      # review page from it, the consumer does the classifying. Both halves are
+      # required, so an instance that sets neither never reaches the network.
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      INBOX_TAGGING_ENABLED: ${INBOX_TAGGING_ENABLED:-false}
+      # Gmail mailbox OAuth (leave unset to connect only SMTP/IMAP + Outlook
+      # mailboxes). See the self-hosting docs for the Google Cloud setup.
+      BOX_GOOGLE_CLIENT_ID: ${BOX_GOOGLE_CLIENT_ID:-}
+      BOX_GOOGLE_CLIENT_SECRET: ${BOX_GOOGLE_CLIENT_SECRET:-}
+      BOX_GOOGLE_OAUTH_CONNECT: ${BOX_GOOGLE_OAUTH_CONNECT:-}
+      BOX_OUTLOOK_CLIENT_ID: ${BOX_OUTLOOK_CLIENT_ID:-}
+      BOX_OUTLOOK_CLIENT_SECRET: ${BOX_OUTLOOK_CLIENT_SECRET:-}
+      # Whole Google Workspace domains: the service account key, inline or as a
+      # path (mount the file read-only). Unset hides that connect method.
+      GOOGLE_WORKSPACE_DELEGATION_KEY: ${GOOGLE_WORKSPACE_DELEGATION_KEY:-}
+      GOOGLE_WORKSPACE_DELEGATION_KEY_FILE: ${GOOGLE_WORKSPACE_DELEGATION_KEY_FILE:-}
+      MAILHOST_ISPDB: ${MAILHOST_ISPDB:-false}
+      # Sign in with Google / Apple. Separate from the BOX_* mailbox clients
+      # above; email+password and passkeys work without any of these.
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
+      GOOGLE_IOS_CLIENT_ID: ${GOOGLE_IOS_CLIENT_ID:-}
+      APPLE_APP_ID: ${APPLE_APP_ID:-}
+      APPLE_TEAM_ID: ${APPLE_TEAM_ID:-}
+      APPLE_KEY_ID: ${APPLE_KEY_ID:-}
+      APPLE_KEY_SECRET: ${APPLE_KEY_SECRET:-}
+      APPLE_REDIRECT_URI: ${APPLE_REDIRECT_URI:-}
+      # Passkeys derive from APP_URL when unset. Changing the RP id invalidates
+      # every enrolled passkey, so keep it stable per deployment.
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-}
+      WEBAUTHN_RP_ORIGINS: ${WEBAUTHN_RP_ORIGINS:-}
+      # Worker image the orchestrator installs on remote machines.
+      WORKER_IMAGE: ${WORKER_IMAGE:-}
+      # Update indicator: polls GitHub Releases and shows a newer version in the
+      # admin panel's top bar. Applying it goes through the updater service
+      # below. The address is always set because a profile cannot be tested
+      # here; with the profile off the host does not resolve and the backend
+      # reports the updater as not running (report-only), never as broken.
+      # UPDATER_URL=none in .env turns the button off explicitly.
+      UPDATE_CHECK_ENABLED: ${UPDATE_CHECK_ENABLED:-true}
+      UPDATE_CHECK_INTERVAL: ${UPDATE_CHECK_INTERVAL:-30m}
+      UPDATE_CHANNEL: ${UPDATE_CHANNEL:-stable}
+      RELEASES_GITHUB_REPO: ${RELEASES_GITHUB_REPO:-pegasusbound/pegasusbound}
+      RELEASES_GITHUB_TOKEN: ${RELEASES_GITHUB_TOKEN:-}
+      UPDATER_URL: ${UPDATER_URL:-http://updater:8095}
+      UPDATER_TOKEN: ${UPDATER_TOKEN:-${INTERNAL_API_TOKEN:-local-dev-internal-token}}
+    volumes:
+      - ${PEGASUSBOUND_BLOBS:-blobs}:/data/blobs
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      nats: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  # Public face of hosted forms: pages, embed loader, submissions. No
+  # database; the backend's internal API is its only dependency.
+  forms:
+    restart: unless-stopped
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/forms:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: .
+      dockerfile: deploy/docker/forms.Dockerfile
+      args:
+        VERSION: ${PEGASUSBOUND_BUILD_VERSION:-}
+        COMMIT: ${PEGASUSBOUND_BUILD_COMMIT:-}
+        BUILT_AT: ${PEGASUSBOUND_BUILD_TIME:-}
+    ports: ["${FORMS_PORT:-8090}:8090"]
+    environment:
+      GIN_MODE: release
+      FORMS_PORT: "8090"
+      FORM_IP_RATE_LIMIT: ${FORM_IP_RATE_LIMIT:-}
+      TRUSTED_PROXIES: ${FORMS_TRUSTED_PROXIES:-}
+      # Overridable so a native `make backend` can be pointed at from a
+      # container via host.docker.internal, mirroring the tracking service.
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8080}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-dev-internal-token}
+      APP_ENV: ${APP_ENV:-dev}
+      # Two audiences, two sets of credentials: the bare names are this Go
+      # process, and the PEGASUSBOUND_ ones are stamped into the public form page
+      # for the browser app. All unset means neither reports and no host is
+      # contacted.
+      POSTHOG_KEY: ${POSTHOG_KEY:-}
+      POSTHOG_HOST: ${POSTHOG_HOST:-}
+      POSTHOG_ERROR_TRACKING: ${POSTHOG_ERROR_TRACKING:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      PEGASUSBOUND_POSTHOG_KEY: ${PEGASUSBOUND_POSTHOG_KEY:-}
+      PEGASUSBOUND_POSTHOG_HOST: ${PEGASUSBOUND_POSTHOG_HOST:-}
+      PEGASUSBOUND_POSTHOG_ERROR_TRACKING: ${PEGASUSBOUND_POSTHOG_ERROR_TRACKING:-}
+      PEGASUSBOUND_SENTRY_DSN: ${PEGASUSBOUND_SENTRY_DSN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      backend: { condition: service_healthy }
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8090/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  consumer:
+    restart: unless-stopped
+    # Time for a connect or send in flight to finish before a stop kills it.
+    stop_grace_period: 60s
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/consumer:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: .
+      dockerfile: deploy/docker/consumer.Dockerfile
+      args:
+        VERSION: ${PEGASUSBOUND_BUILD_VERSION:-}
+        COMMIT: ${PEGASUSBOUND_BUILD_COMMIT:-}
+        BUILT_AT: ${PEGASUSBOUND_BUILD_TIME:-}
+    environment:
+      <<: *selfhost-env
+      ENCRYPTED_KEYS_PROVIDER: postgres
+      # Optional, as on the backend: turns an open or click's network into a
+      # country and city on the contact's timeline.
+      GEODB_PATH: ${GEODB_PATH:-/app/data/GeoLite2-City.mmdb}
+      GEODB_URL: ${GEODB_URL:-}
+      # Automatic inbox tagging. This is where inbound mail is classified, so a
+      # key set only here still works; the backend needs it to report whether
+      # the feature is on. Off unless both are set.
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      INBOX_TAGGING_ENABLED: ${INBOX_TAGGING_ENABLED:-false}
+    volumes:
+      - ${PEGASUSBOUND_BLOBS:-blobs}:/data/blobs
+    depends_on:
+      backend: { condition: service_healthy }
+      nats: { condition: service_healthy }
+
+  # One worker by default. Scale out with `docker compose up --scale worker=3`
+  # (or run more on other machines via the SSH enrollment flow). Outbound IPs
+  # belong to the mail provider, so more workers = more parallelism, not more IPs.
+  worker:
+    restart: unless-stopped
+    # Time for a connect or send in flight to finish before a stop kills it.
+    stop_grace_period: 60s
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/worker:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: .
+      dockerfile: deploy/docker/worker.Dockerfile
+      args:
+        VERSION: ${PEGASUSBOUND_BUILD_VERSION:-}
+        COMMIT: ${PEGASUSBOUND_BUILD_COMMIT:-}
+        BUILT_AT: ${PEGASUSBOUND_BUILD_TIME:-}
+    environment:
+      <<: *selfhost-env
+      # Dovecot in the sandbox profile uses a self-signed cert. Set
+      # MAIL_TLS_INSECURE=false once you only connect real mailboxes.
+      MAIL_TLS_INSECURE: ${MAIL_TLS_INSECURE:-true}
+      ENCRYPTED_KEYS_PROVIDER: http
+      ENCRYPTED_KEYS_BACKEND_URL: ${ENCRYPTED_KEYS_BACKEND_URL:-http://backend:8080}
+      ENCRYPTED_KEYS_WORKER_TOKEN: ${INTERNAL_API_TOKEN:-local-dev-internal-token}
+      # Explicit pin for a single worker; usually unnecessary. Without it each
+      # replica flock-claims a persistent id file in the worker_state volume,
+      # so ids survive container recreates and --scale still works.
+      WORKER_ID: ${WORKER_ID:-}
+      WORKER_STATE_DIR: ${WORKER_STATE_DIR:-/data/state}
+      PEGASUSBOUND_NODE_REGION: ${PEGASUSBOUND_NODE_REGION:-}
+      BOX_GOOGLE_CLIENT_ID: ${BOX_GOOGLE_CLIENT_ID:-}
+      BOX_GOOGLE_CLIENT_SECRET: ${BOX_GOOGLE_CLIENT_SECRET:-}
+      BOX_OUTLOOK_CLIENT_ID: ${BOX_OUTLOOK_CLIENT_ID:-}
+      BOX_OUTLOOK_CLIENT_SECRET: ${BOX_OUTLOOK_CLIENT_SECRET:-}
+    volumes:
+      - ${PEGASUSBOUND_BLOBS:-blobs}:/data/blobs
+      - ${PEGASUSBOUND_WORKER_STATE:-worker_state}:/data/state
+    depends_on:
+      backend: { condition: service_healthy }
+      nats: { condition: service_healthy }
+
+  tracking:
+    restart: unless-stopped
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/tracking:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: ./tracking
+      dockerfile: Dockerfile
+    # 3000 is a very common default for other self-hosted tools. Remap the host
+    # side with TRACKING_PORT when it is already taken; the container port and
+    # everything derived from TRACKING_DOMAIN stay as they are.
+    ports: ["${TRACKING_PORT:-3000}:3000"]
+    environment:
+      APP_ENV: ${APP_ENV:-dev}
+      AWS_CONFIG_ENABLED: ${AWS_CONFIG_ENABLED:-false}
+      TRACKING_HOST: "0.0.0.0"
+      TRACKING_PORT: "3000"
+      EVENTBUS_PROVIDER: ${EVENTBUS_PROVIDER:-nats}
+      NATS_URL: ${NATS_URL:-nats://nats:4222}
+      KAFKA_BOOTSTRAP_SERVERS: ${KAFKA_BOOTSTRAP_SERVERS:-}
+      KAFKA_TRACKING_TOPIC: ${KAFKA_TRACKING_TOPIC:-tracking-events}
+      TRACKING_RATE_LIMIT_PER_MIN: ${TRACKING_RATE_LIMIT_PER_MIN:-}
+      TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN: ${TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN:-}
+      TRACKING_TRUSTED_PROXIES: ${TRACKING_TRUSTED_PROXIES:-}
+      TRACKING_CLIENT_IP_HEADER: ${TRACKING_CLIENT_IP_HEADER:-}
+      TRACKING_SCANNER_BUILTINS: ${TRACKING_SCANNER_BUILTINS:-}
+      TRACKING_SCANNER_NETWORKS: ${TRACKING_SCANNER_NETWORKS:-}
+      TRACKING_SCANNER_CLICK_NETWORKS: ${TRACKING_SCANNER_CLICK_NETWORKS:-}
+      TRACKING_SCANNER_ASN_HEADER: ${TRACKING_SCANNER_ASN_HEADER:-}
+      # A GeoLite2-ASN database, which makes the catalogue's asn: entries match
+      # with no edge configuration. Left unset by default because the file has
+      # to be mounted in: point it at a path inside the container and bind the
+      # file there. Separate from GEODB_PATH, which is the City database.
+      TRACKING_SCANNER_ASN_DB: ${TRACKING_SCANNER_ASN_DB:-}
+      # Or let the service fetch that database itself, which is what a host with
+      # nothing to bind a file from needs. Held in memory, so no writable path.
+      TRACKING_SCANNER_ASN_DB_URL: ${TRACKING_SCANNER_ASN_DB_URL:-}
+      TRACKING_IP_HASH_KEY: ${TRACKING_IP_HASH_KEY:-}
+      POSTHOG_KEY: ${POSTHOG_KEY:-}
+      POSTHOG_HOST: ${POSTHOG_HOST:-}
+      POSTHOG_ERROR_TRACKING: ${POSTHOG_ERROR_TRACKING:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      # Overridable so `make dev` (native backend) can point at
+      # host.docker.internal:8080 while `docker compose up` uses the container.
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8080}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-dev-internal-token}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      nats: { condition: service_healthy }
+
+  realtime:
+    restart: unless-stopped
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/realtime:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: .
+      dockerfile: deploy/docker/realtime.Dockerfile
+    ports: ["4000:4000"]
+    environment:
+      PHX_HOST: ${PHX_HOST:-${PUBLIC_HOST:-localhost}}
+      PORT: 4000
+      DATABASE_URL: ${PRIMARY_DB:-postgres://pegasusbound:pegasusbound@postgres:5432/pegasusbound_dev?sslmode=disable}
+      DATABASE_SSL: ${DATABASE_SSL:-false}
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-10}
+      REDIS_URL: ${REDIS:-redis://redis:6379}
+      # Must equal the backend AUTH_SECRET so JWTs validate across services.
+      JWT_SECRET: ${AUTH_SECRET:-local-dev-auth-secret-minimum-32-characters-long}
+      SECRET_KEY_BASE: ${SECRET_KEY_BASE:-local-development-secret-key-base-minimum-64-characters-for-phoenix}
+      PUBSUB_ENABLED: ${PUBSUB_ENABLED:-false}
+      # The origins a browser connects FROM, comma separated, e.g.
+      # "https://app.example.com,https://admin.example.com". Not this service's
+      # own host: the browser's Origin on a websocket upgrade is the dashboard's.
+      # Empty leaves the check off, which is right for a LAN install where the
+      # origin is whatever host was typed; the socket still requires a
+      # short-lived ticket either way.
+      CHECK_ORIGIN_HOSTS: ${CHECK_ORIGIN_HOSTS:-}
+      # Legacy host-based form, consulted only when CHECK_ORIGIN_HOSTS is empty.
+      CHECK_ORIGIN: ${CHECK_ORIGIN:-false}
+      # The environment label events are tagged with, matching every other
+      # service in this file.
+      APP_ENV: ${APP_ENV:-dev}
+      POSTHOG_KEY: ${POSTHOG_KEY:-}
+      POSTHOG_HOST: ${POSTHOG_HOST:-}
+      POSTHOG_ERROR_TRACKING: ${POSTHOG_ERROR_TRACKING:-}
+    # SENTRY_DSN deliberately arrives via env_file, not the mapping above: the
+    # Elixir Sentry library reads the variable itself and refuses to start on an
+    # empty string, so it has to be genuinely absent rather than "". The PostHog
+    # names above are safe in the mapping because the config reads them itself
+    # and treats a blank value as unset.
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+  # Production build of the dashboard (static SPA served by nginx). URLs come
+  # from the PEGASUSBOUND_* env at container start via /config.js, so the same image
+  # the release publishes to GHCR is what runs here. For hot-reload development
+  # use `make app` / docker-compose.dev.yml instead.
+  web:
+    restart: unless-stopped
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/web:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+    ports: ["5173:80"]
+    environment:
+      PEGASUSBOUND_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
+      PEGASUSBOUND_APP_URL: ${APP_URL:-http://${PUBLIC_HOST:-localhost}:5173}
+      PEGASUSBOUND_GMAIL_OAUTH_CONNECT: ${PEGASUSBOUND_GMAIL_OAUTH_CONNECT:-false}
+      # Cloudflare's always-pass test key keeps the widget satisfied while
+      # captcha is off server-side. Set PEGASUSBOUND_TURNSTILE_KEY to your site key
+      # when you set CAPTCHA_PROVIDER=turnstile.
+      PEGASUSBOUND_TURNSTILE_KEY: ${PEGASUSBOUND_TURNSTILE_KEY:-1x00000000000000000000AA}
+      # Cookieless product analytics and browser error tracking, one key for
+      # both. Unset (the default, and what every self-host has) means the SDK
+      # chunk is never fetched and no PostHog host is contacted.
+      PEGASUSBOUND_POSTHOG_KEY: ${PEGASUSBOUND_POSTHOG_KEY:-}
+      PEGASUSBOUND_POSTHOG_HOST: ${PEGASUSBOUND_POSTHOG_HOST:-}
+      PEGASUSBOUND_POSTHOG_ERROR_TRACKING: ${PEGASUSBOUND_POSTHOG_ERROR_TRACKING:-}
+      PEGASUSBOUND_POSTHOG_SESSION_REPLAY: ${PEGASUSBOUND_POSTHOG_SESSION_REPLAY:-}
+      # The other error-tracking backend. Unset means the dashboard contacts no
+      # Sentry host. Point it at your own project to collect browser errors.
+      PEGASUSBOUND_SENTRY_DSN: ${PEGASUSBOUND_SENTRY_DSN:-}
+      # Company logos on contacts: the browser asks DuckDuckGo for a company
+      # domain's favicon. Unset is off on a self-host; "on" turns it on.
+      PEGASUSBOUND_COMPANY_LOGOS: ${PEGASUSBOUND_COMPANY_LOGOS:-}
+    depends_on:
+      backend: { condition: service_healthy }
+
+  admin:
+    restart: unless-stopped
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/admin:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: ./admin
+      dockerfile: Dockerfile
+    ports: ["5174:80"]
+    environment:
+      PEGASUSBOUND_API_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}
+      PEGASUSBOUND_DASHBOARD_URL: ${APP_URL:-http://${PUBLIC_HOST:-localhost}:5173}
+      PEGASUSBOUND_ENV_LABEL: ${ENV_LABEL:-development}
+      PEGASUSBOUND_TURNSTILE_KEY: ${PEGASUSBOUND_TURNSTILE_KEY:-1x00000000000000000000AA}
+      # Unset means the panel initialises no error reporting and contacts no
+      # host at all, exactly like the dashboard above. The panel reports only
+      # exceptions: it measures nothing about an operator's session.
+      PEGASUSBOUND_POSTHOG_KEY: ${PEGASUSBOUND_POSTHOG_KEY:-}
+      PEGASUSBOUND_POSTHOG_HOST: ${PEGASUSBOUND_POSTHOG_HOST:-}
+      PEGASUSBOUND_POSTHOG_ERROR_TRACKING: ${PEGASUSBOUND_POSTHOG_ERROR_TRACKING:-}
+      PEGASUSBOUND_POSTHOG_SESSION_REPLAY: ${PEGASUSBOUND_POSTHOG_SESSION_REPLAY:-}
+      PEGASUSBOUND_SENTRY_DSN: ${PEGASUSBOUND_SENTRY_DSN:-}
+    depends_on:
+      backend: { condition: service_healthy }
+
+  # Pegasusbound Intelligence: the AI experimentation and learning layer.
+  # Private: only the backend reaches it (through /v1/intel/*). Shares the
+  # primary Postgres in its own "intel" schema and drains the backend's
+  # intelligence_event_outbox for send/reply/bounce/meeting events.
+  intel:
+    restart: unless-stopped
+    image: ${PEGASUSBOUND_IMAGE_PREFIX:-ghcr.io/pegasusbound/pegasusbound}/intel:${PEGASUSBOUND_TAG:-prod}
+    build:
+      context: ..
+      dockerfile: platform/deploy/docker/intel.Dockerfile
+    environment:
+      DATABASE_URL: ${PRIMARY_DB:-postgres://pegasusbound:pegasusbound@postgres:5432/pegasusbound_dev?sslmode=disable}
+      DATABASE_SCHEMA: intel
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-local-dev-internal-token}
+      PLATFORM_API_URL: http://backend:8080
+      # Encrypts MCP credentials and per-workspace keys at rest. Set a long random value and back it up.
+      APP_SECRET: ${INTEL_SECRET:-local-dev-intel-secret-change-me-0123456789}
+      APP_URL: ${APP_URL:-http://${PUBLIC_HOST:-localhost}:5173}
+      DASHBOARD_URL: ${APP_URL:-http://${PUBLIC_HOST:-localhost}:5173}
+      OAUTH_REDIRECT_URL: ${API_PUBLIC_URL:-http://${PUBLIC_HOST:-localhost}:8080}/v1/intel-oauth/callback
+      LLM_MODE: ${INTEL_LLM_MODE:-anthropic}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      LLM_MODEL: ${INTEL_LLM_MODEL:-claude-opus-5-5}
+      LLM_CLASSIFIER_MODEL: ${INTEL_CLASSIFIER_MODEL:-claude-opus-5-5}
+      SENDER_PROVIDER: platform
+      WORKER_CONCURRENCY: ${INTEL_CONCURRENCY:-4}
+    depends_on:
+      postgres: { condition: service_healthy }
+      backend: { condition: service_healthy }
+
+  # Upstream auto-updater removed: this is a hard fork with no upstream link.
+  # Update by building and deploying your own images.
+
+  # ─── one-shots ────────────────────────────────────────────────────────
+
+  # Optional demo seed. Run explicitly: docker compose --profile seed run --rm seed
+  # Build-only on purpose, unlike every service above. The seed is not a
+  # published image (it plants a known super-admin credential, so it must never
+  # be one `docker compose pull` away on a real host), and sharing the backend's
+  # image tag would mean `make seed-demo` retagged the image the running backend
+  # was created from.
+  seed:
+    build:
+      context: .
+      dockerfile: deploy/docker/backend.Dockerfile
+      args:
+        VERSION: ${PEGASUSBOUND_BUILD_VERSION:-}
+        COMMIT: ${PEGASUSBOUND_BUILD_COMMIT:-}
+        BUILT_AT: ${PEGASUSBOUND_BUILD_TIME:-}
+    entrypoint: ["/app/seed"]
+    environment:
+      <<: *selfhost-env
+      SEED_RICH: "true"
+      # Without SEED_FULL the paid plans, durations, and subscriptions never
+      # load, so the seeded orgs come up with no plan attached.
+      SEED_FULL: "true"
+    depends_on:
+      backend: { condition: service_healthy }
+    profiles: ["seed"]
+
+# Declared for the defaults. A store pointed at a host path by its
+# PEGASUSBOUND_*_DATA variable simply stops using the named volume below; an unused
+# declaration costs nothing and keeps switching back a one-line .env edit.
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:
+  blobs:
+  worker_state:

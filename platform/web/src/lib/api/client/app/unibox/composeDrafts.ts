@@ -1,0 +1,59 @@
+// Compose drafts: autosaved, per-user working copies of unsent emails. The
+// client generates the draft id and PUTs the whole draft on a debounce, so
+// autosave is idempotent and retries are safe.
+
+import Request from "../../Request";
+
+export interface ComposeDraft {
+    id: string;
+    email_account_id?: string | null;
+    to: string[];
+    cc: string[];
+    bcc: string[];
+    subject: string;
+    body: string;
+    /** Empty while the draft is plain text only. */
+    body_html?: string;
+    updated_at: Date;
+    created_at: Date;
+}
+
+export interface ComposeDraftSaveInput {
+    email_account_id?: string;
+    to: string[];
+    cc: string[];
+    bcc: string[];
+    subject: string;
+    body: string;
+    body_html?: string;
+}
+
+export async function listComposeDrafts(signal?: AbortSignal): Promise<ComposeDraft[]> {
+    const res = await Request<{ data: ComposeDraft[] }>({
+        method: "GET",
+        url: "/unibox/drafts",
+        authorization: true,
+        signal,
+    });
+    return res.data ?? [];
+}
+
+export async function saveComposeDraft(
+    id: string,
+    data: ComposeDraftSaveInput,
+): Promise<void> {
+    await Request({
+        method: "PUT",
+        url: `/unibox/drafts/${id}`,
+        data,
+        authorization: true,
+    });
+}
+
+export async function deleteComposeDraft(id: string): Promise<void> {
+    await Request({
+        method: "DELETE",
+        url: `/unibox/drafts/${id}`,
+        authorization: true,
+    });
+}

@@ -1,0 +1,13 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import revokeAPIKey from "@/lib/api/client/app/api-keys/revokeAPIKey";
+
+export default function useRevokeAPIKey() {
+    const queryClient = useQueryClient();
+
+    return useMutation({
+        mutationFn: ({ id, reason }: { id: string; reason?: string }) => revokeAPIKey(id, reason),
+        onSuccess: () => {
+            queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+        },
+    });
+}

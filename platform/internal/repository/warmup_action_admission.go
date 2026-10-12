@@ -1,0 +1,127 @@
+package repository
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+)
+
+type WarmupActionAdmission interface {
+	PermittedWarmupActions(context.Context, uuid.UUID, uuid.UUID, []string) ([]string, error)
+}
+
+type WarmupActionRecoveryAdmission interface {
+	AdmitWarmupAction(context.Context, models.WarmupActionRequest) (models.WarmupActionDecision, error)
+}
+
+func (r *taskRepository) AdmitWarmupAction(ctx context.Context, req models.WarmupActionRequest) (models.WarmupActionDecision, error) {
+	actions, err := r.PermittedWarmupActions(ctx, req.MailboxID, req.WorkerID, req.Actions)
+	out := models.WarmupActionDecision{Actions: actions}
+	if err != nil || req.FilingID == "" || len(req.Actions) != 1 || req.Actions[0] != models.WarmupActionFile || len(actions) != 1 || actions[0] != models.WarmupActionFile {
+		return out, err
+	}
+	filing, err := uuid.Parse(req.FilingID)
+	if err != nil || filing == uuid.Nil {
+		return out, errors.New("invalid warmup filing identifier")
+	}
+	proof := &models.WarmupFilingRecoveryProof{Protocol: models.WarmupFilingRecoveryProtocol, MailboxID: req.MailboxID, WorkerID: req.WorkerID, FilingID: filing}
+	err = r.db.QueryRow(ctx, `SELECT f.provider_retry_at FROM warmup_pending_filings f JOIN email_accounts ea ON ea.id=f.email_account_id
+		WHERE f.id=$3 AND f.email_account_id=$1 AND ea.worker_id=$2 AND f.payload->'actions'=to_jsonb($4::text[])`, req.MailboxID, req.WorkerID, filing, []string{models.WarmupActionFile}).Scan(&proof.ProviderRetryAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		out.Actions = nil
+		return out, nil
+	}
+	if err == nil {
+		out.FilingPending, out.FilingRecovery = true, proof
+	}
+	return out, err
+}
+
+func (r *taskRepository) PermittedWarmupActions(ctx context.Context, mailbox, worker uuid.UUID, actions []string) ([]string, error) {
+	return permittedWarmupActions(ctx, r.db, mailbox, worker, actions)
+}
+
+type warmupActionQuery interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func permittedWarmupActions(ctx context.Context, q warmupActionQuery, mailbox, worker uuid.UUID, actions []string) ([]string, error) {
+	if len(actions) > 16 {
+		return nil, ErrSendAdmissionDenied
+	}
+	var a models.Email
+	var active bool
+	err := q.QueryRow(ctx, `SELECT ea.status='active' AND ea.worker_id=$2 AND n.role='worker' AND n.active AND n.last_seen_at>NOW()-INTERVAL '10 minutes' AND n.warmup_send_protocol>=2
+ AND o.risk_state IN ('trusted','watch') AND NOT EXISTS(SELECT 1 FROM cloud_link_mailboxes c WHERE c.email_account_id=ea.id),ea.test_mode,ea.test_send_enabled,ea.test_receive_enabled
+ FROM email_accounts ea JOIN organizations o ON o.id=ea.organization_id JOIN fleet_nodes n ON n.id=ea.worker_id WHERE ea.id=$1`, mailbox, worker).Scan(&active, &a.TestMode, &a.TestSendEnabled, &a.TestReceiveEnabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !active {
+		return nil, nil
+	}
+	return a.PermittedWarmupActions(actions), nil
+}
+
+func (r *httpSyncContextRepository) PermittedWarmupActions(ctx context.Context, mailbox, worker uuid.UUID, actions []string) ([]string, error) {
+	out, err := r.AdmitWarmupAction(ctx, models.WarmupActionRequest{MailboxID: mailbox, WorkerID: worker, Actions: actions})
+	return out.Actions, err
+}
+
+func (r *httpSyncContextRepository) AdmitWarmupAction(ctx context.Context, request models.WarmupActionRequest) (models.WarmupActionDecision, error) {
+	var out models.WarmupActionDecision
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return out, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, r.baseURL+"/api/v1/internal/worker/warmup-actions", bytes.NewReader(raw))
+	if err != nil {
+		return out, err
+	}
+	req.Header.Set("Authorization", "Bearer "+r.token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := r.client.Do(req)
+	if err != nil {
+		return out, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return out, errors.New("warmup action authority unavailable")
+	}
+	var response struct {
+		Actions        json.RawMessage                   `json:"actions"`
+		FilingPending  bool                              `json:"filing_pending"`
+		FilingRecovery *models.WarmupFilingRecoveryProof `json:"filing_recovery"`
+	}
+	decoder := json.NewDecoder(resp.Body)
+	if err := decoder.Decode(&response); err != nil {
+		return out, err
+	}
+	var trailing any
+	if len(response.Actions) == 0 || decoder.Decode(&trailing) != io.EOF {
+		return out, errors.New("invalid warmup action authority response")
+	}
+	if err := json.Unmarshal(response.Actions, &out.Actions); err != nil {
+		return out, err
+	}
+	out.FilingPending = response.FilingPending
+	if response.FilingRecovery != nil {
+		filing, err := uuid.Parse(request.FilingID)
+		if err != nil || !response.FilingPending || len(out.Actions) != 1 || out.Actions[0] != models.WarmupActionFile ||
+			!response.FilingRecovery.ValidFor(request.MailboxID, request.WorkerID, filing) {
+			return models.WarmupActionDecision{}, errors.New("invalid warmup filing recovery proof")
+		}
+		out.FilingRecovery = response.FilingRecovery
+	}
+	return out, nil
+}

@@ -1,0 +1,79 @@
+---
+title: Warmup pools
+description: How shared warmup pools work, why pool quality beats pool size, and what "dedicated" should mean.
+---
+
+A warmup pool is a group of mailboxes that send warmup mail to one another. Your mailbox sends a short message to another mailbox in the pool. That mailbox opens it, sometimes replies, and the pattern reverses with mail from another pool member.
+
+<ShortVersion>
+
+- A warmup pool is a group of mailboxes that send warmup mail to one another.
+- Pool quality matters more than size: vetted mailboxes across the major providers beat thousands of throwaways.
+- Free and premium pools are kept apart.
+
+</ShortVersion>
+
+## What a warmup pool is
+
+From a mailbox provider's point of view, the pattern looks like normal individual mailbox activity: low volume, conversational, mixed senders.
+
+<WarmupExchange />
+
+## Why pool quality matters more than size
+
+Some tools advertise "5,000+ inboxes in the pool". Sounds impressive. It almost always isn't.
+
+A pool of 5,000 mailboxes mostly assembled from free-tier signups and throwaway providers gives you essentially zero positive signal. Modern mailbox providers either ignore signals from low-trust addresses entirely, or treat them as negative ("why is this mailbox corresponding with so many disposable inboxes?").
+
+A pool of 500 vetted, warmed, monitored mailboxes across the major receivers is dramatically more useful.
+
+## What a healthy pool looks like
+
+- **Diverse**: spans Gmail, Outlook, Yahoo, iCloud, and a representative share of self-hosted IMAP servers.
+- **Monitored**: every member has spam-score tracking; misbehaviour removes the mailbox from the pool.
+- **Conversational**: reply rate inside the pool ~30%; the pool exchanges threads, not one-off blasts.
+- **Avoidance-aware**: the same two mailboxes don't pair up over and over (recent-partner gap of 7 days or more).
+- **Token-verified**: every message carries a single-use token bound to its recipient, so warmup mail cannot be replayed or redirected, and mail arriving in a mailbox is never held against it.
+
+## Free vs premium pools
+
+Free pools are useful for testing the mechanics but include higher-risk members. Premium pools should:
+
+- Only include warmed mailboxes meeting reputation criteria.
+- Apply stricter quarantine thresholds than free pools.
+- Keep a separate recovery pool for senders coming back from quarantine.
+- Never silently mix free-tier mailboxes into the premium recipient set.
+
+In Pegasusbound, free and premium pools are physically separated. Reserved sending infrastructure does not change that: it is for isolation, not a reputation shortcut.
+
+Separation has to stay an exchange, though. A tier that only sends into the other and never receives builds nothing: reputation comes from mail arriving, being read and being answered, not from mail leaving. So the one crossing Pegasusbound allows is mirrored: a premium mailbox short of partners outside its own workspace borrows the best proven free mailboxes as recipients, and those same mailboxes write back to the paying mailboxes that wrote to them. Free senders leave part of every inbox's daily capacity unused, so premium mailboxes are never crowded out of it. Every draw then favours whichever inbox is furthest behind on what it sent, and caps what any inbox receives in a day, so neither tier is starved and neither is flooded.
+
+When a workspace's paid subscription becomes active, Pegasusbound records the premium tier on every existing mailbox and moves its active warmup participants to the premium pool. Mailboxes connected later inherit the same tier. A workspace restricted or suspended for abuse keeps the paid tier on its mailboxes but cannot enter the premium participant pool until the restriction clears. Stripe webhook retries are safe, so an interrupted promotion finishes on redelivery without duplicating pool membership. Payment-recovery and cancellation events do not churn existing pool membership.
+
+<PoolTiers />
+
+## What reserved sending means
+
+Plans that include it reserve a worker for your organisation, so your mailboxes always authenticate to their providers from an address no other customer uses. It gives you:
+
+- A predictable sign-in address for every one of your mailboxes.
+- Isolation from another tenant triggering a per-address authentication throttle.
+- The ability to negotiate allowlisting with specific partners.
+
+It does _not_:
+
+- Change the address your recipients see. That belongs to your mailbox provider, not to Pegasusbound.
+- Bypass per-mailbox health rules.
+- Let you ignore complaint or bounce thresholds.
+
+## Re-entry after quarantine
+
+A quarantined mailbox shouldn't automatically re-enter the pool just because time elapsed. Re-entry should require:
+
+- Healthy SPF, DKIM, DMARC.
+- No recent complaints or hard-bounce spikes.
+- No recent tampering with received warmup mail.
+- Spam-folder placement under 10% on a probation sample.
+- Gradual ramp on re-entry, starting at 5–10/day warmup.
+
+> Pool quality is shared infrastructure. A platform that lets one bad mailbox keep participating to avoid an awkward support conversation taxes every other paying customer.

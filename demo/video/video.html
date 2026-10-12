@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pegasusbound demo</title>
+<style>
+@font-face { font-family: "Jakarta"; src: url("jakarta.woff2") format("woff2"); font-weight: 200 800; }
+@font-face { font-family: "Inter"; src: url("inter.woff2") format("woff2"); font-weight: 100 900; }
+:root { --ink: #0b0a16; --ink2: #14122a; --violet: #7c5cff; --violet2: #a78bfa; --fuchsia: #d946ef; --text: #f4f3ff; --muted: #a5a3c4; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1920px; height: 1080px; overflow: hidden; background: var(--ink); color: var(--text); font-family: "Inter", system-ui, sans-serif; }
+.bg { position: absolute; inset: 0; background:
+  radial-gradient(900px 600px at 12% 8%, rgba(124, 92, 255, .30), transparent 60%),
+  radial-gradient(800px 600px at 92% 92%, rgba(217, 70, 239, .18), transparent 60%),
+  radial-gradient(1200px 800px at 50% 50%, #120f26, var(--ink)); }
+.grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px); background-size: 64px 64px; mask-image: radial-gradient(ellipse at center, #000 30%, transparent 75%); }
+.brand { position: absolute; top: 44px; left: 64px; display: flex; align-items: center; gap: 14px; font-family: Jakarta; font-weight: 800; font-size: 26px; letter-spacing: -.01em; z-index: 5; opacity: .95; }
+.brand img { width: 40px; height: 40px; }
+.grad { background: linear-gradient(100deg, #a78bfa, #c084fc 55%, #f0abfc); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.sim { position: absolute; top: 46px; right: 64px; z-index: 6; padding: 10px 18px; border-radius: 999px; font-weight: 700; font-size: 17px; letter-spacing: .08em; text-transform: uppercase; color: #fde68a; background: rgba(245, 158, 11, .14); border: 1px solid rgba(245, 158, 11, .45); opacity: 0; transition: opacity .6s; }
+.sim.on { opacity: 1; }
+.progress { position: absolute; left: 0; bottom: 0; height: 5px; background: linear-gradient(90deg, var(--violet), var(--fuchsia)); width: 0; z-index: 6; }
+.cap { position: absolute; left: 64px; right: 64px; bottom: 44px; z-index: 6; font-size: 25px; line-height: 1.4; color: #e9e7ff; text-align: center; text-shadow: 0 2px 12px rgba(0,0,0,.6); }
+.cap span { background: rgba(11,10,22,.72); padding: 6px 16px; border-radius: 10px; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+
+.scene { position: absolute; inset: 0; opacity: 0; transition: opacity .7s ease; pointer-events: none; }
+.scene.on { opacity: 1; }
+h1, h2 { font-family: Jakarta; letter-spacing: -.025em; }
+h2 { font-size: 64px; font-weight: 800; line-height: 1.05; }
+.kicker { font-size: 20px; font-weight: 700; letter-spacing: .18em; text-transform: uppercase; color: var(--violet2); margin-bottom: 18px; }
+.lead { font-size: 28px; color: var(--muted); line-height: 1.45; margin-top: 20px; max-width: 760px; }
+.left { position: absolute; left: 110px; top: 210px; width: 760px; }
+.rise { opacity: 0; transform: translateY(26px); }
+.on .rise { animation: rise .8s cubic-bezier(.2,.8,.2,1) forwards; }
+@keyframes rise { to { opacity: 1; transform: none; } }
+.d1 { animation-delay: .25s !important; } .d2 { animation-delay: .6s !important; } .d3 { animation-delay: 1s !important; } .d4 { animation-delay: 1.5s !important; } .d5 { animation-delay: 2.1s !important; } .d6 { animation-delay: 2.8s !important; } .d7 { animation-delay: 3.6s !important; } .d8 { animation-delay: 4.5s !important; }
+
+/* browser frame with screenshot */
+.frame { position: absolute; border-radius: 18px; overflow: hidden; background: #fff; box-shadow: 0 40px 120px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08); }
+.frame .bar { height: 36px; background: #1b1930; display: flex; align-items: center; gap: 8px; padding: 0 16px; }
+.frame .bar i { width: 11px; height: 11px; border-radius: 50%; background: #3b3858; }
+.frame .bar b { margin-left: 14px; font: 500 14px Inter; color: #8f8cb3; }
+.frame .vp { position: relative; overflow: hidden; }
+.frame .vp img { position: absolute; left: 0; top: 0; width: 100%; transform-origin: 0 0; transition: transform var(--kb, 8s) ease-in-out; }
+.frame.dark { background: #0f0e17; }
+
+/* title */
+.title-wrap { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+.logo-big { width: 170px; height: 170px; margin: 0 auto 34px; filter: drop-shadow(0 24px 60px rgba(124,92,255,.55)); }
+.on .logo-big { animation: pop 1s cubic-bezier(.2,1.4,.3,1) both; }
+@keyframes pop { from { transform: scale(.6) rotate(-8deg); opacity: 0; } }
+.title-wrap h1 { font-size: 112px; font-weight: 800; }
+.title-wrap p { font-size: 36px; color: var(--muted); margin-top: 16px; }
+.chips { display: flex; gap: 16px; justify-content: center; margin-top: 44px; }
+.chip { padding: 14px 24px; border-radius: 999px; font-size: 22px; font-weight: 600; background: rgba(124,92,255,.14); border: 1px solid rgba(167,139,250,.35); color: #ddd6fe; }
+
+/* diagram */
+.node { position: absolute; padding: 22px 28px; border-radius: 18px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); font-size: 24px; font-weight: 600; backdrop-filter: blur(6px); }
+.node small { display: block; font-size: 17px; font-weight: 500; color: var(--muted); margin-top: 6px; }
+.node.core { background: linear-gradient(135deg, rgba(91,61,245,.9), rgba(217,70,239,.85)); border: 0; font-size: 30px; font-family: Jakarta; font-weight: 800; box-shadow: 0 30px 80px rgba(124,92,255,.5); }
+svg.wires { position: absolute; inset: 0; }
+svg.wires path { stroke: url(#wire); stroke-width: 3; fill: none; stroke-dasharray: 10 10; animation: flow 1.2s linear infinite; }
+@keyframes flow { to { stroke-dashoffset: -20; } }
+
+/* docs */
+.doc { position: absolute; width: 230px; padding: 18px 20px; border-radius: 14px; background: #fff; color: #1e1b3a; box-shadow: 0 20px 50px rgba(0,0,0,.4); font-weight: 700; font-size: 20px; }
+.doc small { display: block; font-weight: 500; color: #6b6890; font-size: 15px; margin-top: 4px; }
+.doc .ext { display: inline-block; font-size: 13px; padding: 3px 8px; border-radius: 6px; background: #ede9fe; color: #6d28d9; margin-bottom: 10px; }
+.layer { position: absolute; padding: 26px 30px; border-radius: 20px; background: rgba(124,92,255,.12); border: 1px solid rgba(167,139,250,.4); }
+.layer h3 { font-family: Jakarta; font-size: 28px; margin-bottom: 14px; }
+.layer li { list-style: none; font-size: 21px; color: #e4e1ff; padding: 7px 0; display: flex; gap: 12px; align-items: center; }
+.layer li::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--violet2); }
+
+/* loop */
+.loop { position: absolute; left: 150px; top: 200px; width: 680px; height: 680px; }
+.loop .ring { position: absolute; inset: 70px; border-radius: 50%; border: 2px dashed rgba(167,139,250,.35); }
+.loop .step { position: absolute; width: 190px; margin: -46px 0 0 -95px; padding: 16px 12px; border-radius: 16px; text-align: center; font-size: 20px; font-weight: 700; background: #1a1733; border: 1px solid rgba(255,255,255,.12); transition: all .35s; }
+.loop .step small { display: block; font-weight: 500; font-size: 14px; color: var(--muted); margin-top: 4px; }
+.loop .step.hot { background: linear-gradient(135deg, #5b3df5, #d946ef); border-color: transparent; transform: scale(1.12); box-shadow: 0 18px 50px rgba(124,92,255,.55); }
+.loop .center { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; }
+.loop .center .n { font-family: Jakarta; font-size: 120px; font-weight: 800; line-height: 1; }
+.loop .center .l { font-size: 22px; color: var(--muted); letter-spacing: .12em; text-transform: uppercase; }
+.bars { position: absolute; right: 150px; top: 250px; width: 700px; height: 520px; }
+.bars .col { position: absolute; bottom: 60px; width: 92px; border-radius: 12px 12px 4px 4px; background: linear-gradient(180deg, #a78bfa, #5b3df5); height: 0; transition: height 1s cubic-bezier(.2,.8,.2,1); }
+.bars .col span { position: absolute; top: -40px; left: 0; right: 0; text-align: center; font: 800 24px Jakarta; opacity: 0; transition: opacity .4s .6s; }
+.bars .col.up span { opacity: 1; }
+.bars .col em { position: absolute; bottom: -42px; left: -20px; right: -20px; text-align: center; font-style: normal; font-size: 17px; color: var(--muted); }
+.bars h4 { font: 700 24px Jakarta; color: #ddd6fe; }
+.again { position: absolute; left: 0; right: 0; bottom: 120px; text-align: center; font: 800 54px Jakarta; opacity: 0; }
+
+/* ml */
+.curves { position: absolute; left: 110px; top: 300px; width: 900px; height: 460px; }
+.rules { position: absolute; right: 110px; top: 210px; width: 760px; display: grid; gap: 16px; }
+.rule { padding: 20px 24px; border-radius: 16px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); font-size: 22px; display: flex; gap: 16px; align-items: center; }
+.rule b { font: 800 22px Jakarta; min-width: 210px; color: #ddd6fe; }
+.curve { fill: none; stroke-width: 5; transition: d 4s ease-in-out; }
+
+/* stats */
+.stats { position: absolute; left: 110px; right: 110px; bottom: 130px; display: grid; grid-template-columns: repeat(5, 1fr); gap: 20px; }
+.stat { padding: 22px; border-radius: 18px; background: rgba(11,10,22,.82); border: 1px solid rgba(167,139,250,.35); text-align: center; }
+.stat .v { font: 800 54px Jakarta; }
+.stat .k { font-size: 18px; color: var(--muted); margin-top: 4px; }
+.callout { position: absolute; padding: 18px 24px; border-radius: 16px; background: rgba(11,10,22,.9); border: 1px solid rgba(167,139,250,.55); font-size: 24px; font-weight: 600; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+.callout b { color: #c4b5fd; }
+.disc { position: absolute; left: 50%; top: 50%; width: 1100px; transform: translate(-50%, -50%); padding: 54px 64px; border-radius: 28px; background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.4); }
+.disc h2 { font-size: 58px; }
+.disc ul { margin-top: 28px; display: grid; gap: 16px; }
+.disc li { list-style: none; font-size: 28px; color: #fde68a; display: flex; gap: 16px; align-items: center; }
+.disc li::before { content: "◆"; font-size: 18px; color: #f59e0b; }
+</style>
+</head>
+<body>
+<div class="bg"></div><div class="grid"></div>
+<div class="brand"><img src="app-icon.svg" alt=""><span>Pegasus<span class="grad">bound</span></span></div>
+<div class="sim" id="sim">Simulation · dummy data</div>
+
+<!-- 1 title -->
+<section class="scene" data-id="title">
+  <div class="title-wrap"><div>
+    <img class="logo-big" src="app-icon.svg" alt="">
+    <h1 class="rise d1">Pegasus<span class="grad">bound</span></h1>
+    <p class="rise d2">The cold outbound engine that teaches itself</p>
+    <div class="chips"><span class="chip rise d3">Every email is an experiment</span><span class="chip rise d4">Every reply is a lesson</span><span class="chip rise d5">Every next email is better</span></div>
+  </div></div>
+</section>
+
+<!-- 2 context -->
+<section class="scene" data-id="context">
+  <div class="left" style="top:150px"><div class="kicker rise">Context</div><h2 class="rise d1">Connect your Brain<br>and your CRM</h2></div>
+  <svg class="wires" viewBox="0 0 1920 1080"><defs><linearGradient id="wire" x1="0" x2="1"><stop offset="0" stop-color="#a78bfa"/><stop offset="1" stop-color="#f0abfc"/></linearGradient></defs>
+    <path d="M520 560 C 760 560, 760 640, 960 640"/><path d="M520 760 C 760 760, 760 660, 960 660"/><path d="M1260 650 C 1420 650, 1420 560, 1560 560"/><path d="M1260 670 C 1420 670, 1420 780, 1560 780"/></svg>
+  <div class="node rise d2" style="left:150px;top:500px">Company Brain<small>over MCP · product, claims, voice</small></div>
+  <div class="node rise d3" style="left:150px;top:700px">CRM · Attio<small>over MCP · lists in, tasks out</small></div>
+  <div class="node core rise d4" style="left:960px;top:600px">Pegasusbound<br>engine</div>
+  <div class="node rise d5" style="left:1560px;top:500px">Your mailboxes<small>warm-up · caps</small></div>
+  <div class="node rise d6" style="left:1560px;top:720px">Replies<small>back into learning</small></div>
+</section>
+
+<!-- 3 no brain -->
+<section class="scene" data-id="nobrain">
+  <div class="left" style="top:150px;width:900px"><div class="kicker rise">No Company Brain?</div><h2 class="rise d1">Upload your docs.<br>It builds the context.</h2></div>
+  <div class="doc rise d2" style="left:120px;top:520px"><span class="ext">MD</span>ICP &amp; personas<small>who you sell to</small></div>
+  <div class="doc rise d3" style="left:380px;top:560px"><span class="ext">PDF</span>Product overview<small>what it does</small></div>
+  <div class="doc rise d4" style="left:150px;top:720px"><span class="ext">MD</span>Case studies<small>proof you can cite</small></div>
+  <div class="doc rise d5" style="left:410px;top:770px"><span class="ext">TXT</span>Emails that worked<small>your voice</small></div>
+  <div class="frame rise d3" style="left:760px;top:250px;width:1040px;height:670px"><div class="bar"><i></i><i></i><i></i><b>Intelligence · Knowledge</b></div><div class="vp" style="height:634px"><img src="shots/light-app_intelligence_knowledge.png" style="--kb:14s"></div></div>
+  <div class="layer rise d6" style="left:1330px;top:560px;width:470px"><h3>Understanding layer</h3><ul><li>7 ICP traits · 4 personas</li><li>6 pain points · 12 value props</li><li>8 cited proof points</li><li>4 claims it must never make</li><li>Voice: ~67 words, “Hi”, “Best”</li></ul></div>
+</section>
+
+<!-- 4 approve -->
+<section class="scene" data-id="approve">
+  <div class="left" style="top:150px"><div class="kicker rise">Approve once</div><h2 class="rise d1">Hard limits.<br>One approval.</h2><p class="lead rise d2">Budget, batch sizes, daily caps, sending window, health thresholds. Then it runs on its own.</p></div>
+  <div class="frame rise d2" style="left:880px;top:200px;width:940px;height:690px"><div class="bar"><i></i><i></i><i></i><b>AI campaign · Overview</b></div><div class="vp" style="height:654px"><img src="shots/light-app_intelligence_audience.png" data-kb="scale(1.18) translate(-4%, 0)" style="--kb:7s"></div></div>
+</section>
+
+<!-- 5 loop -->
+<section class="scene" data-id="loop">
+  <div class="loop" id="loop">
+    <div class="ring"></div>
+    <div class="center"><div><div class="l">Iteration</div><div class="n" id="iter">1</div></div></div>
+  </div>
+  <div class="bars" id="bars"><h4>Best email's positive-reply rate</h4></div>
+  <div class="again" id="again">Again. And again. <span class="grad">Better every time.</span></div>
+</section>
+
+<!-- 6 ml -->
+<section class="scene" data-id="ml">
+  <div class="left" style="top:120px"><div class="kicker rise">How it decides</div><h2 class="rise d1">Statistics, not guesses</h2></div>
+  <svg class="curves rise d2" viewBox="0 0 900 460" id="curves">
+    <line x1="20" y1="420" x2="880" y2="420" stroke="#3b3858" stroke-width="2"/>
+    <path class="curve" id="c1" stroke="#64748b"/><path class="curve" id="c2" stroke="#a78bfa"/><path class="curve" id="c3" stroke="#f0abfc"/>
+    <text x="20" y="452" fill="#a5a3c4" font-size="18">0%</text><text x="840" y="452" fill="#a5a3c4" font-size="18">30%</text>
+    <text x="300" y="40" fill="#ddd6fe" font-size="22" font-weight="700" id="ctext">Beta-Binomial posteriors sharpen as replies arrive</text>
+  </svg>
+  <div class="rules">
+    <div class="rule rise d2"><b>20,000 draws</b>Monte Carlo P(best) for every email</div>
+    <div class="rule rise d3"><b>P(best) ≥ 90%</b>Scale the winner, larger batch</div>
+    <div class="rule rise d4"><b>P(best) &lt; 5%</b>Retire the loser</div>
+    <div class="rule rise d5"><b>Too close to matter</b>Stop spending, test the next idea</div>
+    <div class="rule rise d6"><b>One variable</b>Controlled tests only, so lessons are real</div>
+    <div class="rule rise d7"><b>Reply classifier</b>11 intents, confidence, human review</div>
+  </div>
+</section>
+
+<!-- 7 memory -->
+<section class="scene" data-id="memory">
+  <div class="left" style="top:150px;width:680px"><div class="kicker rise">Memory</div><h2 class="rise d1">It remembers<br>what works</h2><p class="lead rise d2">Principles, guidelines and things to avoid, each with its evidence, applied to every new campaign.</p></div>
+  <div class="frame rise d2" style="left:880px;top:200px;width:940px;height:690px"><div class="bar"><i></i><i></i><i></i><b>Intelligence · Memory</b></div><div class="vp" style="height:654px"><img src="shots/light-app_intelligence_memory.png" data-kb="scale(1.12) translate(-3%, -2%)" style="--kb:10s"></div></div>
+  <div class="callout rise d5" style="left:110px;top:700px;width:700px">✓ <b>Proven:</b> proof-led angle beat pain-led, 13/60 vs 4/58 positive</div>
+  <div class="callout rise d6" style="left:110px;top:800px;width:700px">↗ <b>Transferred</b> to new segments as the starting baseline</div>
+</section>
+
+<!-- 8 disclaimer -->
+<section class="scene" data-id="disclaimer">
+  <div class="disc"><div class="kicker rise" style="color:#fbbf24">Test run</div><h2 class="rise d1">A simulation to measure the engine</h2>
+    <ul><li class="rise d2">The list is dummy data: 1,000 synthetic prospects</li><li class="rise d3">Fictional publishers, fictional people</li><li class="rise d4">Simulated sender with a hidden reply model the engine never sees</li><li class="rise d5">No real emails were sent</li></ul></div>
+</section>
+
+<!-- 9 iterations -->
+<section class="scene" data-id="iterations">
+  <div class="frame" style="left:110px;top:150px;width:1700px;height:820px"><div class="bar"><i></i><i></i><i></i><b>AI campaign · Best emails</b></div><div class="vp" style="height:784px"><img src="shots/light-app_intelligence_audience_best.png" data-kb="scale(1.5) translate(-16%, -11%)" style="--kb:9s"></div></div>
+  <div class="callout rise d5" style="left:1180px;top:200px">Best email: <b>16.7% → 25.0%</b> by iteration 3</div>
+  <div class="callout rise d7" style="left:1180px;top:290px">Controlled winner at <b>96% confidence</b></div>
+</section>
+
+<!-- 10 ranked -->
+<section class="scene" data-id="ranked">
+  <div class="frame" style="left:110px;top:150px;width:1700px;height:820px"><div class="bar"><i></i><i></i><i></i><b>AI campaign · Best emails, ranked</b></div><div class="vp" style="height:784px"><img src="shots/light-app_intelligence_audience_best.png" data-kb="scale(1.35) translate(-16%, -44%)" style="transform: scale(1.2) translate(-16%, -30%); --kb:10s"></div></div>
+  <div class="callout rise d3" style="left:150px;top:840px">Ranked best → worst · delivered · positive · meetings · <b>P(best)</b> · 90% range · <b>why</b></div>
+</section>
+
+<!-- 11 across -->
+<section class="scene" data-id="across">
+  <div class="frame" style="left:110px;top:150px;width:1700px;height:640px"><div class="bar"><i></i><i></i><i></i><b>Intelligence · Best emails across the workspace</b></div><div class="vp" style="height:604px"><img src="shots/light-app_intelligence_best.png" data-kb="scale(1.18) translate(-8%, -4%)" style="--kb:14s"></div></div>
+  <div class="stats">
+    <div class="stat rise d2"><div class="v" data-count="1000">0</div><div class="k">prospects (dummy)</div></div>
+    <div class="stat rise d3"><div class="v" data-count="2288">0</div><div class="k">emails sent</div></div>
+    <div class="stat rise d4"><div class="v" data-count="315">0</div><div class="k">replies</div></div>
+    <div class="stat rise d5"><div class="v" data-count="35">0</div><div class="k">meetings</div></div>
+    <div class="stat rise d6"><div class="v" data-count="11">0</div><div class="k">iterations</div></div>
+  </div>
+</section>
+
+<!-- 12 next -->
+<section class="scene" data-id="next">
+  <div class="left" style="top:150px;width:680px"><div class="kicker rise">Starts smarter</div><h2 class="rise d1">The next campaign<br>begins from memory</h2><p class="lead rise d2">Angle already proven, so iteration 1 goes straight to the call to action.</p></div>
+  <div class="frame rise d2" style="left:880px;top:200px;width:940px;height:690px"><div class="bar"><i></i><i></i><i></i><b>Product leaders · awaiting approval</b></div><div class="vp" style="height:654px"><img src="shots/light-app_intelligence_product.png" data-kb="scale(1.15) translate(-4%, -3%)" style="--kb:10s"></div></div>
+</section>
+
+<!-- 13 leads -->
+<section class="scene" data-id="leads">
+  <div class="frame" style="left:110px;top:150px;width:1700px;height:820px"><div class="bar"><i></i><i></i><i></i><b>AI campaign · Leads &amp; inbox</b></div><div class="vp" style="height:784px"><img src="shots/light-app_intelligence_audience_leads.png" data-kb="scale(1.12) translate(-4%, -2%)" style="--kb:6s"></div></div>
+</section>
+
+<!-- 14 dark -->
+<section class="scene" data-id="dark">
+  <div class="frame dark" style="left:110px;top:170px;width:840px;height:560px"><div class="bar"><i></i><i></i><i></i><b>Dark · Best emails</b></div><div class="vp" style="height:524px"><img src="shots/dark-app_intelligence_audience_best.png"></div></div>
+  <div class="frame dark" style="left:970px;top:300px;width:840px;height:560px"><div class="bar"><i></i><i></i><i></i><b>Dark · Knowledge</b></div><div class="vp" style="height:524px"><img src="shots/dark-app_intelligence_knowledge.png"></div></div>
+</section>
+
+<!-- 15 close -->
+<section class="scene" data-id="close">
+  <div class="title-wrap"><div>
+    <img class="logo-big" src="app-icon.svg" alt="">
+    <h1 class="rise d1">Approve once.</h1>
+    <p class="rise d2" style="font-size:52px;color:#ddd6fe;font-family:Jakarta;font-weight:800">It learns <span class="grad">the rest.</span></p>
+  </div></div>
+</section>
+
+<div class="cap" id="cap"></div>
+<div class="progress" id="progress"></div>
+
+<script>
+// Timeline: each scene lasts its narration plus a short gap. window.TIMELINE is injected by build.mjs.
+const LOOP_STEPS = [["Write", "one variable changes"], ["Send", "small batch"], ["Read", "classify replies"], ["Score", "Bayesian P(best)"], ["Decide", "scale · retire"], ["Remember", "update memory"]];
+const BEST = [["#1", 16.7], ["#2", 21.7], ["#3", 25.0], ["#4", 23.0]];
+
+function buildLoop() {
+  const loop = document.getElementById("loop");
+  LOOP_STEPS.forEach(([t, s], i) => {
+    const a = (i / LOOP_STEPS.length) * Math.PI * 2 - Math.PI / 2;
+    const el = document.createElement("div");
+    el.className = "step";
+    el.style.left = 340 + Math.cos(a) * 270 + "px";
+    el.style.top = 340 + Math.sin(a) * 270 + "px";
+    el.innerHTML = `${t}<small>${s}</small>`;
+    loop.appendChild(el);
+  });
+  const bars = document.getElementById("bars");
+  BEST.forEach(([l, v], i) => {
+    const c = document.createElement("div");
+    c.className = "col";
+    c.style.left = 40 + i * 160 + "px";
+    c.dataset.h = String((v / 28) * 380);
+    c.innerHTML = `<span>${v.toFixed(1)}%</span><em>iteration ${l.slice(1)}</em>`;
+    bars.appendChild(c);
+  });
+}
+
+function runLoop(dur) {
+  const steps = [...document.querySelectorAll("#loop .step")];
+  const cols = [...document.querySelectorAll("#bars .col")];
+  const iter = document.getElementById("iter");
+  const per = 0.55; // seconds per step
+  let k = 0;
+  const t = setInterval(() => {
+    steps.forEach((s, i) => s.classList.toggle("hot", i === k % steps.length));
+    if (k % steps.length === steps.length - 1) {
+      const n = Math.floor(k / steps.length);
+      if (cols[n]) { cols[n].style.height = cols[n].dataset.h + "px"; cols[n].classList.add("up"); }
+      iter.textContent = String(Math.min(n + 2, 9));
+    }
+    k++;
+  }, per * 1000);
+  setTimeout(() => (document.getElementById("again").style.cssText = "opacity:1;transition:opacity .8s"), (dur - 6.5) * 1000);
+  setTimeout(() => clearInterval(t), dur * 1000);
+}
+
+function beta(a, b, n = 160) {
+  // Normal approximation of a Beta(a, b) density, drawn on 0–30%.
+  const m = a / (a + b), v = (a * b) / ((a + b) ** 2 * (a + b + 1)), sd = Math.sqrt(v);
+  let d = "";
+  for (let i = 0; i <= n; i++) {
+    const x = (i / n) * 0.3;
+    const y = Math.exp(-((x - m) ** 2) / (2 * v)) / (sd * Math.sqrt(2 * Math.PI));
+    d += `${i ? "L" : "M"}${(20 + (x / 0.3) * 860).toFixed(1)},${(420 - Math.min(380, y * 4.2)).toFixed(1)}`;
+  }
+  return d;
+}
+function runCurves() {
+  const set = (k) => {
+    const s = [[[2, 18], [3, 17], [4, 16]], [[6, 52], [13, 47], [18, 40]], [[10, 110], [26, 104], [40, 108]]][k];
+    ["c1", "c2", "c3"].forEach((id, i) => document.getElementById(id).setAttribute("d", beta(...s[i])));
+  };
+  set(0);
+  setTimeout(() => set(1), 3500);
+  setTimeout(() => set(2), 8000);
+}
+
+function countUp(scene) {
+  scene.querySelectorAll("[data-count]").forEach((el, i) => {
+    const target = Number(el.dataset.count);
+    const start = performance.now() + 600 + i * 500;
+    const tick = (now) => {
+      const p = Math.max(0, Math.min(1, (now - start) / 1600));
+      el.textContent = Math.round(target * (1 - Math.pow(1 - p, 3))).toLocaleString("en-US");
+      if (p < 1) requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
+window.play = function play(timeline) {
+  buildLoop();
+  const scenes = Object.fromEntries([...document.querySelectorAll(".scene")].map((s) => [s.dataset.id, s]));
+  const total = timeline.reduce((a, s) => a + s.dur, 0);
+  const prog = document.getElementById("progress");
+  const cap = document.getElementById("cap");
+  const sim = document.getElementById("sim");
+  const SIM = new Set(["disclaimer", "iterations", "ranked", "across", "next", "leads", "dark"]);
+  const t0 = performance.now();
+  (function frame(now) {
+    prog.style.width = Math.min(100, ((now - t0) / 1000 / total) * 100) + "%";
+    if ((now - t0) / 1000 < total + 1) requestAnimationFrame(frame);
+  })(t0);
+  let at = 0;
+  timeline.forEach((s, i) => {
+    setTimeout(() => {
+      Object.values(scenes).forEach((el) => el.classList.remove("on"));
+      const el = scenes[s.id];
+      el.classList.add("on");
+      sim.classList.toggle("on", SIM.has(s.id));
+      // Captions: one sentence at a time, timed by length.
+      cap.innerHTML = "";
+      if (s.id !== "title" && s.id !== "close") {
+        const parts = s.text.replace(/\bM C P\b/g, "MCP").replace(/\bI C P\b/g, "ICP").match(/[\s\S]+?[.!?](?=\s|$)/g) ?? [s.text];
+        const chars = parts.reduce((a, p) => a + p.length, 0);
+        let off = 0;
+        parts.forEach((p) => {
+          setTimeout(() => (cap.innerHTML = `<span>${p.trim()}</span>`), off * 1000);
+          off += ((s.dur - 0.6) * p.length) / chars;
+        });
+      }
+      el.querySelectorAll("img[data-kb]").forEach((img) => {
+        img.style.setProperty("--kb", s.dur + "s");
+        requestAnimationFrame(() => requestAnimationFrame(() => (img.style.transform = img.dataset.kb)));
+      });
+      if (s.id === "loop") runLoop(s.dur);
+      if (s.id === "ml") runCurves();
+      if (s.id === "across") countUp(el);
+    }, at * 1000);
+    at += s.dur;
+  });
+  return total;
+};
+</script>
+</body>
+</html>

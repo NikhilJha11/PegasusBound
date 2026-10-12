@@ -1,0 +1,11 @@
+{
+  "uid": "pegasusbound_contact_card",
+  "type": "card",
+  "config": {
+    "name": "Pegasusbound",
+    "description": "Where this contact stands in Pegasusbound campaigns, with add, pause and resume.",
+    "location": "crm.record.sidebar",
+    "entrypoint": "/app/cards/PegasusboundCard.tsx",
+    "objectTypes": ["contacts"]
+  }
+}

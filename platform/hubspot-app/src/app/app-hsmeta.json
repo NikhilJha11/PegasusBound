@@ -1,0 +1,38 @@
+{
+  "uid": "pegasusbound",
+  "type": "app",
+  "config": {
+    "name": "Pegasusbound",
+    "description": "Cold email and warmup that runs on your HubSpot CRM: every send and reply logged as a HubSpot email, deals and tasks in sync both ways, campaigns that stop when a deal opens, and a Pegasusbound card on every contact.",
+    "distribution": "marketplace",
+    "auth": {
+      "type": "oauth",
+      "redirectUrls": ["https://api.pegasusbound.com/integrations/oauth/callback"],
+      "requiredScopes": [
+        "oauth",
+        "crm.objects.contacts.read",
+        "crm.objects.contacts.write",
+        "crm.objects.companies.read",
+        "crm.objects.companies.write",
+        "crm.objects.deals.read",
+        "crm.objects.deals.write",
+        "crm.objects.owners.read",
+        "crm.schemas.contacts.read",
+        "crm.schemas.contacts.write"
+      ],
+      "optionalScopes": ["crm.lists.read", "sales-email-read"],
+      "conditionallyRequiredScopes": []
+    },
+    "permittedUrls": {
+      "fetch": ["https://api.pegasusbound.com/api/v1/integrations/hubspot/app/"],
+      "iframe": [],
+      "img": []
+    },
+    "support": {
+      "supportEmail": "team@pegasusbound.com",
+      "documentationUrl": "https://docs.pegasusbound.com/guides/hubspot/",
+      "supportUrl": "https://pegasusbound.com",
+      "supportPhone": ""
+    }
+  }
+}

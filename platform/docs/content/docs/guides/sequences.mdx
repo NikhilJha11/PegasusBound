@@ -1,0 +1,331 @@
+---
+title: "Sequences & steps"
+description: "Multi-step sequences, follow-ups, A/B variants, and reply branching."
+---
+
+A sequence is the series of emails a campaign sends each contact: the first email, then follow-ups spaced over days. You build it on a visual canvas where each step is a card, and the lines between cards decide who goes where next.
+
+![The Steps canvas: the first email, then follow-ups that reply in the same thread, each with its wait on the line](/guides/campaign-steps.webp)
+
+## Build a sequence
+
+<Steps>
+
+<Step>
+
+Open the campaign's **Steps** tab. The first email sits below the **Start** card.
+
+</Step>
+
+<Step>
+
+Click a card to write that step's subject and body in the side panel.
+
+</Step>
+
+<Step>
+
+Press the **+** at the end of a path to add a follow-up after it.
+
+</Step>
+
+<Step>
+
+Click the line into a step to set how many days it waits.
+
+</Step>
+
+<Step>
+
+Turn on **Stop on reply** in the flow toolbar, so a reply ends the cold follow-ups.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- Follow-ups reply in the same conversation by default. Turn off **Reply in thread** on a step to start a fresh one.
+- A wait is 0 to 60 days and is counted per contact, so one contact waiting holds up no one else.
+- A sequence holds up to 50 steps, and a step can be A/B tested with up to 5 variants on top of the Original.
+- Auto-replies and out-of-office messages are not human replies and do not stop the sequence.
+- **Send test** mails the saved step, not unsaved edits, so save first.
+
+<Fold>
+
+## What a sequence is
+
+A campaign sends a sequence of steps to each contact: the first email, then follow-ups spaced over days. You build it on a visual canvas where each step is a card and the lines between cards decide who goes where next.
+
+</Fold>
+
+<Fold>
+
+## The flow canvas
+
+The canvas lays itself out from where a contact enters, top to bottom, and fills the window. Scroll with two fingers or drag empty space to move around; pinch, or hold `Ctrl`/`Cmd` and scroll, to zoom. `Shift+1` fits the whole flow. The **Start** card, `Contact enters the campaign`, sits at the top and carries how long their first email waits after they entered (the same setting as the campaign's **Settings** > **First email**; see [the campaign guide](/guides/campaigns/#delay-before-the-first-email)). Below it comes the first email, then whatever follows it. You never draw lines or arrange cards.
+
+- Hover a line and press its **+** to insert a step there, or press the **+** at the end of a path to add one after it. The picker is searchable and works from the keyboard. The first email is the first step created, so nothing can be inserted above it.
+- The line into each step shows its wait (`3 days`) when it has one. Click it to change it, or set it in the step's path panel.
+- A step with conditions splits into one column per condition plus **Otherwise**. A Switch splits into one column per case. Click a column's label to edit that path.
+- **Go to a step** (at the end of a path) continues the path at a step already in the flow, shown as a chip. A path that ends with nothing under it ends the sequence; a conditional path routed nowhere shows `End`.
+- Click a card to edit the step in the side panel. Edits save as you make them; the email and action editors have their own **Save**, and closing the panel with unsaved changes asks first.
+- Deleting a step reconnects whatever led to it to the step it led to, when there is exactly one. Otherwise the steps after it are left unconnected rather than deleted. A card nothing leads to is faded with a dashed border and never sends; connect it with **Go to a step**.
+- A card that still needs something (a subject, a label to add) has an amber dot by its name; hover the card for what is missing. Up to 50 steps per sequence.
+- The canvas is collaborative: you see teammates' cursors and their selected steps, outlined in their color. Press `/` to chat from your cursor. See [Collaboration](/guides/collaboration/).
+
+The campaign wizard connects the follow-ups written there in order, with their waits set.
+
+</Fold>
+
+<Fold>
+
+## Email steps
+
+A step has an internal **name** (never seen by recipients), a **subject** with a variable menu for merge fields like `{{.FirstName}}`, and a rich-text **body**.
+
+### The body editor
+
+The toolbar carries undo and redo (`Ctrl+Z` and `Ctrl+Shift+Z`, or `Cmd` on a Mac), bold, italic, underline and strikethrough, a heading, bullet and numbered lists, links, images, buttons, the font menu, text and highlight colour, alignment, tables, the personalization menu, an AI block, a condition, spintax, and a form link. `Shift+Enter` puts a line break inside a paragraph rather than starting a new one.
+
+**Alignment** is left, centre, right and justify, applied to whichever blocks the selection covers. Pressing the alignment a block already has clears it again, so a body can go back to inheriting rather than pinning one on every paragraph.
+
+**The font menu** sets the typeface and the size. Sizes come as presets from 12 to 36 px and as a box for any value between 8 and 96. Only the typefaces every mail client can resolve are offered, and each one is a full stack rather than a single name: a web font is never loaded by Gmail or by Outlook on Windows, so choosing one would only decide which fallback the reader gets, and it is better to choose the fallback yourself. Both are written onto the text as inline styles, which is the only place a mail client reads them from.
+
+<Callout type="info" title="Sizes are in pixels">
+Every client honours `px`. Anything under 13px is hard to read on a phone, which is where most cold email is opened.
+</Callout>
+
+Pasting copy from Gmail, Outlook, Word or another email tool keeps its paragraphs, lists, links and emphasis, along with its tables, inline styles, colours, fonts and alignment. The blank-line scaffolding those tools ship (an empty `div` per gap, Word's spacer paragraphs) is dropped on the way in, because the editor already spaces paragraphs itself and keeping both renders every gap twice.
+
+Tables are worth knowing about: they are the only layout Outlook on Windows renders reliably, because it lays messages out with Word rather than a browser engine. Anything built with `position`, `flex` or `grid` collapses there. The table menu inserts a two by two grid and, once the cursor is inside one, adds and removes rows and columns, merges cells and deletes the table. The dashed cell borders you see while editing are the editing surface only; the sent email carries whatever borders the markup asks for.
+
+#### Writing and editing with AI
+
+Two AI surfaces live in the body itself. With the cursor somewhere in the copy, a sparkle appears in the right gutter: click it, or press **⌘J**, to ask for text at the cursor or to continue the draft. Select some text instead and a floating **Edit with AI** pill appears over it, with quick actions (improve, shorten, expand, fix grammar, friendlier, more formal) or a free instruction. Both cost [AI credits](/guides/ai-credits/) and both offer **Undo** and **Again** before you move on.
+
+An edit changes what you asked for and leaves the rest of the passage as you wrote it. Merge fields, conditions, spintax, AI blocks, form links and links travel through the model as themselves and come back as themselves, so a rewrite never quietly drops a `{{.FirstName}}`, empties an AI block or unlinks your booking or opt-out link. Bold, italic and headings inside the selection are the exception: they are not preserved, so select around them when the styling matters. A rewrite that lands inside a sentence stays inside it rather than breaking the paragraph in two, and when the model concludes the copy already satisfies the instruction the review row says **No change** instead of reporting a rewrite that is not there.
+
+#### Images
+
+The image button offers three ways in: upload a file, paste an address, or pick something already in the workspace library. You can also drag an image straight onto the body, or paste a screenshot from the clipboard.
+
+Uploads go to a library shared by the whole workspace, so a logo uploaded once is one click away in every campaign. PNG, JPG, GIF and WebP are accepted, up to 5 MB each, and they count against the same storage limit as attachments, shown under **Settings > Billing**.
+
+Select a placed image and a small bar appears over it: quarter, half or full column width (or the image's own size), left, center or right alignment, and the alt text. Alt text is worth filling in. Most clients block remote images until the reader allows them, so alt text is what the first look actually shows, and it is what the plain-text version of the email carries in the image's place.
+
+The same bar is where an image becomes a link. Put an address in the link field and the image ships wrapped in an anchor, so the picture itself is clickable, and the unlink button next to the field takes it off again. An address typed without `https://` gets it added when you leave the field, because a mail client reads one without a scheme as a path inside itself and it goes nowhere. A linked image is tracked and counted like any other link in the body, the click report names it by its alt text, and the plain-text half carries the alt text with the destination after it.
+
+Deleting an image from the library also deletes the file, so it stops loading in mail already sent. The dashboard asks before it does.
+
+<Callout type="warn" title="Images cost you deliverability">
+Cold email from a real person rarely has images. An image-heavy body reads as a marketing blast to filters that cannot read the picture, and the content check flags it. One signature logo or one product shot is usually the most a first touch should carry.
+</Callout>
+
+#### Buttons
+
+The button beside the image button drops a call to action into the body and opens its bar: the text, the address it opens, a colour, three sizes, square, rounded or pill corners, left, centre or right, and a switch that stretches it to the full width of the column. The text colour follows the colour you pick, so a light button gets dark type rather than white on yellow. The label takes merge fields and spintax like any other copy, so `Book a call, {{.FirstName}}` works there too.
+
+What it writes is a one-cell table, not a styled link. Outlook on Windows lays out with Word, which ignores `display: inline-block`, so a padded anchor arrives there as a coloured word with no box around it. Putting the colour and the padding on a table cell instead is the shape that holds everywhere, which is also why a button shows up as a small table in the HTML view.
+
+A button with no address ships as the box it looks like and nothing else, rather than as a link to nowhere. Its link field stays amber until you fill it in, and fills in `https://` for you the same way the image's does.
+
+<Callout type="warn" title="A button is a marketing signal">
+A first touch that looks like a newsletter gets read like one. In cold outreach a plain sentence with a link in it usually beats a button, and filters read heavy markup as a blast. Save the button for a later step, an event invitation, or a reply to someone already in a conversation.
+</Callout>
+
+#### Writing the HTML yourself
+
+The `</>` button on the right of the toolbar swaps the body for its HTML. What you type there is stored exactly as you wrote it, merge fields and conditions included, so a template built elsewhere keeps its markup. The only thing that changes on the way out is what the send path adds or resolves: merge fields fill in, a `<style>` block is inlined onto the elements it matches, and the signature, opt-out footer and tracking are appended.
+
+HTML is a property of the step, not of the tab you happen to be on. A step written as markup opens as markup the next time anyone edits it, so a design cannot be quietly flattened by being reopened. Paste a whole HTML email into the visual editor and the step switches to HTML on its own and keeps the markup verbatim, because a document with its own `<head>` and `<style>` block is not something any visual editor can hold faithfully. The same happens if you copy the source of an email out of a file and paste it as text.
+
+Switching back to the visual editor hands the markup to the editor's own structure, which keeps paragraphs, breaks, headings, lists, links, emphasis, images, tables, `div` containers, colours, fonts and alignment. Anything outside that is named in a confirmation before it is dropped, and staying in HTML keeps it.
+
+#### CSS is inlined when the email sends
+
+Write your CSS in a `<style>` block as you normally would. When the email sends, every rule that matches something is copied onto the elements it matches, as a `style` attribute. Outlook.com, Yahoo and Gmail's mobile apps drop embedded stylesheets outright, so a design written with classes arrives unstyled without this.
+
+What that means in practice:
+
+- rules stay in the `<style>` block when they cannot be inlined: media queries, `@font-face`, `@keyframes`, and anything keyed on `:hover` or another reader state
+- a media query overriding a rule that has become an inline style needs `!important` on its declarations, or the inline style wins. This is true of every email tool that inlines CSS
+- your own `style` attribute still beats a stylesheet rule, and `!important` still beats that, exactly as in a browser
+- the rules that were inlined are removed from the `<style>` block, so the email does not carry its stylesheet twice
+- nothing happens to a body with no `<style>` block. Existing campaigns send byte for byte as before
+- `<style data-pegasusbound-inline="false">` is left exactly as written, if you want the cascade you wrote and know your readers
+
+#### What mail clients will do to it
+
+Under the body, and under the Preview tab, a panel names what your markup will run into: `<script>`, `<form>` and `<iframe>` being stripped, an external stylesheet that no client will ever fetch, CSS that Outlook on Windows ignores, images with no alt text, a web font that will fall back, and whether the message is long enough for Gmail to clip it. Gmail truncates anything over 102 KB behind a "View entire message" link, which also hides your unsubscribe footer and stops opens being recorded for readers who do not expand it.
+
+None of it blocks a send. It is there because writing email HTML means writing for renderers that disagree, and it is better to find out in the editor than from a reply.
+
+#### The plain-text half
+
+Every HTML email ships with a plain-text alternative beside it, and inbox providers read it.
+
+For a step written in HTML in the dashboard, Pegasusbound stores no plain-text half and renders one when the email sends: headings and paragraphs keep their line breaks, list items are bulleted, table rows become lines, each link keeps its destination in brackets after its text, and the stylesheet and any hidden preheader are left out. The mailbox's plain-text signature and the opt-out line follow it. The Preview tab shows the result, so you can read what a text-only client gets.
+
+A step written in the visual editor gets its plain-text half as you type, and it keeps the same things: an image stands in as its alt text in brackets, and a link, a linked image and a button all keep their destination in brackets after the label. Without that a text-only reader gets a button with nowhere to go.
+
+This only applies when there is no plain-text body to send. Set `body_plain` through the API and that text is sent as written; leave it empty and the send path renders one from the HTML.
+
+The reverse holds too. A step written through the API or an agent tool usually carries `body_plain` and nothing else, and the HTML half is rendered from that text: the lines are kept and bare URLs become links, so click tracking has something to wrap. The step is stored with the composer's empty HTML document until then, and that empty document, not the absence of one, is what used to arrive as a blank email: clients prefer the HTML alternative and would show an empty one in place of the text. A step that already has an HTML body is never overwritten.
+
+A step with nothing in either body is refused at start rather than sent: a blank email to every lead is not a campaign anyone meant to launch.
+
+### Preview and test
+
+The Preview tab renders through the real send engine, so merge fields, conditionals, and spintax resolve exactly as they will at send time. It draws the body the way a mail client would, in its own frame, rather than the way the editor does. **Preview as** picks who it renders for: a built-in sample contact, one of the campaign's leads, or any contact you search for, so a custom field your list does not actually have shows up as an unresolved token instead of looking fine. The mailbox picker next to it adds that sender's signature and shows the From name recipients will see. When the campaign is known the preview also appends the opt-out footer and lists the files attached to the campaign. Malformed templates (an `{{if}}` with no `{{end}}`) are flagged before you start the campaign. See [Personalization](/guides/expressions/) for everything you can put in copy.
+
+**Send test** in the preview mails the saved step to an address of your choice through the chosen mailbox, rendered for the chosen contact and carrying the attachments, signature and opt-out footer. Save the step first: the test sends what is stored, not unsaved edits. Opens and clicks on a test are not tracked, and its opt-out link names nobody, so clicking it suppresses no one.
+
+<Callout type="info" title="Templates">
+Apply a saved template to a step, or save a step as a reusable one from the composer. Templates carry their subject and body and live in your shared library.
+</Callout>
+
+### Attachments
+
+Upload attachments for a step below its composer by dragging and dropping files or clicking the upload area. A file uploaded there is sent with every email from that step and from no other step, and can be removed in the same place. Files attached to the campaign itself rather than to a step, which can only be added through the API, ride every step: they are listed under **Sent with every step** so each step shows everything it carries. Attachments count against your workspace storage limit, shown under **Settings > Billing**; an upload that would pass it is refused with `storage_limit_reached`, and two uploads racing for the last of the quota cannot both get in. Removing a step deletes the files scoped to it.
+
+### Action steps
+
+A step can perform an action instead of sending: add or remove a label, label the conversation, create a task, create a deal or move its stage, unsubscribe the contact, notify (fires your webhooks and integrations), run an automation, or switch. They sit in the flow like email steps and work best at the end of a reply branch, for example creating a deal and notifying your team on a positive reply.
+
+<Callout type="info">
+**Label conversation** is reply-only. It labels the conversation the contact replied on, so place it on a reply branch; anywhere else it is a no-op because there is no thread to label.
+</Callout>
+
+### Switch steps
+
+A Switch step routes each contact down one of several named cases (`interested`, `not_now`, `wrong_person`). Every case is its own column under the step; add the steps that case leads to under it. **Otherwise** is the fallback for contacts no case matched. Renaming a case keeps the steps under it. Side effects stay as ordinary action steps on a path, so the decision and its consequences remain separately visible.
+
+| Decider | How it picks | Cost |
+|---------|--------------|------|
+| **AI prompt** | A plain-language instruction (supports the same variables as your copy). One model call per contact reads their data and picks exactly one case. | 1 credit per contact, refunded on failure. With no credits the step is skipped and the contact takes the fallback path. |
+| **Value** | A template value (`{{.Industry}}`, any custom field) rendered per contact and matched to case names. Casing and whitespace are ignored; wrap a case in slashes for a case-insensitive regex (`/^(vip\|enterprise)/`). Plain cases match first, then regex in order. | None, fully deterministic |
+
+The AI decider adds two optional toggles: **web search** looks up the contact's company (query built from company, name, or corporate domain, never email content) for 1 extra credit when it finds results, and **extended thinking** routes to the stronger model tier for hard decisions, metered through [AI credits](/guides/ai-credits/).
+
+Under **What AI can see**, each step controls whether the model also receives the contact's campaign history and newest email on top of their fields. Both default on. Email and profile fields are treated strictly as content: instructions inside an email ("ignore your rules") are ignored, and the model can only answer with a case you named.
+
+Switch steps always run on the normal schedule, so an instant reply branch leading into one pauses until the next boundary.
+
+</Fold>
+
+<Fold>
+
+## Wait and spacing
+
+Spacing belongs to the **target** step, not a separate node, so there is no wait block on the canvas. The line into a step shows its wait (`3 days`); click it to set the days before that step (0 to 60). A step with no wait shows nothing on its line. The one delay that is not a step's own is the wait before the *first* email, on the line under the Start card.
+
+Because the wait belongs to the target, every path into that step uses the same wait. Spacing follow-ups out keeps your sending pattern natural; see [Deliverability](/guides/deliverability/).
+
+Waits are per contact. A contact waiting three days for a follow-up does not hold up anyone else: other contacts' first emails and due follow-ups keep sending in the meantime, and the campaign only pauses when nothing is due for anyone.
+
+<Callout type="info" title="Instant branches skip the wait">
+A path that runs instantly fires the moment the event happens, so the target's wait does not apply and the control is hidden. Action steps run right away. An email step is due immediately and goes out on the campaign's next scheduling pass, usually within 15 minutes, still inside your sending hours and the mailbox's spacing between sends. A path that is not instant, including one you toggled off, keeps the target's wait.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Follow-ups and threading
+
+A follow-up is the next email step, sent as a **reply on the conversation the contact is already in** rather than as a second email out of nowhere. It carries `In-Reply-To` and `References` pointing at the last message they received from the campaign, and on Gmail it is posted into that same thread, so it sits under the first email in their inbox and in your Sent folder.
+
+Each email step has a **Reply in thread** switch, on by default. Turn it off for a step that should deliberately start a fresh conversation.
+
+- A step that replies in the thread has no subject of its own: a reply carries the conversation's subject, which is the one the email that opened the thread was sent with. The composer shows that subject instead of a subject box.
+- The conversation follows what each contact actually received. When the step that opened the thread is A/B tested, a contact who got Variant B is replied to under Variant B's subject and a contact who got the Original under the Original's, on every follow-up. The composer lists each version's subject. A follow-up repeats the subject the opening email was actually sent with, word for word, so editing the opening step or the contact later does not change the subject of a conversation it already started.
+- A step with **Reply in thread** off writes its own subject and opens a new conversation. Every threading step after it then replies on *that* conversation.
+- The switch does nothing on a contact's first email. There is nothing to reply to, so it opens the thread.
+- A/B variants on a threading step vary the body only, for the same reason.
+
+<Callout type="info" title="The reply headers need the first email to have been confirmed sent">
+They point at the message id the sending provider put on the wire, which Pegasusbound learns when the worker reports the send. If that confirmation never arrives the follow-up still sends, carrying the conversation's subject, but as its own conversation.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## A/B variants
+
+Open a step's editor and click **A/B test this step**.
+
+- The step's own subject and body are the **Original** control arm; adding a variant makes it one weighted arm among several.
+- Up to 5 variants (B through F) on top of the Original.
+- The **traffic-split bar** shows one segment per arm. Drag a divider or type an exact percent; shares always total 100%, and **Even split** balances every active arm.
+- Select an arm to edit its name, subject, and body. Leave a variant's subject or body blank to reuse the step's own. On a step that replies in the thread, a variant's subject is ignored: the conversation owns it. On a step that opens a conversation, the variant's subject becomes the conversation's for every contact it is sent to, so the follow-ups threading on it reply under that subject.
+- A first variant starts at 50/50. Marking one **inactive** drops it from the split without deleting it; deleting the last one returns the step to a single send.
+
+Once variants have sent, each card shows Sent, Open rate, Reply rate, and Bounce rate. When Pegasusbound finds a **winner**, a banner names it with the rule and confidence used, and the winning card gets a trophy.
+
+</Fold>
+
+<Fold>
+
+## Branching
+
+A branch routes contacts by condition. Press **+** under a step and pick **If / else**, or choose **Add a condition** from the step's **⋯** menu, then pick the condition in the side panel and press **Save**; nothing changes for contacts until you do. Each condition is a column under the step, checked left to right like `if` / `else if` / `else`, and the first match wins; **Check earlier** and **Check later** in the path panel change the order. Anyone matching nothing goes on under **Otherwise**, or stops if nothing is there.
+
+| Condition | Meaning |
+| --- | --- |
+| `always` | Right after the wait, unconditionally |
+| `if opened` / `if clicked` | Did it within an N-day window (1 to 60) |
+| `if replied` | Replied |
+| `if didn't open` / `didn't click` / `didn't reply` | Pegasusbound waits the full window, then takes the path only if it still hasn't happened |
+| `if replied: positive` / `negative` / `neutral` | Reply intent, checked once, no day window |
+| `if auto-reply / out of office` | Reply was automated, not human |
+| `if reply intent is…` | The intent [automatic inbox tagging](/guides/inbox-tagging/) read from the human reply: agreed, wants info, wants pricing, not now, not interested, wrong person, opt out, scheduling, in progress, question answered, or unclear. Set only when inbox tagging is on and the classifier was at least 70% sure; an untagged reply takes the otherwise path. Checked once, no day window |
+| `random split` | A random share of contacts (1 to 99%) |
+| Switch case paths | Each case's own column under the Switch, not chosen here. Uses the stored case, so routing spends no credits |
+
+### Instant vs at-the-next-step
+
+Reply intent, `opened`, and `clicked` can fire **instantly**, the moment the event lands rather than at the next scheduled step. A `reply intent is` path fires the moment the tagged reply lands, with no model call at routing time. These show a violet `instant` badge, and you can toggle it off per path to check at the next boundary instead. Instant still respects the window: it runs when they open or click within the N days, and never runs if they don't.
+
+</Fold>
+
+<Fold>
+
+## Reply branches
+
+**If they reply** in the step picker opens a new path that fires the instant the contact replies (a positive reply; change it in the path panel). Press **Save** to add it, then add the steps it should run under it.
+
+- A reply triggers the path of the **specific email it answers**, matched by threading headers. That is the email they actually replied to, not necessarily your latest step, and never both.
+- Unmatched replies fall back to the latest step.
+- Auto-replies and out-of-office messages are not human replies: they trigger no human-reply path and do not stop the sequence. Use the `auto-reply / out of office` condition to react to them.
+- An out-of-office message does, on its own, hold the contact's next step until they are back, in every campaign they are a lead of, so no follow-up is sent to an empty desk. See [out of office and pausing one lead](/guides/campaigns/#out-of-office-and-pausing-one-lead).
+
+</Fold>
+
+<Fold>
+
+## Stop on reply
+
+A campaign-level toggle in the flow toolbar. When on and a contact replies, the rest of the cold sequence stops for them while the reply branch on the email they answered still runs instantly.
+
+Only inbound mail from that campaign contact to the sending mailbox counts. A threaded follow-up synchronized from Sent or Drafts stays outbound even though its `In-Reply-To` header points at an earlier campaign step.
+
+When a campaign rotates between sender accounts, a real inbound reply still links to the campaign if the mail client references an earlier step from another mailbox in the same workspace.
+
+A reply that lands in the mailbox a send's reply-to named counts the same way, although that mailbox never wrote to the contact. That is what a [shared reply inbox](/guides/mailboxes/#a-shared-reply-inbox) relies on: the reply stops the sequence, runs the reply branch, and is credited to the mailbox that sent the email.
+
+When an upgrade repairs a reply marker that was provably created by a synchronized Sent message, the contact resumes at the next due step and the campaign reply totals update with it. An upgrade also restores provable human replies that were received by one campaign mailbox but referenced a thread started by another mailbox in the workspace. Pegasusbound recalculates address verification from the corrected delivery, open, click, reply, and bounce evidence. It leaves ambiguous historical replies untouched.
+
+<Callout type="warn" title="Turn on stop on reply">
+With it off and more than one step, Pegasusbound warns you on the canvas: replies that don't match a reply branch would otherwise keep receiving cold follow-ups. Turning it on still runs your reply branches, so it is strictly safer.
+</Callout>
+
+</Fold>
+
+## Related
+
+<Cards>
+<Card title="Personalization & expressions" href="/guides/expressions/" />
+<Card title="Deliverability" href="/guides/deliverability/" />
+</Cards>

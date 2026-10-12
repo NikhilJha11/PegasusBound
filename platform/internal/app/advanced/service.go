@@ -1,0 +1,2961 @@
+package advanced
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"hash/fnv"
+	"math/rand"
+	"net/mail"
+	"regexp"
+	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/pegasusbound/pegasusbound/internal/pkg/emailverify"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/typesafe"
+	"github.com/pegasusbound/pegasusbound/internal/utils/validate"
+	"github.com/rs/zerolog/log"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/app/bounceclass"
+	"github.com/pegasusbound/pegasusbound/internal/app/inboxtag"
+	"github.com/pegasusbound/pegasusbound/internal/app/listgate"
+	"github.com/pegasusbound/pegasusbound/internal/app/replyclassify"
+	warmupapp "github.com/pegasusbound/pegasusbound/internal/app/warmup"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/displayname"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/mailhdr"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/mailhtml"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/warmlint"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+	"github.com/pegasusbound/pegasusbound/internal/tasks/proto"
+	"github.com/pegasusbound/pegasusbound/internal/tasksched"
+)
+
+type Service interface {
+	GetOrganizationSettings(ctx context.Context, organizationID uuid.UUID) (*models.AdvancedOutreachSettings, *errx.Error)
+	UpdateOrganizationSettings(ctx context.Context, organizationID, updatedBy uuid.UUID, settings *models.AdvancedOutreachSettings) *errx.Error
+
+	GetCampaignSettings(ctx context.Context, campaignID uuid.UUID) (*models.CampaignAdvancedSettings, *errx.Error)
+	// EffectiveSettings is the org settings with the campaign's overrides
+	// merged in — what every per-campaign decision must read.
+	EffectiveSettings(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.AdvancedOutreachSettings, *errx.Error)
+	UpdateCampaignSettings(ctx context.Context, campaignID uuid.UUID, settings *models.AdvancedOutreachSettings) *errx.Error
+
+	ListABVariants(ctx context.Context, campaignID uuid.UUID) ([]models.CampaignABVariant, *errx.Error)
+	CreateABVariant(ctx context.Context, campaignID uuid.UUID, req *models.CreateCampaignABVariantRequest) (*models.CampaignABVariant, *errx.Error)
+	UpdateABVariant(ctx context.Context, campaignID, variantID uuid.UUID, req *models.UpdateCampaignABVariantRequest) (*models.CampaignABVariant, *errx.Error)
+	DeleteABVariant(ctx context.Context, campaignID, variantID uuid.UUID) *errx.Error
+
+	RunPreflight(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.PreflightReport, *errx.Error)
+	GetDeliverabilityDashboard(ctx context.Context, organizationID uuid.UUID, from, to time.Time) (*models.DeliverabilityDashboard, *errx.Error)
+
+	IngestDeliverabilityEvent(ctx context.Context, organizationID uuid.UUID, req *models.IngestDeliverabilityEventRequest) *errx.Error
+
+	// RecordInboundBounce resolves a permanent NDR (parsed worker-side) back to
+	// the original campaign send via its Message-ID and records a bounce
+	// deliverability event. Best-effort: unresolvable bounces are a no-op.
+	RecordInboundBounce(ctx context.Context, emailAccountID uuid.UUID, originalMessageID, failedRecipient, reason string) *errx.Error
+	// RecordInboundComplaint resolves an abuse feedback report (RFC 5965) back
+	// to the campaign send it names and records it as a complaint.
+	RecordInboundComplaint(ctx context.Context, emailAccountID uuid.UUID, originalMessageID, complainedRecipient, provider string) *errx.Error
+
+	ShouldSuppressRecipient(ctx context.Context, organizationID uuid.UUID, recipient string) (bool, string, *errx.Error)
+	// Unsubscribe suppresses a contact in response to a List-Unsubscribe action
+	// (one-click POST or the manual link). Always suppresses — it's an explicit
+	// recipient request, independent of the auto-suppress settings.
+	Unsubscribe(ctx context.Context, organizationID, campaignID, contactID uuid.UUID) *errx.Error
+	// UnsubscribeFromLink is Unsubscribe for a verified link token: the
+	// organization in the token must own the campaign, and via names the
+	// mechanism ("one_click" for the RFC 8058 POST, "link" for a click).
+	UnsubscribeFromLink(ctx context.Context, organizationID, campaignID, contactID uuid.UUID, via string) *errx.Error
+	// Resubscribe undoes a recipient's own unsubscribe from the hosted page.
+	// Only an entry the recipient made (source "unsubscribe") is removed; a
+	// bounce, complaint or manual entry stays.
+	Resubscribe(ctx context.Context, organizationID, contactID uuid.UUID) *errx.Error
+
+	// The workspace suppression list.
+	ListSuppressions(ctx context.Context, organizationID uuid.UUID, q string, beforeAt *time.Time, beforeID *uuid.UUID, limit int) ([]models.SuppressedRecipient, *errx.Error)
+	AddSuppressions(ctx context.Context, organizationID, actorID uuid.UUID, req *models.AddSuppressionsRequest) (*models.AddSuppressionsResult, *errx.Error)
+	RemoveSuppression(ctx context.Context, organizationID, id uuid.UUID) (*models.SuppressedRecipient, *errx.Error)
+	SelectVariant(ctx context.Context, organizationID, campaignID, contactID, sequenceID uuid.UUID, subject, bodyHTML, bodyPlain string) (*models.VariantSelection, *errx.Error)
+	OptimizeSendTime(ctx context.Context, organizationID uuid.UUID, contact *models.Contact, base time.Time) (time.Time, *errx.Error)
+
+	StartTaskExecution(ctx context.Context, taskID uuid.UUID, executionKey string, metadata map[string]interface{}) (bool, *errx.Error)
+	CompleteTaskExecution(ctx context.Context, taskID uuid.UUID, executionKey, status string, metadata map[string]interface{}) *errx.Error
+	CaptureTaskDeadLetter(ctx context.Context, taskID uuid.UUID, taskType string, payload map[string]interface{}, lastError string, attempts int) *errx.Error
+	ListDeadLetters(ctx context.Context, organizationID uuid.UUID, status string, limit int) ([]models.TaskDeadLetter, *errx.Error)
+	ReplayDeadLetter(ctx context.Context, organizationID, deadLetterID uuid.UUID) *errx.Error
+
+	ProcessIncomingReply(ctx context.Context, emailAccountID uuid.UUID, msg *models.EmailMessageStoreData) *errx.Error
+	GetABWinnerAnalysis(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.ABWinnerAnalysis, *errx.Error)
+
+	// CreateContactTask creates a CRM task for a contact, used by the campaign
+	// "create task" action node. createdBy is the campaign owner; the task's
+	// AssignedTo (set in data) is the teammate chosen on the step. Records a
+	// task_created activity on the contact.
+	CreateContactTask(ctx context.Context, orgID, createdBy uuid.UUID, data *models.CreateCRMTask) (*models.CRMTask, *errx.Error)
+
+	// CreateContactDeal opens a CRM deal for a contact, used by the campaign
+	// "create_deal" action node (typically off a positive reply branch). data
+	// carries pipeline/stage/name/value/currency; CampaignID is stamped for deal
+	// attribution. Records a deal-created activity on the contact.
+	CreateContactDeal(ctx context.Context, orgID uuid.UUID, createdBy uuid.UUID, data *models.CreateDeal) (*models.Deal, *errx.Error)
+
+	// MoveContactDealStage moves the contact's most-recent OPEN deal in
+	// pipelineID to stageID, used by the campaign "move_deal_stage" action node.
+	// When the contact has no open deal in that pipeline it is a no-op (returns
+	// nil, nil) rather than an error, so a chained reply automation doesn't fail
+	// just because a deal hasn't been created yet.
+	MoveContactDealStage(ctx context.Context, orgID, contactID, pipelineID, stageID uuid.UUID) (*models.Deal, *errx.Error)
+
+	// LabelThread additively applies unibox conversation labels (categories the
+	// workspace owns) to a thread, for the "label_email" automation action.
+	// No-op on empty input; foreign categories are silently ignored.
+	LabelThread(ctx context.Context, orgID uuid.UUID, threadID string, categoryIDs []uuid.UUID) error
+	// LabelLatestThreadForContact finds the contact's most recent conversation in
+	// the workspace's unibox and labels it, for the "label_email" campaign step
+	// action (which knows the contact but not the thread id). Returns the
+	// labeled thread id, or "" when the contact has no conversation yet.
+	LabelLatestThreadForContact(ctx context.Context, orgID uuid.UUID, contactEmail string, categoryIDs []uuid.UUID) (string, error)
+	// LatestInboundFromContact returns the subject + snippet of the newest email
+	// received from the contact ("" when none). Backs the campaign AI step's
+	// incoming-email context.
+	LatestInboundFromContact(ctx context.Context, userID uuid.UUID, contactEmail string) (string, string, error)
+
+	// ListCategories returns the workspace's contact categories, which double as
+	// unibox conversation labels (same registry). An AI agent step offers these
+	// by name and resolves the model's pick to an id. CreateCategory mints a new
+	// one for the agent's create-on-the-fly path (opt-in per step).
+	ListCategories(ctx context.Context, userID uuid.UUID) ([]models.MiniCategory, error)
+	CreateCategory(ctx context.Context, userID uuid.UUID, title, color string) (models.MiniCategory, error)
+	// ListPipelines returns the org's CRM pipelines with stages hydrated (both
+	// ordered by position), so an AI agent step can pick a valid pipeline+stage
+	// (defaulting to the first pipeline and its first stage).
+	ListPipelines(ctx context.Context, orgID uuid.UUID) ([]models.Pipeline, error)
+
+	// WireDispatcher attaches the event dispatcher that fans classified
+	// replies + deliverability events out to customer webhooks and third-party
+	// integration actions (Slack ping, CRM upsert).
+	WireDispatcher(d EventDispatcher)
+	// WireNotifier attaches the in-app notification gate (reply/bounce/complaint).
+	WireNotifier(n Notifier)
+	// WireCRMOutbox attaches the connected-CRM outbox.
+	WireCRMOutbox(o CRMOutbox)
+	// WireRealtime attaches the org-scoped EMAIL_REPLIED realtime pulse.
+	WireRealtime(p ReplyRealtimePublisher)
+	// WireAutomationRunner attaches the automation runner so instant
+	// "run_automation" action nodes (reply/open/click branches) can launch a flow.
+	WireAutomationRunner(r AutomationRunner)
+	// WireInboxAgent attaches the inbox agent so an inbound human reply drafts a
+	// suggested reply for review (M10). Best-effort; nil = feature off.
+	WireInboxAgent(a InboxAgent)
+	// WireInboxTags attaches the inbox tagging verdicts so a confident human
+	// reply intent is copied onto the contact's progress row for the
+	// reply_intent branch condition. nil = intents never route.
+	WireInboxTags(repo repository.InboxTagRepository)
+	// WireBounceJudge attaches the TypeSafe asker that classifies a bounce
+	// reason not naming the recipient, so a reputation or policy block does
+	// not suppress a good address. nil = every bounce suppresses.
+	WireBounceJudge(asker typesafe.Asker)
+
+	// ApplyInboxTagActions executes what a classified reply is allowed to do
+	// (hold, stop, task, suppress) and returns the actions that landed.
+	ApplyInboxTagActions(ctx context.Context, in InboxTagAction) []string
+
+	// EmitCampaignEvent dispatches a campaign event (e.g. from a sequence
+	// "notify" action node) to customer webhooks and wired integrations.
+	EmitCampaignEvent(ctx context.Context, orgID uuid.UUID, eventType models.WebhookEventType, data map[string]any)
+
+	// FireCampaignEvent publishes a developer-defined "fire event" to the realtime
+	// gateway from a campaign step (subscribers receive it over the API websocket).
+	FireCampaignEvent(ctx context.Context, orgID uuid.UUID, sourceID, name string, fields []models.ActionKV, contact *models.Contact)
+
+	// FireInstantActions runs the matched INSTANT branch's action chain for a
+	// contact the moment an engagement signal lands for them, instead of waiting
+	// for the next scheduled step boundary. eventKind is "reply", "open", or
+	// "click" and selects which branch fields can fire (reply -> reply_* intent
+	// fields; open -> "opened"; click -> "clicked"). The signal must already be
+	// recorded on the contact's progress row before this is called. Best-effort
+	// and non-blocking: it never returns an error and must never block the caller's
+	// hot path. The tracking consumer calls this after RecordEmailOpened /
+	// RecordEmailClicked; ProcessIncomingReply calls the unexported path with
+	// "reply".
+	FireInstantActions(ctx context.Context, campaignID, contactID, sequenceID uuid.UUID, eventKind string)
+
+	// DLQ auto-retry
+	ProcessRetryableDeadLetters(ctx context.Context) (int, *errx.Error)
+
+	// RecheckReplyOptOuts re-reads one page of reply opt-outs under the
+	// current rules, lifting the ones no message from the sender supports.
+	RecheckReplyOptOuts(ctx context.Context, afterID uuid.UUID, limit int) (uuid.UUID, bool, error)
+	// WireAudit attaches the audit trail a lifted reply opt-out is recorded in.
+	WireAudit(a AuditLogger)
+}
+
+type service struct {
+	repo                 repository.AdvancedOutreachRepository
+	campaignRepo         repository.CampaignRepository
+	emailRepo            repository.EmailRepository
+	taskRepo             repository.TaskRepository
+	contactRepo          repository.ContactRepository
+	segmentRepo          repository.SegmentRepository
+	campaignProgressRepo repository.CampaignProgressRepository
+	crmRepo              repository.CRMRepository
+	crmOutbox            CRMOutbox
+	categoryRepo         repository.GroupRepository
+	uniboxRepo           repository.UniboxRepository
+	tasksClient          tasksched.Scheduler
+	warmupService        warmupapp.Service
+	dispatcher           EventDispatcher
+	// audienceRepo measures a campaign's list for the preflight report.
+	// Optional/nil-safe: without it the list check is simply absent.
+	audienceRepo repository.CampaignAudienceRepository
+	// attachmentRepo lets preflight weigh attachments as the send path does.
+	// Optional/nil-safe: without it the content check scores none.
+	attachmentRepo repository.AttachmentRepository
+	notifier       Notifier
+	realtime       ReplyRealtimePublisher
+	// evidence teaches verification what replies and bounces showed.
+	evidence         EvidenceRecorder
+	automationRunner AutomationRunner
+	inboxAgent       InboxAgent
+	// inboxTags reads stored tagging verdicts for reply_intent routing. Optional; nil-safe.
+	inboxTags repository.InboxTagRepository
+	// bounceJudge classifies ambiguous bounce reasons. Optional; nil-safe.
+	bounceJudge typesafe.Asker
+	// audit records what the reply opt-out recheck lifts. Optional; nil-safe.
+	audit AuditLogger
+}
+
+// WireBounceJudge attaches the bounce classifier after construction. Pass a
+// concrete client only when it is non-nil: a nil *Client in an interface is
+// not nil.
+func (s *service) WireBounceJudge(asker typesafe.Asker) { s.bounceJudge = asker }
+
+// bounceJudgeTimeout bounds one bounce classification.
+const bounceJudgeTimeout = 5 * time.Second
+
+func NewService(
+	repo repository.AdvancedOutreachRepository,
+	campaignRepo repository.CampaignRepository,
+	emailRepo repository.EmailRepository,
+	taskRepo repository.TaskRepository,
+	contactRepo repository.ContactRepository,
+	campaignProgressRepo repository.CampaignProgressRepository,
+	crmRepo repository.CRMRepository,
+	categoryRepo repository.GroupRepository,
+	uniboxRepo repository.UniboxRepository,
+	tasksClient tasksched.Scheduler,
+	warmupService warmupapp.Service,
+) Service {
+	return &service{
+		repo:                 repo,
+		campaignRepo:         campaignRepo,
+		emailRepo:            emailRepo,
+		taskRepo:             taskRepo,
+		contactRepo:          contactRepo,
+		campaignProgressRepo: campaignProgressRepo,
+		crmRepo:              crmRepo,
+		categoryRepo:         categoryRepo,
+		uniboxRepo:           uniboxRepo,
+		tasksClient:          tasksClient,
+		warmupService:        warmupService,
+	}
+}
+
+func toErrx(err error) *errx.Error {
+	if err == nil {
+		return nil
+	}
+	if xerr, ok := err.(*errx.Error); ok {
+		return xerr
+	}
+	return errx.InternalError()
+}
+
+func (s *service) GetOrganizationSettings(ctx context.Context, organizationID uuid.UUID) (*models.AdvancedOutreachSettings, *errx.Error) {
+	settings, err := s.repo.GetOutreachSettings(ctx, organizationID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return settings, nil
+}
+
+func (s *service) UpdateOrganizationSettings(ctx context.Context, organizationID, updatedBy uuid.UUID, settings *models.AdvancedOutreachSettings) *errx.Error {
+	if settings == nil {
+		return errx.New(errx.BadRequest, "settings are required")
+	}
+	settings.Normalize()
+	if err := settings.Validate(); err != nil {
+		return errx.NewWithIdentifier(errx.BadRequest, "invalid_setting", err.Error())
+	}
+	var saved []models.InboxTagQuestion
+	if current, err := s.repo.GetOutreachSettings(ctx, organizationID); err == nil && current != nil {
+		saved = current.InboxTagging.Questions
+	}
+	if err := inboxtag.ValidateQuestions(settings.InboxTagging.Questions, saved); err != nil {
+		return errx.NewWithIdentifier(errx.BadRequest, "invalid_setting", err.Error())
+	}
+	if err := s.repo.UpsertOutreachSettings(ctx, organizationID, updatedBy, settings); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+func (s *service) GetCampaignSettings(ctx context.Context, campaignID uuid.UUID) (*models.CampaignAdvancedSettings, *errx.Error) {
+	cfg, err := s.repo.GetCampaignAdvancedSettings(ctx, campaignID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	if cfg == nil {
+		return &models.CampaignAdvancedSettings{
+			CampaignID: campaignID,
+			Overrides:  models.DefaultAdvancedOutreachSettings(),
+			UpdatedAt:  time.Now().UTC(),
+		}, nil
+	}
+	return cfg, nil
+}
+
+func (s *service) UpdateCampaignSettings(ctx context.Context, campaignID uuid.UUID, settings *models.AdvancedOutreachSettings) *errx.Error {
+	if settings == nil {
+		return errx.New(errx.BadRequest, "settings are required")
+	}
+	// Tagging questions and languages are the workspace's; a campaign cannot
+	// carry its own.
+	settings.InboxTagging.Questions = nil
+	settings.InboxTagging.Languages = nil
+	settings.Normalize()
+	if err := settings.Validate(); err != nil {
+		return errx.NewWithIdentifier(errx.BadRequest, "invalid_setting", err.Error())
+	}
+	if err := s.repo.UpsertCampaignAdvancedSettings(ctx, campaignID, settings); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+func (s *service) ListABVariants(ctx context.Context, campaignID uuid.UUID) ([]models.CampaignABVariant, *errx.Error) {
+	out, err := s.repo.ListABVariants(ctx, campaignID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return out, nil
+}
+
+func (s *service) CreateABVariant(ctx context.Context, campaignID uuid.UUID, req *models.CreateCampaignABVariantRequest) (*models.CampaignABVariant, *errx.Error) {
+	if req == nil || strings.TrimSpace(req.Name) == "" {
+		return nil, errx.New(errx.BadRequest, "variant name is required")
+	}
+	out, err := s.repo.CreateABVariant(ctx, campaignID, req)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return out, nil
+}
+
+func (s *service) UpdateABVariant(ctx context.Context, campaignID, variantID uuid.UUID, req *models.UpdateCampaignABVariantRequest) (*models.CampaignABVariant, *errx.Error) {
+	out, err := s.repo.UpdateABVariant(ctx, campaignID, variantID, req)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return out, nil
+}
+
+func (s *service) DeleteABVariant(ctx context.Context, campaignID, variantID uuid.UUID) *errx.Error {
+	if err := s.repo.DeleteABVariant(ctx, campaignID, variantID); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+func (s *service) EffectiveSettings(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.AdvancedOutreachSettings, *errx.Error) {
+	return s.effectiveSettings(ctx, organizationID, campaignID)
+}
+
+func (s *service) effectiveSettings(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.AdvancedOutreachSettings, *errx.Error) {
+	orgSettings, err := s.repo.GetOutreachSettings(ctx, organizationID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	campaignSettings, err := s.repo.GetCampaignAdvancedSettings(ctx, campaignID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	if campaignSettings == nil {
+		return orgSettings, nil
+	}
+	merged, err := mergeSettings(orgSettings, &campaignSettings.Overrides)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return merged, nil
+}
+
+func mergeSettings(base, override *models.AdvancedOutreachSettings) (*models.AdvancedOutreachSettings, error) {
+	if base == nil {
+		def := models.DefaultAdvancedOutreachSettings()
+		base = &def
+	}
+	if override == nil {
+		copy := *base
+		return &copy, nil
+	}
+
+	baseRaw, err := json.Marshal(base)
+	if err != nil {
+		return nil, err
+	}
+	overrideRaw, err := json.Marshal(override)
+	if err != nil {
+		return nil, err
+	}
+
+	var baseMap map[string]interface{}
+	var overrideMap map[string]interface{}
+	if err := json.Unmarshal(baseRaw, &baseMap); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(overrideRaw, &overrideMap); err != nil {
+		return nil, err
+	}
+	mergedMap := mergeMap(baseMap, overrideMap)
+	outRaw, err := json.Marshal(mergedMap)
+	if err != nil {
+		return nil, err
+	}
+	var out models.AdvancedOutreachSettings
+	if err := json.Unmarshal(outRaw, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+func mergeMap(base, override map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(base))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, ov := range override {
+		if ovm, ok := ov.(map[string]interface{}); ok {
+			if bv, exists := out[k]; exists {
+				if bvm, ok := bv.(map[string]interface{}); ok {
+					out[k] = mergeMap(bvm, ovm)
+					continue
+				}
+			}
+		}
+		out[k] = ov
+	}
+	return out
+}
+
+func (s *service) ShouldSuppressRecipient(ctx context.Context, organizationID uuid.UUID, recipient string) (bool, string, *errx.Error) {
+	entry, err := s.repo.IsRecipientSuppressed(ctx, organizationID, recipient)
+	if err != nil {
+		return false, "", toErrx(err)
+	}
+	if entry == nil {
+		return false, "", nil
+	}
+	return true, entry.Reason, nil
+}
+
+// Unsubscribe resolves the campaign + contact behind a List-Unsubscribe link and
+// suppresses the recipient org-wide. Always suppresses (an explicit recipient
+// request), then fans out the campaign.unsubscribed event for Slack/CRM.
+func (s *service) CreateContactTask(ctx context.Context, orgID, createdBy uuid.UUID, data *models.CreateCRMTask) (*models.CRMTask, *errx.Error) {
+	if s.crmRepo == nil {
+		return nil, errx.InternalError()
+	}
+	task, err := s.crmRepo.CreateCRMTask(ctx, orgID, createdBy, data)
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+	s.pushCRM(ctx, orgID, models.CRMObjectTask, task.ID)
+	if task.ContactID != nil {
+		_ = s.crmRepo.RecordActivity(ctx, orgID, *task.ContactID, &createdBy, models.ActivityTaskCreated, map[string]interface{}{
+			"task_id":    task.ID.String(),
+			"task_title": task.Title,
+			"source":     "campaign",
+		})
+	}
+	return task, nil
+}
+
+// CreateContactDeal opens a deal for the contact (campaign "create_deal" node)
+// and records a deal_created activity. Mirrors CreateContactTask.
+func (s *service) CreateContactDeal(ctx context.Context, orgID uuid.UUID, createdBy uuid.UUID, data *models.CreateDeal) (*models.Deal, *errx.Error) {
+	if s.crmRepo == nil {
+		return nil, errx.InternalError()
+	}
+	deal, err := s.crmRepo.CreateDeal(ctx, orgID, data)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	s.pushCRM(ctx, orgID, models.CRMObjectDeal, deal.ID)
+	if deal.ContactID != nil {
+		_ = s.crmRepo.RecordActivity(ctx, orgID, *deal.ContactID, &createdBy, models.ActivityDealCreated, map[string]interface{}{
+			"deal_id":   deal.ID.String(),
+			"deal_name": deal.Name,
+			"source":    "campaign",
+		})
+	}
+	return deal, nil
+}
+
+// MoveContactDealStage moves the contact's most-recent OPEN deal in pipelineID
+// to stageID. "Most-recent open deal" is resolved by scanning the contact's
+// deals (GetDealsByContact returns them created_at DESC) and taking the first
+// one whose pipeline matches and whose status is still "open". No open deal in
+// that pipeline is a deliberate no-op (returns nil, nil) so a chained reply
+// automation doesn't error just because nothing has been created yet.
+func (s *service) MoveContactDealStage(ctx context.Context, orgID, contactID, pipelineID, stageID uuid.UUID) (*models.Deal, *errx.Error) {
+	if s.crmRepo == nil {
+		return nil, errx.InternalError()
+	}
+	deals, err := s.crmRepo.GetDealsByContact(ctx, orgID, contactID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	var target *models.Deal
+	for i := range deals {
+		d := deals[i]
+		if d.PipelineID == pipelineID && d.Status == models.DealStatusOpen {
+			target = &d
+			break // GetDealsByContact is created_at DESC => first match is newest
+		}
+	}
+	if target == nil {
+		// No open deal in this pipeline: documented no-op (not an error).
+		return nil, nil
+	}
+	if target.StageID == stageID {
+		return target, nil // already there
+	}
+	updated, uerr := s.crmRepo.UpdateDeal(ctx, orgID, target.ID, &models.UpdateDeal{StageID: &stageID})
+	if uerr != nil {
+		return nil, toErrx(uerr)
+	}
+	s.pushCRM(ctx, orgID, models.CRMObjectDeal, updated.ID)
+	_ = s.crmRepo.RecordActivity(ctx, orgID, contactID, nil, models.ActivityDealStageChange, map[string]interface{}{
+		"deal_id": updated.ID.String(),
+		"from":    target.StageID.String(),
+		"to":      stageID.String(),
+		"source":  "campaign",
+	})
+	return updated, nil
+}
+
+// ListCategories returns the workspace's categories (contact tags == unibox
+// labels).
+func (s *service) ListCategories(ctx context.Context, orgID uuid.UUID) ([]models.MiniCategory, error) {
+	if s.categoryRepo == nil {
+		return nil, nil
+	}
+	groups, err := s.categoryRepo.List(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]models.MiniCategory, 0, len(groups))
+	for _, g := range groups {
+		out = append(out, models.MiniCategory{ID: g.ID, Title: g.Title, Color: g.Color})
+	}
+	return out, nil
+}
+
+// CreateCategory mints a new category (tag/label) for the agent's opt-in
+// create-on-the-fly path. GroupRepository.Create validates the title (1-50) and
+// enforces the per-workspace cap; color defaults to slate when blank. The
+// creator is nil: an automation has no human behind it.
+func (s *service) CreateCategory(ctx context.Context, orgID uuid.UUID, title, color string) (models.MiniCategory, error) {
+	if s.categoryRepo == nil {
+		return models.MiniCategory{}, errx.New(errx.BadRequest, "labels are not available")
+	}
+	if strings.TrimSpace(color) == "" {
+		color = "#64748b"
+	}
+	g, err := s.categoryRepo.Create(ctx, orgID, uuid.Nil, &models.GroupCreate{Title: strings.TrimSpace(title), Color: color})
+	if err != nil {
+		return models.MiniCategory{}, err
+	}
+	return models.MiniCategory{ID: g.ID, Title: g.Title, Color: g.Color}, nil
+}
+
+// ListPipelines passes through the org's CRM pipelines (stages hydrated).
+func (s *service) ListPipelines(ctx context.Context, orgID uuid.UUID) ([]models.Pipeline, error) {
+	if s.crmRepo == nil {
+		return nil, nil
+	}
+	return s.crmRepo.ListPipelines(ctx, orgID)
+}
+
+func (s *service) Unsubscribe(ctx context.Context, organizationID, campaignID, contactID uuid.UUID) *errx.Error {
+	return s.unsubscribe(ctx, organizationID, campaignID, contactID, "action")
+}
+
+func (s *service) UnsubscribeFromLink(ctx context.Context, organizationID, campaignID, contactID uuid.UUID, via string) *errx.Error {
+	if via != "one_click" {
+		via = "link"
+	}
+	return s.unsubscribe(ctx, organizationID, campaignID, contactID, via)
+}
+
+// unsubscribe records an explicit opt-out: the address goes on the workspace
+// suppression list and the contact's own subscription flag is cleared, so the
+// CRM and the send gate tell the same story. The campaign and the contact
+// must both belong to organizationID.
+func (s *service) unsubscribe(ctx context.Context, organizationID, campaignID, contactID uuid.UUID, via string) *errx.Error {
+	campaign, err := s.campaignRepo.GetByID(ctx, campaignID)
+	if err != nil || campaign == nil || campaign.OrganizationID == nil || *campaign.OrganizationID != organizationID {
+		return errx.New(errx.BadRequest, "invalid unsubscribe link")
+	}
+	found, cerr := s.contactRepo.GetByIDsAndOrganization(ctx, organizationID, []uuid.UUID{contactID})
+	if cerr != nil || len(found) != 1 || found[0].Email == "" {
+		return errx.New(errx.BadRequest, "invalid unsubscribe link")
+	}
+	contact := &found[0]
+
+	reason := map[string]string{
+		"one_click": "one-click unsubscribe (mail client)",
+		"link":      "clicked the unsubscribe link",
+		"action":    "unsubscribed by a sequence action",
+	}[via]
+	if err := s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
+		OrganizationID: *campaign.OrganizationID,
+		Email:          contact.Email,
+		Kind:           models.SuppressionKindEmail,
+		Reason:         reason,
+		Source:         models.DeliverabilityEventUnsubscribe,
+		CampaignID:     &campaignID,
+		Metadata:       map[string]interface{}{"via": via},
+	}); err != nil {
+		return toErrx(err)
+	}
+	if err := s.contactRepo.SetSubscribedByEmail(ctx, *campaign.OrganizationID, contact.Email, false); err != nil {
+		log.Warn().Err(err).Str("contact_id", contactID.String()).Msg("unsubscribe: could not clear the contact's subscription flag")
+	}
+
+	s.emit(ctx, *campaign.OrganizationID, models.WebhookEventCampaignUnsubscribed, map[string]any{
+		"campaign_id":   campaignID.String(),
+		"contact_id":    contactID.String(),
+		"contact_email": contact.Email,
+		"source":        via,
+	})
+
+	// The link in a message is the same for everyone it copied and cannot say
+	// who used it, so it opts all of them out. A sequence action is about the
+	// lead alone.
+	if via != "action" {
+		return s.unsubscribeLeadCopies(ctx, *campaign.OrganizationID, campaignID, contactID, contact.Email, via, reason)
+	}
+	return nil
+}
+
+// isLeadCopy reports whether sender is one of the contacts copied on the
+// lead's emails rather than the lead answering from another address. A failed
+// read is an error, never "not a copy", which would charge the lead.
+func (s *service) isLeadCopy(ctx context.Context, campaignID, contactID uuid.UUID, leadEmail, sender string) (bool, error) {
+	if s.campaignProgressRepo == nil || sender == "" || strings.EqualFold(leadEmail, sender) {
+		return false, nil
+	}
+	copies, err := s.campaignProgressRepo.ListLeadCC(ctx, campaignID, contactID)
+	if err != nil {
+		return false, err
+	}
+	for _, cp := range copies {
+		if strings.EqualFold(strings.TrimSpace(cp.Email), sender) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// unsubscribeLeadCopies suppresses every contact copied on one lead's emails.
+// A failure fails the request, so the opt-out is retried rather than
+// acknowledged with a copy still sendable; the upserts are idempotent.
+func (s *service) unsubscribeLeadCopies(ctx context.Context, orgID, campaignID, contactID uuid.UUID, leadEmail, via, reason string) *errx.Error {
+	if s.campaignProgressRepo == nil {
+		return nil
+	}
+	copies, err := s.campaignProgressRepo.ListLeadCC(ctx, campaignID, contactID)
+	if err != nil {
+		return toErrx(err)
+	}
+	for _, cp := range copies {
+		addr := strings.ToLower(strings.TrimSpace(cp.Email))
+		if addr == "" {
+			continue
+		}
+		if err := s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
+			OrganizationID: orgID,
+			Email:          addr,
+			Kind:           models.SuppressionKindEmail,
+			Reason:         reason + " on an email copied to them",
+			Source:         models.DeliverabilityEventUnsubscribe,
+			CampaignID:     &campaignID,
+			Metadata:       map[string]interface{}{"via": via, "copied_on": leadEmail},
+		}); err != nil {
+			return toErrx(err)
+		}
+		if err := s.contactRepo.SetSubscribedByEmail(ctx, orgID, addr, false); err != nil {
+			log.Warn().Err(err).Str("contact_id", cp.ContactID.String()).Msg("unsubscribe: could not clear a copied contact's subscription flag")
+		}
+		s.emit(ctx, orgID, models.WebhookEventCampaignUnsubscribed, map[string]any{
+			"campaign_id":   campaignID.String(),
+			"contact_id":    cp.ContactID.String(),
+			"contact_email": cp.Email,
+			"source":        via,
+		})
+	}
+	return nil
+}
+
+func (s *service) Resubscribe(ctx context.Context, organizationID, contactID uuid.UUID) *errx.Error {
+	contact, cerr := s.contactRepo.GetByID(ctx, contactID)
+	if cerr != nil || contact == nil || contact.Email == "" {
+		return errx.New(errx.BadRequest, "invalid unsubscribe link")
+	}
+	// The contact must belong to the organization in the token.
+	if owned, oerr := s.contactRepo.GetByEmailAndOrganization(ctx, organizationID, contact.Email); oerr != nil || owned == nil {
+		return errx.New(errx.BadRequest, "invalid unsubscribe link")
+	}
+	if _, err := s.repo.DeleteSuppressionByEmail(ctx, organizationID, contact.Email, models.DeliverabilityEventUnsubscribe); err != nil {
+		return toErrx(err)
+	}
+	if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, contact.Email, true); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+func (s *service) ListSuppressions(ctx context.Context, organizationID uuid.UUID, q string, beforeAt *time.Time, beforeID *uuid.UUID, limit int) ([]models.SuppressedRecipient, *errx.Error) {
+	out, err := s.repo.ListSuppressedRecipients(ctx, organizationID, q, beforeAt, beforeID, limit)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return out, nil
+}
+
+// suppressionDomain matches a bare host ("acme.com", "mail.acme.co.uk").
+var suppressionDomain = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
+// AddSuppressions adds each value as an address, or as a domain when it has
+// no local part ("acme.com" or "@acme.com"). Unparseable values are reported
+// back rather than failing the whole batch, because the batch is usually a
+// pasted list with a stray header or blank line in it.
+func (s *service) AddSuppressions(ctx context.Context, organizationID, actorID uuid.UUID, req *models.AddSuppressionsRequest) (*models.AddSuppressionsResult, *errx.Error) {
+	if req == nil || len(req.Entries) == 0 {
+		return nil, errx.New(errx.BadRequest, "entries are required")
+	}
+	if len(req.Entries) > 5000 {
+		return nil, errx.New(errx.BadRequest, "at most 5000 entries per request")
+	}
+	source := models.SuppressionSourceManual
+	if len(req.Entries) > 1 {
+		source = models.SuppressionSourceImport
+	}
+	res := &models.AddSuppressionsResult{Skipped: []string{}}
+	seen := map[string]bool{}
+	entries := make([]models.SuppressedRecipient, 0, len(req.Entries))
+	for _, e := range req.Entries {
+		raw := strings.TrimSpace(e.Value)
+		value := strings.ToLower(strings.TrimPrefix(raw, "@"))
+		if value == "" || seen[value] {
+			continue
+		}
+		kind := models.SuppressionKindEmail
+		if strings.Contains(value, "@") {
+			if !validate.Email(value) {
+				res.Skipped = append(res.Skipped, raw)
+				continue
+			}
+		} else if suppressionDomain.MatchString(value) {
+			kind = models.SuppressionKindDomain
+		} else {
+			res.Skipped = append(res.Skipped, raw)
+			continue
+		}
+		seen[value] = true
+		reason := strings.TrimSpace(e.Reason)
+		if reason == "" {
+			reason = strings.TrimSpace(req.Reason)
+		}
+		if reason == "" {
+			reason = "added to the suppression list"
+		}
+		if r := []rune(reason); len(r) > models.UnsubscribeCopyMaxLen {
+			reason = string(r[:models.UnsubscribeCopyMaxLen])
+		}
+		entries = append(entries, models.SuppressedRecipient{
+			OrganizationID: organizationID,
+			Email:          value,
+			Kind:           kind,
+			Reason:         reason,
+			Source:         source,
+			Metadata:       map[string]interface{}{"added_by": actorID.String()},
+		})
+	}
+	// One transaction: a pasted list lands whole or not at all, so a failure
+	// part-way never leaves the caller guessing which half got in.
+	if err := s.repo.UpsertSuppressedRecipients(ctx, entries); err != nil {
+		return nil, toErrx(err)
+	}
+	for _, e := range entries {
+		if e.Kind != models.SuppressionKindEmail {
+			continue
+		}
+		if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, e.Email, false); err != nil {
+			log.Warn().Err(err).Msg("suppression: could not clear the contact's subscription flag")
+		}
+	}
+	res.Added = len(entries)
+	return res, nil
+}
+
+func (s *service) RemoveSuppression(ctx context.Context, organizationID, id uuid.UUID) (*models.SuppressedRecipient, *errx.Error) {
+	entry, err := s.repo.GetSuppressedRecipient(ctx, organizationID, id)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	if entry == nil {
+		return nil, errx.New(errx.NotFound, "suppression entry not found")
+	}
+	if _, err := s.repo.DeleteSuppressedRecipient(ctx, organizationID, id); err != nil {
+		return nil, toErrx(err)
+	}
+	// Lifting an address's suppression restores the contact too; otherwise
+	// the send gate still refuses it on the subscription flag and the list
+	// says one thing while the contact says another.
+	if entry.Kind == models.SuppressionKindEmail {
+		if err := s.contactRepo.SetSubscribedByEmail(ctx, organizationID, entry.Email, true); err != nil {
+			log.Warn().Err(err).Msg("suppression: could not restore the contact's subscription flag")
+		}
+	}
+	return entry, nil
+}
+
+// pickVariantWeightedRandom does a weighted random draw over active variants.
+func pickVariantWeightedRandom(variants []models.CampaignABVariant) *models.CampaignABVariant {
+	total := 0
+	for i := range variants {
+		if variants[i].Weight <= 0 {
+			variants[i].Weight = 100
+		}
+		total += variants[i].Weight
+	}
+	if total <= 0 {
+		return nil
+	}
+	pick := rand.Intn(total)
+	running := 0
+	for i := range variants {
+		running += variants[i].Weight
+		if pick < running {
+			return &variants[i]
+		}
+	}
+	return &variants[len(variants)-1]
+}
+
+// abControlWeight is the implicit weight of a step's original content (the
+// control arm) in a step-scoped A/B split, matching the default variant weight
+// so one variant yields an even 50/50 split with the original.
+const abControlWeight = 100
+
+// pickVariantDeterministic does a weighted draw seeded by a stable string, so
+// the same seed always picks the same variant (used for per-step assignment).
+func pickVariantDeterministic(variants []models.CampaignABVariant, seed string) *models.CampaignABVariant {
+	total := 0
+	for i := range variants {
+		if variants[i].Weight <= 0 {
+			variants[i].Weight = 100
+		}
+		total += variants[i].Weight
+	}
+	if total <= 0 {
+		return nil
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(seed))
+	pick := int(h.Sum32() % uint32(total))
+	running := 0
+	for i := range variants {
+		running += variants[i].Weight
+		if pick < running {
+			return &variants[i]
+		}
+	}
+	return &variants[len(variants)-1]
+}
+
+func (s *service) SelectVariant(ctx context.Context, organizationID, campaignID, contactID, sequenceID uuid.UUID, subject, bodyHTML, bodyPlain string) (*models.VariantSelection, *errx.Error) {
+	settings, xerr := s.effectiveSettings(ctx, organizationID, campaignID)
+	if xerr != nil {
+		return nil, xerr
+	}
+	if !settings.ABTesting.Enabled {
+		return &models.VariantSelection{Subject: subject, BodyHTML: bodyHTML, BodyPlain: bodyPlain}, nil
+	}
+
+	variants, err := s.repo.ListABVariants(ctx, campaignID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	// Partition active variants into step-scoped (this step) and campaign-level.
+	var stepVariants, campaignVariants []models.CampaignABVariant
+	for _, v := range variants {
+		if !v.IsActive {
+			continue
+		}
+		if v.SequenceID != nil {
+			if *v.SequenceID == sequenceID {
+				stepVariants = append(stepVariants, v)
+			}
+		} else {
+			campaignVariants = append(campaignVariants, v)
+		}
+	}
+
+	var selected *models.CampaignABVariant
+	if len(stepVariants) > 0 {
+		// Step-scoped: the step's own content is the control arm. Contacts split
+		// across the original PLUS the active variants by weight, deterministically
+		// per (contact, step). The original's share is the weight of its is_control
+		// row when the user has set one, otherwise the default control weight. The
+		// control arm carries the zero id (or an is_control row, whose content is
+		// ignored); if it wins we send the step's own content.
+		controlWeight := abControlWeight
+		arms := make([]models.CampaignABVariant, 0, len(stepVariants))
+		for _, v := range stepVariants {
+			if v.IsControl {
+				controlWeight = v.Weight
+				continue
+			}
+			arms = append(arms, v)
+		}
+		pool := append([]models.CampaignABVariant{{Weight: controlWeight}}, arms...)
+		selected = pickVariantDeterministic(pool, contactID.String()+":"+sequenceID.String())
+		if selected != nil && (selected.ID == uuid.Nil || selected.IsControl) {
+			return &models.VariantSelection{Subject: subject, BodyHTML: bodyHTML, BodyPlain: bodyPlain}, nil
+		}
+	} else if len(campaignVariants) > 0 {
+		// Campaign-level (legacy): keep the assignment-based selection so a
+		// contact stays on one variant across the whole campaign.
+		assigned, aerr := s.repo.GetAssignedVariant(ctx, campaignID, contactID)
+		if aerr != nil {
+			return nil, toErrx(aerr)
+		}
+		if assigned != nil && assigned.IsActive && assigned.SequenceID == nil {
+			selected = assigned
+		} else {
+			selected = pickVariantWeightedRandom(campaignVariants)
+			if selected != nil {
+				_ = s.repo.AssignVariant(ctx, campaignID, contactID, selected.ID)
+			}
+		}
+	}
+
+	if selected == nil {
+		return &models.VariantSelection{Subject: subject, BodyHTML: bodyHTML, BodyPlain: bodyPlain}, nil
+	}
+
+	finalSubject := subject
+	if selected.Subject != "" {
+		finalSubject = selected.Subject
+	}
+	finalHTML := bodyHTML
+	if selected.BodyHTML != "" {
+		finalHTML = selected.BodyHTML
+	}
+	finalPlain := bodyPlain
+	if selected.BodyPlain != "" {
+		finalPlain = selected.BodyPlain
+	}
+	return &models.VariantSelection{
+		VariantID: &selected.ID,
+		Subject:   finalSubject,
+		BodyHTML:  finalHTML,
+		BodyPlain: finalPlain,
+	}, nil
+}
+
+// parseSenderEmail is the bare, lowercased address of the first From value,
+// whichever form the sync stored it in ("Name <addr>", "Name (addr)", "addr").
+func parseSenderEmail(addrs []string) string {
+	if len(addrs) == 0 {
+		return ""
+	}
+	primary := strings.TrimSpace(addrs[0])
+	if primary == "" {
+		return ""
+	}
+	return strings.ToLower(strings.Trim(mailhdr.Bare(primary), "<>"))
+}
+
+func messageAddressesMailbox(msg *models.EmailMessageStoreData, account *models.Email) bool {
+	if msg == nil || account == nil {
+		return false
+	}
+	targets := make(map[string]struct{}, 3)
+	for _, raw := range []string{account.Email, account.SendFrom(), account.ReplyTo} {
+		if address := parseSenderEmail([]string{raw}); address != "" {
+			targets[address] = struct{}{}
+		}
+	}
+	for _, fields := range [][]string{msg.ToAddr, msg.CC, msg.BCC} {
+		for _, raw := range fields {
+			addresses, err := mail.ParseAddressList(raw)
+			if err != nil {
+				// One entry per recipient in a form net/mail refuses: the
+				// IMAP sync's "Name (addr)".
+				if address := parseSenderEmail([]string{raw}); address != "" {
+					if _, ok := targets[address]; ok {
+						return true
+					}
+				}
+				continue
+			}
+			for _, address := range addresses {
+				if _, ok := targets[strings.ToLower(strings.TrimSpace(address.Address))]; ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func cleanMessageID(mid string) string {
+	return strings.TrimSpace(strings.Trim(mid, "<>"))
+}
+
+// buildReplyHeaders synthesizes the header map the reply classifier's Layer 1
+// (header) scan reads. EmailMessageStoreData does not carry the full raw header
+// block, but it does carry the structured fields the deterministic markers care
+// about (From, Reply-To) plus any custom headers the worker folded into Flags
+// using the "Header-Name:value" convention (the same encoding extractHeaderValue
+// relies on for the warmup token). That lets RFC 3834 / Precedence / X-Autoreply
+// markers reach the classifier when the worker forwarded them, while the From
+// (mailer-daemon / no-reply) and Subject ("Automatic reply") signals work from
+// the always-present structured fields.
+func buildReplyHeaders(msg *models.EmailMessageStoreData) map[string][]string {
+	if msg == nil {
+		return nil
+	}
+	// Custom headers the worker stored as "Header-Name:value" flags (auto-reply
+	// markers, Precedence, etc.).
+	h := replyclassify.FlagHeaders(msg.Flags)
+	if len(msg.FromAddr) > 0 {
+		h["From"] = msg.FromAddr
+	}
+	if len(msg.ReplyTo) > 0 {
+		h["Reply-To"] = msg.ReplyTo
+	}
+	if msg.Subject != "" {
+		h["Subject"] = []string{msg.Subject}
+	}
+	return h
+}
+
+// replyOptOutEligible decides whether an inbound message may be read as a
+// person asking us to stop. Only a person answering our outreach can: a bounce
+// or an auto-reply asks nothing, and a newsletter's footer "unsubscribe" is its
+// own sender's, so mail that is neither in one of our threads nor from a
+// contact, or that was sent to a list, is never an opt-out.
+func replyOptOutEligible(verdict replyclassify.Result, inOurThread, fromContact bool, headers map[string][]string) bool {
+	if replyclassify.IsAutomated(verdict.Class) {
+		return false
+	}
+	if inOurThread {
+		return true
+	}
+	return fromContact && !replyclassify.IsBulkMail(headers)
+}
+
+// replyTaskTitle words the follow-up the way it is read in a task list, rather
+// than as the classifier's own vocabulary.
+func replyTaskTitle(intent models.ReplyIntentType, sender string) string {
+	switch intent {
+	case models.ReplyIntentOutOfOffice:
+		return "Follow up: out-of-office reply from " + sender
+	case models.ReplyIntentAutomated:
+		return "Follow up: automatic reply from " + sender
+	case models.ReplyIntentNeutral:
+		return "Follow up: reply from " + sender
+	default:
+		return fmt.Sprintf("Follow up: %s reply from %s", intent, sender)
+	}
+}
+
+// automatedIntent maps a machine-reply verdict onto the recorded intent
+// vocabulary: a vacation notice keeps its own bucket, everything else machine
+// (autoresponders, ticket acknowledgements, bounces) is "automated".
+func automatedIntent(r replyclassify.Result) (models.ReplyIntentType, float64) {
+	if r.Class == replyclassify.ClassOutOfOffice {
+		return models.ReplyIntentOutOfOffice, r.Confidence
+	}
+	return models.ReplyIntentAutomated, r.Confidence
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func uuidString(id *uuid.UUID) string {
+	if id == nil {
+		return ""
+	}
+	return id.String()
+}
+
+func containsAnyKeyword(text string, keywords []string) bool {
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	for _, k := range keywords {
+		if k == "" {
+			continue
+		}
+		if strings.Contains(lower, strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
+func classifyReply(text string, cfg models.ReplyIntentSettings) (models.ReplyIntentType, float64) {
+	lower := strings.ToLower(text)
+	if strings.TrimSpace(lower) == "" {
+		return models.ReplyIntentNeutral, 0.2
+	}
+
+	score := map[models.ReplyIntentType]float64{
+		models.ReplyIntentPositive:    0,
+		models.ReplyIntentNegative:    0,
+		models.ReplyIntentOutOfOffice: 0,
+		models.ReplyIntentQuestion:    0,
+	}
+
+	for _, kw := range cfg.PositiveKeywords {
+		if kw != "" && strings.Contains(lower, strings.ToLower(kw)) {
+			score[models.ReplyIntentPositive] += 1.2
+		}
+	}
+	for _, kw := range cfg.NegativeKeywords {
+		if kw != "" && strings.Contains(lower, strings.ToLower(kw)) {
+			score[models.ReplyIntentNegative] += 1.5
+		}
+	}
+	for _, kw := range cfg.OutOfOfficeKeywords {
+		if kw != "" && strings.Contains(lower, strings.ToLower(kw)) {
+			score[models.ReplyIntentOutOfOffice] += 2
+		}
+	}
+	for _, kw := range cfg.QuestionKeywords {
+		if kw != "" && strings.Contains(lower, strings.ToLower(kw)) {
+			score[models.ReplyIntentQuestion] += 1
+		}
+	}
+	if strings.Contains(lower, "?") {
+		score[models.ReplyIntentQuestion] += 0.8
+	}
+
+	best := models.ReplyIntentNeutral
+	bestScore := 0.0
+	for intent, sc := range score {
+		if sc > bestScore {
+			best = intent
+			bestScore = sc
+		}
+	}
+	if bestScore == 0 {
+		return models.ReplyIntentNeutral, 0.35
+	}
+	conf := bestScore / (bestScore + 1.5)
+	if conf > 0.99 {
+		conf = 0.99
+	}
+	return best, conf
+}
+
+func (s *service) ProcessIncomingReply(ctx context.Context, emailAccountID uuid.UUID, msg *models.EmailMessageStoreData) *errx.Error {
+	if !msg.MayBeInbound() {
+		return nil
+	}
+	inbound, err := s.campaignProgressRepo.IsInboundReplySource(ctx, emailAccountID, msg.ID)
+	if err != nil {
+		return toErrx(err)
+	}
+	if !inbound {
+		return nil
+	}
+	account, xerr := s.emailRepo.GetByID(ctx, emailAccountID)
+	if xerr != nil {
+		return xerr
+	}
+	if account == nil || account.OrganizationID == nil {
+		return nil
+	}
+
+	kind := inboxtag.DeterministicKind(inboxtag.Message{
+		Headers: buildReplyHeaders(msg), Subject: msg.Subject,
+		BodyText: firstNonEmpty(msg.BodyText, msg.Snippet), InReplyTo: msg.InReplyTo,
+	}, nil)
+	var verdict replyclassify.Result
+	if s.inboxTags != nil && msg.MessageID != "" {
+		stored, tagErr := s.inboxTags.GetByMessageID(ctx, *account.OrganizationID, msg.MessageID)
+		if tagErr == nil && stored != nil && stored.KindConfidence >= inboxtag.ConfFloor && stored.ReviewReason != "kind" {
+			if inboxtag.IsAutomatedKind(stored.Kind) {
+				kind = stored.Kind
+				verdict = replyclassify.Result{
+					Class:      inboxtag.ReplyClassFor(stored.Kind, stored.Intent),
+					Confidence: stored.KindConfidence, Source: replyclassify.SourceModel,
+				}
+			}
+		}
+	}
+	switch kind {
+	case inboxtag.KindNotification, inboxtag.KindBounceHard, inboxtag.KindBounceSoft:
+		return nil
+	}
+
+	settings, err := s.repo.GetOutreachSettings(ctx, *account.OrganizationID)
+	if err != nil {
+		return toErrx(err)
+	}
+
+	sender := parseSenderEmail(msg.FromAddr)
+	if sender == "" {
+		return nil
+	}
+	if sender == parseSenderEmail([]string{account.Email}) || sender == parseSenderEmail([]string{account.SendFrom()}) {
+		return nil
+	}
+	if !messageAddressesMailbox(msg, account) {
+		return nil
+	}
+
+	text := strings.TrimSpace(msg.Snippet)
+	text = strings.TrimSpace(text + "\n" + msg.Subject)
+
+	// The full layered classification (including the optional model layer) runs
+	// further down, once the campaign context is known to store it on. Classifying
+	// only inside that block means a reply with no campaign match never spends a
+	// model call. verdict is what it decided, read after the block; held is
+	// when an out-of-office hold lifts, for the notification to name.
+	replyClaimToken := uuid.Nil
+	replyClaimCompleted := false
+
+	var campaignID *uuid.UUID
+	var sequenceID *uuid.UUID
+	var contactID *uuid.UUID
+	var taskID *uuid.UUID
+	// senderAccountID is the mailbox that sent the email this answers, which a
+	// shared reply inbox is not; viaReplyTo is a reply that landed here only
+	// because that send's Reply-To named this mailbox.
+	var senderAccountID *uuid.UUID
+	var viaReplyTo bool
+	var referencesCampaignThread bool
+	// contactEmail is the address we mailed, which is not always the one
+	// that answered; an opt-out has to reach both.
+	var contactEmail string
+	// senderIsCopy is a reply from a contact copied on the lead's emails. It
+	// counts as the lead's reply, but the copy's own away message or opt-out
+	// is about the copy, not the lead.
+	var senderIsCopy bool
+
+	// First, try exact message threading via In-Reply-To.
+	for _, mid := range msg.InReplyTo {
+		candidate := cleanMessageID(mid)
+		if candidate == "" {
+			continue
+		}
+		task, err := s.taskRepo.GetTaskByMessageID(ctx, candidate)
+		if err != nil || task == nil || task.TaskType != "campaign" {
+			continue
+		}
+		referencesCampaignThread = true
+		ct, err := s.taskRepo.GetCampaignTask(ctx, task.ID)
+		if err != nil || ct == nil || ct.CampaignID == nil || ct.ContactID == nil {
+			continue
+		}
+		if task.EmailAccountID != emailAccountID {
+			campaign, err := s.campaignRepo.GetByID(ctx, *ct.CampaignID)
+			if err != nil || campaign == nil || campaign.OrganizationID == nil ||
+				*campaign.OrganizationID != *account.OrganizationID {
+				continue
+			}
+			// The send pointing its Reply-To here is as good as having sent
+			// from here: a shared reply inbox never writes to anyone.
+			if !account.ReceivesAt(task.ReplyTo) {
+				sentFromReceivingAccount, err := s.campaignProgressRepo.CampaignContactSentFromAccount(
+					ctx, *ct.CampaignID, *ct.ContactID, emailAccountID,
+				)
+				if err != nil {
+					return toErrx(err)
+				}
+				if !sentFromReceivingAccount {
+					continue
+				}
+			}
+		}
+		// The thread is the evidence; the From address does not have to be
+		// the contact's. People answer from a "send as" alias, a forward or
+		// a colleague's desk, and each of those is a reply to the email we
+		// sent this lead. Requiring the addresses to match threw every one
+		// of them away, and the fallback below refused them too because the
+		// thread was ours (a Gmail replying as its alias never counted).
+		contact, contactErr := s.contactRepo.GetByID(ctx, *ct.ContactID)
+		if contactErr != nil {
+			return contactErr
+		}
+		if contact == nil {
+			continue
+		}
+		contactEmail = strings.TrimSpace(contact.Email)
+		taskID = &task.ID
+		senderAccountID = &task.EmailAccountID
+		viaReplyTo = task.EmailAccountID != emailAccountID && account.ReceivesAt(task.ReplyTo)
+		campaignID = ct.CampaignID
+		contactID = ct.ContactID
+		sequenceID = ct.SequenceID
+		isCopy, cerr := s.isLeadCopy(ctx, *ct.CampaignID, *ct.ContactID, contactEmail, sender)
+		if cerr != nil {
+			return toErrx(cerr)
+		}
+		senderIsCopy = isCopy
+		break
+	}
+
+	if contactID == nil {
+		contact, xerr := s.contactRepo.GetByEmailAndOrganization(ctx, *account.OrganizationID, sender)
+		if xerr != nil {
+			return xerr
+		}
+		if contact != nil {
+			contactID = &contact.ID
+			contactEmail = strings.TrimSpace(contact.Email)
+		}
+	}
+
+	if campaignID == nil && contactID != nil && !referencesCampaignThread {
+		latest, err := s.campaignProgressRepo.GetLatestCampaignSequenceForContact(ctx, *contactID)
+		if err == nil && latest != nil {
+			campaignID = &latest.CampaignID
+			sequenceID = &latest.SequenceID
+		}
+	}
+
+	// A copied contact answering further down the thread (to the lead's own
+	// reply, say) names no message of ours; the mailbox that wrote to the
+	// lead, or the one its Reply-To named, is the evidence, and the reply is
+	// the lead's. A fresh message with
+	// no parent is not a reply to anything and credits nobody.
+	if campaignID == nil && contactID != nil && !referencesCampaignThread && len(msg.InReplyTo) > 0 {
+		ref, err := s.campaignProgressRepo.LeadForCopiedReply(ctx, *contactID, emailAccountID)
+		if err != nil {
+			return toErrx(err)
+		}
+		if ref != nil {
+			lead, lerr := s.contactRepo.GetByID(ctx, ref.ContactID)
+			if lerr != nil {
+				return lerr
+			}
+			if lead != nil {
+				campaignID, sequenceID = &ref.CampaignID, &ref.SequenceID
+				contactID = &ref.ContactID
+				contactEmail = strings.TrimSpace(lead.Email)
+				senderIsCopy = true
+			}
+		}
+	}
+
+	if campaignID != nil && contactID != nil && sequenceID != nil {
+		cID, ctID, sID := *campaignID, *contactID, *sequenceID
+
+		// Cost guard for the optional AI layer (Layer 3). Layers 1-2 (headers +
+		// lexicon) are free and always run; the paid model is only spent on a
+		// genuinely new, non-trivial, human-looking reply from a contact we have
+		// not already classified. So one contact spamming replies costs at most a
+		// single model call, and trivial/boilerplate bodies never reach the model.
+		gate := func() bool {
+			if !replyclassify.WorthModeling(replyclassify.Input{BodyText: msg.Snippet}) {
+				return false
+			}
+			if prior, perr := s.campaignProgressRepo.GetLatestReplyClass(ctx, ctID, cID); perr == nil &&
+				prior != "" && prior != replyclassify.ClassUnknown {
+				return false
+			}
+			return true
+		}
+
+		claimToken, err := s.campaignProgressRepo.ClaimIncomingReply(ctx, emailAccountID, msg.ID)
+		if err != nil {
+			return toErrx(err)
+		}
+		if claimToken == uuid.Nil {
+			return nil
+		}
+		replyClaimToken = claimToken
+
+		replyResult := verdict
+		if replyResult.Class == "" {
+			replyResult = replyclassify.ClassifyGated(ctx, replyclassify.Input{
+				Headers:  buildReplyHeaders(msg),
+				Subject:  msg.Subject,
+				BodyText: msg.Snippet,
+				// The typed layer answers from the tagger's stored verdict for
+				// this message, so a reply is judged once.
+				OrganizationID: *account.OrganizationID,
+				MessageID:      msg.MessageID,
+			}, gate)
+		}
+
+		// Always persist the classifier verdict so reply_* branches can route on
+		// it (including reply_automated for OOO / autoresponders). Layers 1-2 run
+		// for every reply, so OOO/unsubscribe stay correct even when the gate
+		// skipped the model.
+		verdict = replyResult
+		_ = s.campaignProgressRepo.RecordReplyClassification(ctx, cID, ctID, sID, replyResult.Class, replyResult.Source, replyResult.Confidence)
+		// The tagging verdict for this message was stored before this hook ran;
+		// copy a confident human-reply intent so reply_intent branches can route on
+		// it, ahead of the instant matcher below.
+		s.recordReplyIntent(ctx, *account.OrganizationID, msg.MessageID, cID, ctID, sID)
+
+		// OOO trap fix: only a HUMAN reply stamps replied_at. An auto_reply /
+		// out_of_office must NOT count as a reply, or it would (a) trip
+		// stop_on_reply and silently halt the sequence, and (b) match the plain
+		// "replied" branch. Both stop_on_reply and the "replied" condition key off
+		// replied_at IS NOT NULL, so gating the stamp here fixes both at once.
+		// Any reply, human or automatic, proves the mailbox is live; only a
+		// human one counts as engagement.
+		if !replyclassify.IsAutomated(replyResult.Class) {
+			accepted, err := s.campaignProgressRepo.RecordEmailReplied(ctx, cID, ctID, sID, emailAccountID, msg.ID)
+			if err != nil {
+				return toErrx(err)
+			}
+			if !accepted {
+				if err := s.campaignProgressRepo.CompleteIncomingReply(ctx, emailAccountID, msg.ID, replyClaimToken); err != nil {
+					return toErrx(err)
+				}
+				return nil
+			}
+		}
+		if s.evidence != nil {
+			kind := "replied"
+			if replyclassify.IsAutomated(replyResult.Class) {
+				kind = "auto_replied"
+			}
+			s.evidence.RecordEvidence(ctx, ctID, models.Step(&cID, &sID), kind, msg.ID.String(), "")
+		}
+		// Fence the claim before non-idempotent effects so an expired worker stops here.
+		if err := s.campaignProgressRepo.CompleteIncomingReply(ctx, emailAccountID, msg.ID, replyClaimToken); err != nil {
+			return toErrx(err)
+		}
+		replyClaimCompleted = true
+
+		if !replyclassify.IsAutomated(replyResult.Class) {
+			_ = s.repo.MarkVariantEvent(ctx, cID, ctID, string(models.DeliverabilityEventReply))
+
+			// Live org-wide pulse: the team sees the reply land on the
+			// campaign without a refresh.
+			if s.realtime != nil && account.OrganizationID != nil {
+				s.realtime.PublishEmailReplied(ctx, account.OrganizationID.String(), account.UserID, cID.String(), ctID.String(), sender, sID.String())
+			}
+
+			// Inbox agent (M10): best-effort, paid + opt-in checked inside. Drafts a
+			// suggested reply for this human reply, awaiting human approval in the
+			// unibox. Self-detaches, so it never blocks reply ingest.
+			if s.inboxAgent != nil && account.OrganizationID != nil {
+				ownerID, _ := uuid.Parse(account.UserID)
+				// An answer from a shared reply inbox leaves from the mailbox
+				// the contact wrote to, as the composer's does.
+				draftFrom := emailAccountID
+				if viaReplyTo && senderAccountID != nil {
+					draftFrom = *senderAccountID
+				}
+				s.inboxAgent.DraftForReply(ctx, models.InboxAgentReply{
+					OrganizationID:  *account.OrganizationID,
+					EmailAccountID:  draftFrom,
+					OwnerUserID:     ownerID,
+					SourceMessageID: msg.ID,
+					ThreadID:        msg.ThreadID,
+					Counterpart:     sender,
+					Subject:         msg.Subject,
+					Snippet:         msg.Snippet,
+					BodyText:        msg.BodyText,
+					InReplyTo:       msg.MessageID,
+					ContactID:       ctID,
+					CampaignID:      cID,
+					IntentClass:     replyResult.Class,
+					Confidence:      replyResult.Confidence,
+				})
+			}
+		}
+
+		// INSTANT reply trigger: if the contact's CURRENT step has a reply_* intent
+		// branch matching this just-classified reply, run that branch's
+		// action chain for THIS contact right now (instead of waiting for the next
+		// scheduled step boundary). Best-effort and non-blocking like the rest of
+		// reply handling — a failure must never block inbox ingest. Fires for both
+		// human and automated replies (reply_automated drives the auto-reply case)
+		// and exactly once per reply event via the instant_fired["reply"] gate. The
+		// just-classified reply_class and (human-only) replied_at have already been
+		// persisted above, so the matcher reads them off the loaded progress row.
+		s.fireInstantActions(ctx, cID, ctID, sID, "reply")
+	}
+
+	// Everything above is detection, and a reply is a reply whatever the
+	// workspace automates on it. The switch governs only what follows:
+	// intents, holds, pauses, opt-outs, CRM tasks and the fan-out.
+	if !settings.ReplyIntent.Enabled {
+		return nil
+	}
+
+	// A reply with no campaign behind it was never classified above, and a
+	// machine announces itself in the headers (RFC 3834, Precedence, a null
+	// Return-Path, a delivery-status report) whether or not we ever mailed the
+	// address. The header and lexicon layers are free, so answer "is this a
+	// human" for every inbound message; only the model layer is worth gating.
+	if verdict.Class == "" {
+		verdict = replyclassify.ClassifyOffline(replyclassify.Input{
+			Headers:  buildReplyHeaders(msg),
+			Subject:  msg.Subject,
+			BodyText: firstNonEmpty(msg.BodyText, msg.Snippet),
+		})
+	}
+	if replyClaimToken == uuid.Nil && !replyClaimCompleted {
+		claimToken, err := s.campaignProgressRepo.ClaimIncomingReply(ctx, emailAccountID, msg.ID)
+		if err != nil {
+			return toErrx(err)
+		}
+		if claimToken == uuid.Nil {
+			return nil
+		}
+		replyClaimToken = claimToken
+	}
+
+	intent, confidence := classifyReply(text, settings.ReplyIntent)
+	// The layered classifier reads auto-reply headers and a multilingual
+	// out-of-office vocabulary the workspace's own keyword list does not, so
+	// its verdict settles the case the keywords missed. Only the automated
+	// classes are folded in: sentiment stays the keyword list's call.
+	if replyclassify.IsAutomated(verdict.Class) {
+		intent, confidence = automatedIntent(verdict)
+	}
+	if !replyClaimCompleted {
+		if err := s.campaignProgressRepo.CompleteIncomingReply(ctx, emailAccountID, msg.ID, replyClaimToken); err != nil {
+			return toErrx(err)
+		}
+	}
+
+	var held *time.Time
+	if campaignID != nil && contactID != nil && !senderIsCopy && verdict.Class == replyclassify.ClassOutOfOffice && settings.ReplyIntent.HoldOnOutOfOffice {
+		held = s.holdForOutOfOffice(ctx, *account.OrganizationID, *contactID, settings.ReplyIntent, msg)
+	}
+
+	actionTaken := ""
+	if settings.ReplyIntent.AutoPauseOnNegative && intent == models.ReplyIntentNegative && campaignID != nil {
+		_ = s.campaignRepo.UpdateStatus(ctx, *campaignID, "paused")
+		actionTaken = "paused_campaign"
+	}
+
+	// Reply-based opt-out is what makes the plain "just reply and I'll stop"
+	// line a real mechanism. The check ignores the quoted history (which
+	// carries our own opt-out wording) and matches whole phrases only.
+	if settings.ReplyIntent.AutoSuppressOnUnsubWord &&
+		replyOptOutEligible(verdict, referencesCampaignThread, contactID != nil, buildReplyHeaders(msg)) &&
+		replyclassify.IsOptOut(msg.Subject, firstNonEmpty(msg.BodyText, msg.Snippet)) {
+		if err := s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
+			OrganizationID: *account.OrganizationID,
+			Email:          sender,
+			Kind:           models.SuppressionKindEmail,
+			Reason:         "asked to stop in a reply",
+			Source:         models.DeliverabilityEventUnsubscribe,
+			CampaignID:     campaignID,
+			Metadata: map[string]interface{}{
+				"via": "reply",
+			},
+		}); err != nil {
+			return toErrx(err)
+		}
+		if err := s.contactRepo.SetSubscribedByEmail(ctx, *account.OrganizationID, sender, false); err != nil {
+			log.Warn().Err(err).Msg("reply opt-out: could not clear the contact's subscription flag")
+		}
+		// Answered from another address: the one we mailed asked to stop too,
+		// unless it was a copy asking for themselves.
+		if contactEmail != "" && !senderIsCopy && !strings.EqualFold(contactEmail, sender) {
+			_ = s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
+				OrganizationID: *account.OrganizationID,
+				Email:          strings.ToLower(contactEmail),
+				Kind:           models.SuppressionKindEmail,
+				Reason:         "asked to stop in a reply sent from " + sender,
+				Source:         models.DeliverabilityEventUnsubscribe,
+				CampaignID:     campaignID,
+				Metadata: map[string]interface{}{
+					"via":        "reply",
+					"replied_as": sender,
+				},
+			})
+			if err := s.contactRepo.SetSubscribedByEmail(ctx, *account.OrganizationID, strings.ToLower(contactEmail), false); err != nil {
+				log.Warn().Err(err).Msg("reply opt-out: could not clear the mailed contact's subscription flag")
+			}
+		}
+		s.emit(ctx, *account.OrganizationID, models.WebhookEventCampaignUnsubscribed, map[string]any{
+			"campaign_id":   uuidString(campaignID),
+			"contact_id":    uuidString(contactID),
+			"contact_email": sender,
+			"source":        "reply",
+		})
+		if actionTaken == "" {
+			actionTaken = "suppressed_recipient"
+		} else {
+			actionTaken += ",suppressed_recipient"
+		}
+	}
+
+	// Per-intent, so an out-of-office or a bounce does not become a
+	// high-priority follow-up nobody asked for. The default set is human
+	// replies only; a workspace can add the automated ones back.
+	if settings.ReplyIntent.CreatesTaskFor(intent) && s.crmRepo != nil && contactID != nil &&
+		!s.inboxTagActed(ctx, *account.OrganizationID, msg.MessageID, inboxtag.ActionTask) {
+		owner, parseErr := uuid.Parse(account.UserID)
+		if parseErr == nil {
+			title := replyTaskTitle(intent, sender)
+			if task, terr := s.crmRepo.CreateCRMTask(ctx, *account.OrganizationID, owner, &models.CreateCRMTask{
+				ContactID:  contactID,
+				Title:      title,
+				Priority:   "high",
+				DueDate:    ptrTime(time.Now().UTC().Add(24 * time.Hour)),
+				AssignedTo: &owner,
+			}); terr == nil {
+				s.pushCRM(ctx, *account.OrganizationID, models.CRMObjectTask, task.ID)
+			}
+			if actionTaken == "" {
+				actionTaken = "created_crm_task"
+			} else {
+				actionTaken += ",created_crm_task"
+			}
+		}
+	}
+
+	_ = s.repo.CreateReplyIntent(ctx, &models.ReplyIntentRecord{
+		OrganizationID: *account.OrganizationID,
+		ContactEmail:   sender,
+		CampaignID:     campaignID,
+		TaskID:         taskID,
+		Intent:         intent,
+		Confidence:     confidence,
+		ActionTaken:    actionTaken,
+		Metadata: map[string]interface{}{
+			"subject": msg.Subject,
+			// What decided it, so an intent nobody expected can be explained
+			// without re-running the message through the classifier.
+			"reply_class":   verdict.Class,
+			"classified_by": verdict.Source,
+		},
+	})
+
+	// Fan the classified reply out to customer webhooks + integration actions
+	// (Slack ping, CRM upsert). The intent/confidence fields let an integration
+	// automation filter for e.g. only "positive" replies. This is the trigger
+	// behind "notify me when a prospect replies".
+	payload := map[string]any{
+		"contact_email": sender,
+		"intent":        string(intent),
+		"confidence":    confidence,
+		"subject":       msg.Subject,
+		"snippet":       msg.Snippet,
+		"action_taken":  actionTaken,
+		"trigger":       "campaign_reply",
+		// thread_id lets a "label email" automation action tag the conversation
+		// this reply belongs to. _user_id is the mailbox owner (categories are per
+		// user); the leading underscore keeps it out of outbound customer webhook
+		// bodies (publicEventData strips _-prefixed keys) while staying available
+		// to native actions, which read the raw event data.
+		"thread_id":        msg.ThreadID,
+		"email_account_id": emailAccountID.String(),
+		"_user_id":         account.UserID,
+		"_message_id":      msg.MessageID,
+		"_body_text":       msg.BodyText,
+		"_mailbox_email":   account.Email,
+	}
+	if senderAccountID != nil {
+		payload["sender_email_account_id"] = senderAccountID.String()
+	}
+	if campaignID != nil {
+		payload["campaign_id"] = campaignID.String()
+	}
+	if contactID != nil {
+		payload["contact_id"] = contactID.String()
+	}
+	s.emit(ctx, *account.OrganizationID, models.WebhookEventCampaignReplyReceived, payload)
+	if intent == models.ReplyIntentNegative {
+		// Negative/unsubscribe-leaning replies also fire the unsubscribe event
+		// only when we actually suppressed; otherwise the reply event is enough.
+		if strings.Contains(actionTaken, "suppressed_recipient") {
+			s.emit(ctx, *account.OrganizationID, models.WebhookEventCampaignUnsubscribed, payload)
+		}
+	}
+
+	// Raise an in-app notification to the mailbox owner (gated by their prefs).
+	if uid, perr := uuid.Parse(account.UserID); perr == nil {
+		cat := models.NotifInboundReply
+		title := "New reply from " + sender
+		body := msg.Subject
+		if models.IsAutomatedIntent(intent) {
+			// The "out-of-office detected" preference is what someone mutes to
+			// stop hearing about auto-responders, so every machine reply goes
+			// through it rather than only the vacation-worded ones.
+			cat = models.NotifInboundOOO
+			title = "Out-of-office from " + sender
+			if intent == models.ReplyIntentAutomated {
+				title = "Automatic reply from " + sender
+			}
+			// Say what happened to their sequence, not only that mail arrived.
+			if held != nil {
+				body = "Held until " + held.Format("2 Jan") + " · " + msg.Subject
+			}
+		}
+		s.notifyAboutMessage(uid, account.OrganizationID, msg.ID, cat, title, body, UniboxThreadLink(msg.ThreadID), map[string]any{
+			"intent":           string(intent),
+			"email_account_id": emailAccountID.String(),
+			"thread_id":        msg.ThreadID,
+		})
+	}
+
+	return nil
+}
+
+// holdForOutOfOffice parks the contact's next step until they are back: the
+// return date the auto-reply names plus a business day, else the workspace's
+// fallback. With inbox tagging on, a date the model read as not the return
+// takes the fallback too. Best-effort; a hold that cannot be written must never
+// fail the reply ingest behind it. Returns when the hold lifts, or nil if none
+// was set.
+//
+// The hold covers every campaign the contact is still a lead of, not only the
+// one this reply was attributed to. An empty desk is an empty desk: holding
+// one sequence while a second kept mailing them was issue #470 again, narrowed
+// to the second campaign (issue #518).
+func (s *service) holdForOutOfOffice(ctx context.Context, orgID, contactID uuid.UUID, cfg models.ReplyIntentSettings, msg *models.EmailMessageStoreData) *time.Time {
+	if s.campaignProgressRepo == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	body := firstNonEmpty(msg.BodyText, msg.Snippet)
+	// Clamped here as well as in Normalize: a value written straight into the
+	// settings row has never been through it, and a zero would resume into the
+	// away message that triggered the hold.
+	days := min(max(cfg.OutOfOfficeHoldDays, models.OOOHoldDaysMin), models.OOOHoldDaysMax)
+	fallback := func() (time.Time, string) {
+		return now.AddDate(0, 0, days), "auto-reply, no return date"
+	}
+	until, reason := fallback()
+	if back, ok := replyclassify.ParseReturnDate(msg.Subject, body, now); ok {
+		if s.returnDateDoubted(ctx, orgID, msg.MessageID, back) {
+			until, reason = now.AddDate(0, 0, days), "auto-reply, return date unclear"
+		} else {
+			until, reason = replyclassify.NextBusinessDay(back), "back "+back.Format("2 Jan 2006")
+		}
+	}
+	// A return date already behind us (a stale auto-reply, a clock skew) would
+	// hold nothing; the fallback is the honest answer.
+	if !until.After(now) {
+		until, reason = fallback()
+	}
+	held, err := s.campaignProgressRepo.HoldLeadEverywhere(ctx, contactID, &until, reason, models.LeadHoldSourceOutOfOffice)
+	if err != nil {
+		log.Warn().Err(err).
+			Str("contact_id", contactID.String()).
+			Msg("out-of-office hold could not be written; the follow-up keeps its schedule")
+		return nil
+	}
+	if len(held) == 0 {
+		// Left alone on purpose: a member's own pause, or a longer hold this
+		// auto-reply would have cut short.
+		return nil
+	}
+	log.Info().
+		Str("contact_id", contactID.String()).Int("campaigns", len(held)).
+		Time("until", until).Str("reason", reason).
+		Msg("out-of-office auto-reply: lead held until the contact is back")
+	return &until
+}
+
+func ptrTime(t time.Time) *time.Time {
+	return &t
+}
+
+// verifyEventOwnership refuses a deliverability event whose campaign, contact
+// or task belongs to another organization. Anything absent is fine; anything
+// present has to resolve inside the caller's workspace.
+func (s *service) verifyEventOwnership(ctx context.Context, organizationID uuid.UUID, req *models.IngestDeliverabilityEventRequest) *errx.Error {
+	foreign := errx.New(errx.NotFound, "campaign, contact or task not found")
+
+	if req.CampaignID != nil {
+		campaign, err := s.campaignRepo.GetByID(ctx, *req.CampaignID)
+		if err != nil || campaign == nil || campaign.OrganizationID == nil || *campaign.OrganizationID != organizationID {
+			return foreign
+		}
+	}
+
+	if req.ContactID != nil {
+		owned, xerr := s.contactRepo.GetByIDsAndOrganization(ctx, organizationID, []uuid.UUID{*req.ContactID})
+		if xerr != nil || len(owned) == 0 {
+			return foreign
+		}
+	}
+
+	if req.TaskID != nil {
+		ct, err := s.taskRepo.GetCampaignTask(ctx, *req.TaskID)
+		switch {
+		case err == nil && ct != nil && ct.CampaignID != nil:
+			// The task names its own campaign, so the pair has to agree: a real
+			// task id combined with a different campaign id describes a step
+			// that does not exist.
+			if req.CampaignID != nil && *ct.CampaignID != *req.CampaignID {
+				return foreign
+			}
+			taskCampaign, cErr := s.campaignRepo.GetByID(ctx, *ct.CampaignID)
+			if cErr != nil || taskCampaign == nil || taskCampaign.OrganizationID == nil || *taskCampaign.OrganizationID != organizationID {
+				return foreign
+			}
+		default:
+			// Not every task belongs to a campaign: a test send and an inbound
+			// bounce resolved by message id both reach here with a task that has
+			// no campaign row. Those still have to belong to the caller, so
+			// fall back to the mailbox that owns the task rather than refusing
+			// and silently dropping real bounce processing.
+			task, tErr := s.taskRepo.GetTask(ctx, *req.TaskID)
+			if tErr != nil || task == nil {
+				return foreign
+			}
+			account, aErr := s.emailRepo.GetByID(ctx, task.EmailAccountID)
+			if aErr != nil || account == nil || account.OrganizationID == nil || *account.OrganizationID != organizationID {
+				return foreign
+			}
+		}
+	}
+
+	return nil
+}
+
+func (s *service) IngestDeliverabilityEvent(ctx context.Context, organizationID uuid.UUID, req *models.IngestDeliverabilityEventRequest) *errx.Error {
+	if req == nil {
+		return errx.New(errx.BadRequest, "event payload is required")
+	}
+	if req.RecipientEmail == "" {
+		return errx.New(errx.BadRequest, "recipient_email is required")
+	}
+
+	eventType := req.EventType
+	switch eventType {
+	case models.DeliverabilityEventBounce,
+		models.DeliverabilityEventComplaint,
+		models.DeliverabilityEventUnsubscribe,
+		models.DeliverabilityEventOpen,
+		models.DeliverabilityEventClick,
+		models.DeliverabilityEventReply:
+	default:
+		return errx.New(errx.BadRequest, "invalid event_type")
+	}
+
+	// Every id in the body is caller-supplied, and a campaign, contact and task
+	// id are all visible to the recipient of a campaign email: the task id is in
+	// the tracking pixel URL. They therefore prove nothing on their own, and
+	// each has to be resolved inside the caller's workspace before this event is
+	// allowed to move progress counters, A/B assignment, the auto-pause breaker
+	// or warmup health.
+	if xerr := s.verifyEventOwnership(ctx, organizationID, req); xerr != nil {
+		return xerr
+	}
+
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = uuid.NewString()
+	}
+
+	provider := strings.TrimSpace(req.Provider)
+	if provider == "" {
+		provider = "manual"
+	}
+
+	// A bounce reason that does not name the recipient is classified so a
+	// reputation or policy block is not held against the address. The verdict
+	// goes in metadata only: the reason text is the contract downstream
+	// classifiers read. One call per ambiguous bounce, no cache.
+	var verdict *bounceclass.Verdict
+	if eventType == models.DeliverabilityEventBounce && s.bounceJudge != nil &&
+		strings.TrimSpace(req.Reason) != "" && !emailverify.NamesRecipient(req.Reason) {
+		// Bounded: a bounce storm must not queue behind a rate-limited judge.
+		jctx, cancel := context.WithTimeout(typesafe.WithUsage(ctx, "bounce_classification", organizationID.String()), bounceJudgeTimeout)
+		v, vErr := bounceclass.Classify(jctx, s.bounceJudge, req.Reason)
+		cancel()
+		switch {
+		case vErr != nil:
+			log.Debug().Err(vErr).Str("recipient", req.RecipientEmail).Msg("bounce reason not classified")
+		case v != nil:
+			verdict = v
+			if req.Metadata == nil {
+				req.Metadata = map[string]interface{}{}
+			}
+			req.Metadata["bounce_cause"] = v.Cause
+			req.Metadata["bounce_cause_confidence"] = v.Confidence
+		}
+	}
+	addressFine := verdict.AddressIsFine()
+
+	if err := s.repo.CreateDeliverabilityEvent(ctx, &models.DeliverabilityEvent{
+		OrganizationID: organizationID,
+		CampaignID:     req.CampaignID,
+		TaskID:         req.TaskID,
+		ContactID:      req.ContactID,
+		EventType:      eventType,
+		Provider:       provider,
+		RecipientEmail: req.RecipientEmail,
+		Reason:         req.Reason,
+		IdempotencyKey: idempotencyKey,
+		Metadata:       req.Metadata,
+	}); err != nil {
+		return toErrx(err)
+	}
+
+	settings, err := s.repo.GetOutreachSettings(ctx, organizationID)
+	if err != nil {
+		return toErrx(err)
+	}
+
+	shouldSuppress := (eventType == models.DeliverabilityEventBounce && settings.BouncePipeline.AutoSuppressOnBounce) ||
+		(eventType == models.DeliverabilityEventComplaint && settings.BouncePipeline.AutoSuppressOnComplaint) ||
+		(eventType == models.DeliverabilityEventUnsubscribe && settings.BouncePipeline.AutoSuppressOnUnsubscribe)
+
+	// The address is not what failed: record the bounce, feed the breaker and
+	// mailbox health below, but keep the recipient sendable.
+	if shouldSuppress && addressFine {
+		shouldSuppress = false
+		log.Info().
+			Str("organization_id", organizationID.String()).
+			Str("recipient", req.RecipientEmail).
+			Str("bounce_cause", verdict.Cause).
+			Float64("confidence", verdict.Confidence).
+			Msg("bounce classified as not about the address; recipient not suppressed and lead kept")
+	}
+
+	if shouldSuppress {
+		if err := s.repo.UpsertSuppressedRecipient(ctx, &models.SuppressedRecipient{
+			OrganizationID: organizationID,
+			Email:          req.RecipientEmail,
+			Reason:         fmt.Sprintf("%s: %s", eventType, req.Reason),
+			Source:         eventType,
+			CampaignID:     req.CampaignID,
+			Metadata:       req.Metadata,
+		}); err != nil {
+			return toErrx(err)
+		}
+	}
+
+	if req.CampaignID != nil && req.ContactID != nil {
+		if err := s.repo.MarkVariantEvent(ctx, *req.CampaignID, *req.ContactID, string(eventType)); err != nil {
+			return toErrx(err)
+		}
+	}
+
+	// Record bounces + complaints in campaign progress so analytics and the
+	// breaker work correctly. Complaints were previously never recorded, which
+	// is why complaint-rate auto-pause could never fire.
+	if req.CampaignID != nil && req.ContactID != nil && req.TaskID != nil &&
+		(eventType == models.DeliverabilityEventBounce || eventType == models.DeliverabilityEventComplaint) {
+		campaignTask, cErr := s.taskRepo.GetCampaignTask(ctx, *req.TaskID)
+		if cErr == nil && campaignTask != nil && campaignTask.SequenceID != nil {
+			switch eventType {
+			case models.DeliverabilityEventBounce:
+				// A bounce that was not about the address does not drop the
+				// lead: the step is offered again once the mailbox recovers.
+				if !addressFine {
+					if err := s.campaignProgressRepo.RecordEmailBounced(ctx, *req.CampaignID, *req.ContactID, *campaignTask.SequenceID); err != nil {
+						return toErrx(err)
+					}
+				}
+				// Only a bounce that names the recipient is evidence against
+				// the address; a full mailbox or a policy block is not.
+				if s.evidence != nil {
+					kind := "bounced_other"
+					if emailverify.NamesRecipient(req.Reason) {
+						kind = "bounced_recipient"
+					}
+					// Both halves of the step come from the resolved task, so the
+					// pair names one real row rather than a request-supplied
+					// campaign paired with a resolved sequence.
+					s.evidence.RecordEvidence(ctx, *req.ContactID, models.Step(campaignTask.CampaignID, campaignTask.SequenceID), kind, req.IdempotencyKey, req.Reason)
+				}
+			case models.DeliverabilityEventComplaint:
+				if err := s.campaignProgressRepo.RecordEmailComplained(ctx, *req.CampaignID, *req.ContactID, *campaignTask.SequenceID); err != nil {
+					return toErrx(err)
+				}
+			}
+		}
+	}
+
+	if req.CampaignID != nil &&
+		(eventType == models.DeliverabilityEventBounce || eventType == models.DeliverabilityEventComplaint) {
+		s.evaluateCampaignBreaker(ctx, organizationID, *req.CampaignID, settings)
+	}
+
+	// Trigger warmup health re-evaluation on bounce or complaint events.
+	// This connects deliverability signals to the warmup pool health system.
+	if s.warmupService != nil && req.TaskID != nil &&
+		(eventType == models.DeliverabilityEventBounce || eventType == models.DeliverabilityEventComplaint) {
+		task, tErr := s.taskRepo.GetTask(ctx, *req.TaskID)
+		if tErr == nil && task != nil {
+			if _, err := s.warmupService.ApplySpamReport(ctx, task.EmailAccountID, task.EmailAccountID, req.IdempotencyKey, string(eventType)); err != nil {
+				return err
+			}
+		}
+	}
+
+	// Fan bounce / complaint / unsubscribe out to customer webhooks +
+	// integration actions so a Slack channel or CRM can react in real time.
+	payload := map[string]any{
+		"contact_email": req.RecipientEmail,
+		"recipient":     req.RecipientEmail,
+		"event_type":    string(eventType),
+		"provider":      provider,
+		"reason":        req.Reason,
+	}
+	if req.CampaignID != nil {
+		payload["campaign_id"] = req.CampaignID.String()
+	}
+	if req.ContactID != nil {
+		payload["contact_id"] = req.ContactID.String()
+	}
+	if req.TaskID != nil {
+		payload["_task_id"] = req.TaskID.String()
+	}
+	switch eventType {
+	case models.DeliverabilityEventBounce:
+		s.emit(ctx, organizationID, models.WebhookEventCampaignEmailBounced, payload)
+		s.emit(ctx, organizationID, models.WebhookEventDeliverabilityBounce, payload)
+	case models.DeliverabilityEventComplaint:
+		s.emit(ctx, organizationID, models.WebhookEventDeliverabilityComplaint, payload)
+	case models.DeliverabilityEventUnsubscribe:
+		s.emit(ctx, organizationID, models.WebhookEventCampaignUnsubscribed, payload)
+	}
+
+	// In-app notification to the campaign owner for bounce/complaint (gated by
+	// their prefs). Resolvable only when the event is tied to a campaign.
+	if (eventType == models.DeliverabilityEventBounce || eventType == models.DeliverabilityEventComplaint) && req.CampaignID != nil {
+		if camp, cerr := s.campaignRepo.GetByID(ctx, *req.CampaignID); cerr == nil && camp != nil {
+			if uid, perr := uuid.Parse(camp.UserID); perr == nil {
+				cat := models.NotifHealthBounce
+				title := "Bounce: " + req.RecipientEmail
+				// A reputation block is about the mailbox, not the lead, so
+				// the title says who refused rather than who bounced.
+				if addressFine && verdict.Cause == bounceclass.CauseReputationBlock {
+					title = "Provider refused mail from " + displayname.DisplayableOr(camp.Name, "a campaign")
+				}
+				if eventType == models.DeliverabilityEventComplaint {
+					cat = models.NotifHealthComplaint
+					title = "Spam complaint: " + req.RecipientEmail
+				}
+				org := organizationID
+				if s.notifier != nil && repository.QueueSendResultEffect(ctx, "notification:"+uid.String()+":"+string(cat), repository.SendResultEffect{Kind: "notification", OrganizationID: org, UserID: uid, Category: cat, Title: title, Body: req.Reason, Link: "/app/deliverability", Data: map[string]any{"provider": provider}}) {
+					return nil
+				}
+				repository.AfterSendResultCommit(ctx, func(context.Context) {
+					s.notify(uid, &org, cat, title, req.Reason, "/app/deliverability", map[string]any{"provider": provider})
+				})
+			}
+		}
+	}
+
+	return nil
+}
+
+// Campaign deliverability circuit breaker tuning. Mirrors Instantly's safeguards:
+// a minimum sample before acting (so a single early bounce can't pause a
+// campaign) and a rolling window so the breaker reacts to recent behaviour
+// rather than a campaign's lifetime average.
+const (
+	campaignBreakerWindow    = 7 * 24 * time.Hour
+	campaignBreakerMinSample = 50
+	// Early-warning band: emit a warning webhook at half the pause threshold.
+	campaignBreakerWarnRatio = 0.5
+)
+
+// evaluateCampaignBreaker auto-pauses a campaign when its rolling bounce or
+// complaint rate breaches the configured threshold, and emits an early-warning
+// webhook in the band below. Rolling-first with a cumulative fallback when the
+// recent window is too small a sample.
+func (s *service) evaluateCampaignBreaker(ctx context.Context, orgID, campaignID uuid.UUID, settings *models.AdvancedOutreachSettings) {
+	if settings == nil || !settings.BouncePipeline.AutoPauseCampaignOnSpike {
+		return
+	}
+	bounceThresh := settings.BouncePipeline.PauseBounceRateThreshold
+	complaintThresh := settings.BouncePipeline.PauseComplaintRateThreshold
+	if bounceThresh <= 0 && complaintThresh <= 0 {
+		return
+	}
+
+	sent, bounced, complained := 0, 0, 0
+	if rolling, err := s.campaignProgressRepo.GetCampaignRollingRates(ctx, campaignID, time.Now().Add(-campaignBreakerWindow)); err == nil && rolling != nil && rolling.Sent >= campaignBreakerMinSample {
+		sent, bounced, complained = rolling.Sent, rolling.Bounced, rolling.Complained
+	} else if progress, pErr := s.campaignProgressRepo.GetCampaignProgress(ctx, campaignID); pErr == nil && progress != nil {
+		sent, bounced, complained = progress.EmailsSent, progress.EmailsBounced, progress.EmailsComplained
+	}
+
+	// Not enough delivered volume yet to judge — never pause on a tiny sample.
+	if sent < campaignBreakerMinSample {
+		return
+	}
+
+	bounceRate := float64(bounced) / float64(sent) * 100
+	complaintRate := float64(complained) / float64(sent) * 100
+
+	pauseBounce := bounceThresh > 0 && bounceRate >= bounceThresh
+	pauseComplaint := complaintThresh > 0 && complaintRate >= complaintThresh
+	if pauseBounce || pauseComplaint {
+		if err := s.campaignRepo.UpdateStatus(ctx, campaignID, "paused"); err == nil {
+			s.emit(ctx, orgID, models.WebhookEventCampaignPaused, map[string]any{
+				"campaign_id":    campaignID.String(),
+				"reason":         "deliverability_auto_pause",
+				"bounce_rate":    bounceRate,
+				"complaint_rate": complaintRate,
+				"sample_size":    sent,
+				"breached":       breachLabel(pauseBounce, pauseComplaint),
+			})
+		}
+		return
+	}
+
+	warnBounce := bounceThresh > 0 && bounceRate >= bounceThresh*campaignBreakerWarnRatio
+	warnComplaint := complaintThresh > 0 && complaintRate >= complaintThresh*campaignBreakerWarnRatio
+	if warnBounce || warnComplaint {
+		s.emit(ctx, orgID, models.WebhookEventCampaignDeliverabilityWarning, map[string]any{
+			"campaign_id":    campaignID.String(),
+			"bounce_rate":    bounceRate,
+			"complaint_rate": complaintRate,
+			"sample_size":    sent,
+		})
+	}
+}
+
+func breachLabel(bounce, complaint bool) string {
+	switch {
+	case bounce && complaint:
+		return "bounce_and_complaint"
+	case bounce:
+		return "bounce"
+	default:
+		return "complaint"
+	}
+}
+
+func (s *service) OptimizeSendTime(ctx context.Context, organizationID uuid.UUID, contact *models.Contact, base time.Time) (time.Time, *errx.Error) {
+	settings, err := s.repo.GetOutreachSettings(ctx, organizationID)
+	if err != nil {
+		return base, toErrx(err)
+	}
+	if !settings.SendTimeOptimization.Enabled {
+		return base, nil
+	}
+
+	targetTZ := settings.SendTimeOptimization.DefaultContactTimezone
+	if targetTZ == "" {
+		targetTZ = "UTC"
+	}
+	if settings.SendTimeOptimization.UseContactTimezone && contact != nil {
+		if tz, ok := contact.CustomFields["timezone"]; ok && strings.TrimSpace(tz) != "" {
+			targetTZ = strings.TrimSpace(tz)
+		}
+	}
+	loc, lerr := time.LoadLocation(targetTZ)
+	if lerr != nil {
+		loc = time.UTC
+	}
+
+	candidate := base.In(loc)
+	preferred := settings.SendTimeOptimization.PreferredHours
+	if len(preferred) == 0 {
+		preferred = []int{9, 10, 11, 14, 15, 16}
+	}
+
+	hour := candidate.Hour()
+	chosenHour := -1
+	for _, h := range preferred {
+		if h >= hour {
+			chosenHour = h
+			break
+		}
+	}
+	if chosenHour == -1 {
+		candidate = candidate.Add(24 * time.Hour)
+		chosenHour = preferred[0]
+	}
+	candidate = time.Date(candidate.Year(), candidate.Month(), candidate.Day(), chosenHour, 0, 0, 0, loc)
+
+	if candidate.Weekday() == time.Saturday || candidate.Weekday() == time.Sunday {
+		if settings.SendTimeOptimization.WeekendWeightMultiplier < 1 {
+			for candidate.Weekday() == time.Saturday || candidate.Weekday() == time.Sunday {
+				candidate = candidate.Add(24 * time.Hour)
+			}
+			candidate = time.Date(candidate.Year(), candidate.Month(), candidate.Day(), preferred[0], 0, 0, 0, loc)
+		}
+	}
+
+	return candidate.UTC(), nil
+}
+
+func (s *service) StartTaskExecution(ctx context.Context, taskID uuid.UUID, executionKey string, metadata map[string]interface{}) (bool, *errx.Error) {
+	duplicate, err := s.repo.StartTaskExecution(ctx, taskID, executionKey, metadata)
+	if err != nil {
+		return false, toErrx(err)
+	}
+	return duplicate, nil
+}
+
+func (s *service) CompleteTaskExecution(ctx context.Context, taskID uuid.UUID, executionKey, status string, metadata map[string]interface{}) *errx.Error {
+	if err := s.repo.CompleteTaskExecution(ctx, taskID, executionKey, status, metadata); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+func (s *service) CaptureTaskDeadLetter(ctx context.Context, taskID uuid.UUID, taskType string, payload map[string]interface{}, lastError string, attempts int) *errx.Error {
+	maxAttempts := 5
+
+	// Compute next retry time using exponential backoff: 30s * 2^attempts
+	var nextRetryAt *time.Time
+	if attempts < maxAttempts {
+		backoff := time.Duration(30*(1<<uint(attempts))) * time.Second
+		t := time.Now().UTC().Add(backoff)
+		nextRetryAt = &t
+	}
+
+	item := &models.TaskDeadLetter{
+		TaskID:      taskID,
+		TaskType:    taskType,
+		Payload:     payload,
+		LastError:   lastError,
+		Attempts:    attempts,
+		MaxAttempts: maxAttempts,
+		Status:      "pending",
+		NextRetryAt: nextRetryAt,
+	}
+	if err := s.repo.CreateTaskDeadLetter(ctx, item); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+func (s *service) ListDeadLetters(ctx context.Context, organizationID uuid.UUID, status string, limit int) ([]models.TaskDeadLetter, *errx.Error) {
+	out, err := s.repo.ListTaskDeadLetters(ctx, organizationID, status, limit)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return out, nil
+}
+
+func (s *service) ReplayDeadLetter(ctx context.Context, organizationID, deadLetterID uuid.UUID) *errx.Error {
+	if s.tasksClient == nil {
+		return errx.New(errx.BadRequest, "cloud tasks client not configured")
+	}
+
+	dlq, err := s.repo.GetTaskDeadLetter(ctx, deadLetterID, organizationID)
+	if err != nil {
+		return toErrx(err)
+	}
+	if dlq == nil {
+		return errx.ErrNotFound
+	}
+
+	task, err := s.taskRepo.GetTask(ctx, dlq.TaskID)
+	if err != nil {
+		return toErrx(err)
+	}
+	if task == nil {
+		return errx.ErrNotFound
+	}
+	if dlq.TaskType != "campaign" || task.TaskType != "campaign" {
+		return errx.New(errx.Conflict, "send dead letters require authoritative outcome evidence and cannot be replayed")
+	}
+	_, handled, rerr := s.replayCampaignPass(ctx, task)
+	if rerr != nil {
+		return toErrx(rerr)
+	}
+	if !handled {
+		return errx.New(errx.Conflict, "only non-sending campaign passes can be replayed")
+	}
+	if err := s.repo.MarkTaskDeadLetterReplayed(ctx, deadLetterID); err != nil {
+		return toErrx(err)
+	}
+	return nil
+}
+
+// replayCampaignPass replays a dead-lettered campaign pass as a fresh pass,
+// through the per-campaign lock every chain uses, so a campaign whose chain
+// already moved on keeps one. Putting the old pass back to pending would skip
+// that lock and could run a second chain beside the first. handled reports a
+// campaign pass; replayed, that a new pass was queued. An error means nothing
+// was queued and the dead letter stays for another try.
+func (s *service) replayCampaignPass(ctx context.Context, task *repository.Task) (replayed, handled bool, err error) {
+	if task == nil || task.TaskType != "campaign" || task.Status != "dead_lettered" {
+		return false, false, nil
+	}
+	ct, err := s.taskRepo.GetCampaignTask(ctx, task.ID)
+	if err != nil {
+		return false, true, err
+	}
+	if ct == nil || ct.DispatchIntent != repository.CampaignDispatchWakeup || ct.ContactID != nil || ct.SequenceID != nil {
+		return false, false, nil
+	}
+	if ct.CampaignID == nil {
+		return false, false, nil
+	}
+	at := time.Now().UTC().Add(10 * time.Second)
+	id := uuid.New()
+	created, err := s.taskRepo.CreateCampaignReplayTask(ctx,
+		&repository.Task{ID: id, TaskType: "campaign", EmailAccountID: task.EmailAccountID, Status: "pending", ScheduledAt: &at},
+		&repository.CampaignTask{TaskID: id, CampaignID: ct.CampaignID}, task.ID)
+	if errors.Is(err, repository.ErrCampaignReplayUnverified) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, true, err
+	}
+	if !created {
+		// The chain already has its next pass.
+		return false, true, nil
+	}
+	name, err := s.tasksClient.CreateTask(ctx, &proto.ProcessTask{TaskId: id.String()}, at)
+	if err != nil {
+		// Nothing will fire the row, and while it is pending the chain can
+		// seed no other pass: take it back and keep the dead letter.
+		if derr := s.taskRepo.DeleteTask(ctx, id); derr != nil {
+			log.Warn().Err(derr).Str("task_id", id.String()).Msg("dead-letter replay: could not remove a pass that was never queued; overdue reconciliation will")
+		}
+		return false, true, err
+	}
+	_ = s.taskRepo.UpdateTaskScheduledAt(ctx, id, at, name)
+	return true, true, nil
+}
+
+// capitalize upper-cases the first rune of a validator message for display.
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	r, n := utf8.DecodeRuneInString(s)
+	return string(unicode.ToUpper(r)) + s[n:]
+}
+
+func (s *service) RunPreflight(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.PreflightReport, *errx.Error) {
+	campaign, err := s.campaignRepo.GetByID(ctx, campaignID)
+	if err != nil || campaign == nil {
+		return nil, errx.ErrNotFound
+	}
+	if campaign.OrganizationID == nil || *campaign.OrganizationID != organizationID {
+		return nil, errx.ErrForbidden
+	}
+
+	settings, xerr := s.effectiveSettings(ctx, organizationID, campaignID)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	checks := make([]models.PreflightCheckResult, 0, 6)
+	recommendations := make([]string, 0, 6)
+
+	readyErr := s.campaignRepo.ValidateCampaignReady(ctx, campaignID)
+	if readyErr != nil {
+		// The validator names the missing piece; a generic list of everything
+		// that could be missing sends the owner looking in the wrong place.
+		check := models.PreflightCheckResult{
+			Key:         "campaign_ready",
+			Passed:      false,
+			Severity:    "error",
+			Message:     "Campaign has missing prerequisites (contacts, sequences, or sender accounts).",
+			Remediation: "Add contacts, sequences, and at least one sender account tag match.",
+		}
+		var bizErr *errx.Error
+		if errors.As(readyErr, &bizErr) && bizErr.Message != "" {
+			check.Message = capitalize(bizErr.Message) + "."
+			check.Remediation = ""
+		}
+		checks = append(checks, check)
+		recommendations = append(recommendations, "Complete core campaign setup before start.")
+	} else {
+		checks = append(checks, models.PreflightCheckResult{
+			Key:      "campaign_ready",
+			Passed:   true,
+			Severity: "info",
+			Message:  "Campaign has required entities configured.",
+		})
+	}
+
+	if settings.Preflight.CheckScheduleWindow {
+		// Per-day windows (when set) define the schedule; otherwise fall back to
+		// the legacy start_time/end_time check.
+		pass := !campaign.ScheduleWindows.IsEmpty() || campaign.StartTime < campaign.EndTime
+		check := models.PreflightCheckResult{
+			Key:      "schedule_window",
+			Passed:   pass,
+			Severity: "error",
+			Message:  "Campaign schedule window is valid.",
+		}
+		if !pass {
+			check.Message = "Campaign start_time must be before end_time."
+			check.Remediation = "Update campaign schedule window."
+			recommendations = append(recommendations, "Fix send window: start_time must be earlier than end_time.")
+		}
+		checks = append(checks, check)
+	}
+
+	if settings.Preflight.CheckDailyLimit {
+		pass := campaign.DailyLimit > 0
+		check := models.PreflightCheckResult{
+			Key:      "daily_limit",
+			Passed:   pass,
+			Severity: "error",
+			Message:  "Daily limit is configured.",
+		}
+		if !pass {
+			check.Message = "Daily limit must be greater than zero."
+			check.Remediation = "Set daily_limit > 0."
+			recommendations = append(recommendations, "Set a valid daily limit to avoid burst sends.")
+		}
+		checks = append(checks, check)
+	}
+
+	if settings.Preflight.CheckUnsubscribeHeader {
+		optOut := settings.Unsubscribe.Effective(campaign.UnsubscribeMode)
+		bodyOptOut := optOut.Mode != models.UnsubscribeModeOff
+		pass := campaign.UnsubscribeHeader || bodyOptOut
+		check := models.PreflightCheckResult{
+			Key:      "unsubscribe_header",
+			Passed:   pass,
+			Severity: "warning",
+			Message:  "Recipients have a way to opt out.",
+		}
+		switch {
+		case !pass:
+			check.Message = "Recipients have no way to opt out: the unsubscribe header and the opt-out line are both off."
+			check.Remediation = "Turn the opt-out line back on in Settings > Sending or on the campaign, or enable the unsubscribe header."
+			recommendations = append(recommendations, "Give recipients a way to opt out.")
+		case !campaign.UnsubscribeHeader:
+			check.Message = "Opt-out line is on; the List-Unsubscribe header is off."
+		case !bodyOptOut:
+			check.Message = "List-Unsubscribe header is on; no opt-out line in the body."
+		}
+		checks = append(checks, check)
+	}
+
+	// A plain-text campaign has no HTML for an anchor to hide a URL in, so an
+	// in-body opt-out link prints its whole address in the copy. The
+	// List-Unsubscribe header does the same job and the reader never sees it.
+	if settings.Preflight.CheckUnsubscribeHeader && campaign.TextOnly {
+		checks = append(checks, s.plainTextOptOutCheck(ctx, campaign, settings.Unsubscribe, &recommendations))
+	}
+
+	if settings.Preflight.CheckTrackingDomain && (campaign.OpenTracking || campaign.LinkTracking) {
+		// The same pool the scheduler sends from (explicit senders, tags, or
+		// every active mailbox when neither is picked), so a campaign on the
+		// "all" fallback is never told it has no senders (issue #340).
+		pool, err := repository.ResolveCampaignSenderPool(ctx, s.emailRepo, campaign)
+		accounts := pool.Accounts
+		if err != nil || len(accounts) == 0 {
+			checks = append(checks, models.PreflightCheckResult{
+				Key:         "tracking_domain",
+				Passed:      false,
+				Severity:    "error",
+				Message:     "No active sender mailbox is available to this campaign, so tracking cannot be validated.",
+				Remediation: "Connect a mailbox, or pick mailboxes or tags for the campaign that have an active one.",
+			})
+			recommendations = append(recommendations, "Attach at least one sender account with tracking domain.")
+		} else {
+			// Unverified counts as missing: an unverified domain is not used
+			// at send time, so those mailboxes track on the shared host just
+			// like the ones with nothing set.
+			missing, unverified := 0, 0
+			for _, account := range accounts {
+				switch {
+				case strings.TrimSpace(account.TrackingDomain) == "":
+					missing++
+				case !account.TrackingDomainVerified:
+					unverified++
+				}
+			}
+			pass := missing == 0 && unverified == 0
+			check := models.PreflightCheckResult{
+				Key:      "tracking_domain",
+				Passed:   pass,
+				Severity: "warning",
+				Message:  "Tracking domain configured for all senders.",
+			}
+			if !pass {
+				switch {
+				case missing > 0 && unverified > 0:
+					check.Message = fmt.Sprintf("%d sender account(s) missing tracking domain, %d not verified.", missing, unverified)
+				case unverified > 0:
+					check.Message = fmt.Sprintf("%d sender account(s) have an unverified tracking domain.", unverified)
+				default:
+					check.Message = fmt.Sprintf("%d sender account(s) missing tracking domain.", missing)
+				}
+				check.Remediation = "Set a tracking domain on every sender account used by this campaign and verify its CNAME."
+				recommendations = append(recommendations, "Configure and verify tracking domains on all sender accounts.")
+			}
+			checks = append(checks, check)
+		}
+	}
+
+	if settings.Preflight.CheckABVariantConfigured && settings.ABTesting.Enabled {
+		variants, err := s.repo.ListABVariants(ctx, campaignID)
+		if err != nil {
+			return nil, toErrx(err)
+		}
+		active := 0
+		for _, v := range variants {
+			if v.IsActive {
+				active++
+			}
+		}
+		pass := active >= 2
+		check := models.PreflightCheckResult{
+			Key:      "ab_variants",
+			Passed:   pass,
+			Severity: "warning",
+			Message:  "A/B variants are configured.",
+		}
+		if !pass {
+			check.Message = "At least two active A/B variants are required."
+			check.Remediation = "Create at least two active variants or disable AB testing."
+			recommendations = append(recommendations, "Create more A/B variants.")
+		}
+		checks = append(checks, check)
+	}
+
+	if s.audienceRepo != nil {
+		checks = append(checks, s.listQualityCheck(ctx, organizationID, campaignID, &recommendations))
+	}
+
+	if settings.Preflight.CheckContentScore {
+		checks = append(checks, s.contentScoreCheck(ctx, campaignID, settings.Preflight.MinContentScore, &recommendations))
+	}
+
+	passedCount := 0
+	for _, c := range checks {
+		if c.Passed {
+			passedCount++
+		}
+	}
+	score := 100
+	if len(checks) > 0 {
+		score = int(float64(passedCount) / float64(len(checks)) * 100.0)
+	}
+	passed := passedCount == len(checks)
+
+	report := &models.PreflightReport{
+		ID:              uuid.New(),
+		OrganizationID:  organizationID,
+		CampaignID:      campaignID,
+		Passed:          passed,
+		Score:           score,
+		Checks:          checks,
+		Recommendations: recommendations,
+		CreatedAt:       time.Now().UTC(),
+	}
+	if err := s.repo.CreatePreflightReport(ctx, report); err != nil {
+		return nil, toErrx(err)
+	}
+	return report, nil
+}
+
+func (s *service) GetDeliverabilityDashboard(ctx context.Context, organizationID uuid.UUID, from, to time.Time) (*models.DeliverabilityDashboard, *errx.Error) {
+	out, err := s.repo.GetDeliverabilityDashboard(ctx, organizationID, from, to)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+	return out, nil
+}
+
+func (s *service) GetABWinnerAnalysis(ctx context.Context, organizationID, campaignID uuid.UUID) (*models.ABWinnerAnalysis, *errx.Error) {
+	campaign, err := s.campaignRepo.GetByID(ctx, campaignID)
+	if err != nil || campaign == nil {
+		return nil, errx.ErrNotFound
+	}
+	if campaign.OrganizationID == nil || *campaign.OrganizationID != organizationID {
+		return nil, errx.ErrForbidden
+	}
+
+	settings, xerr := s.effectiveSettings(ctx, organizationID, campaignID)
+	if xerr != nil {
+		return nil, xerr
+	}
+
+	stats, err := s.repo.GetABVariantStats(ctx, campaignID)
+	if err != nil {
+		return nil, toErrx(err)
+	}
+
+	analysis := &models.ABWinnerAnalysis{
+		CampaignID:  campaignID,
+		Variants:    stats,
+		WinningRule: settings.ABTesting.DefaultWinningRule,
+	}
+
+	if len(stats) == 0 {
+		analysis.Confidence = "none"
+		return analysis, nil
+	}
+
+	// Determine winner based on the winning rule
+	var bestIdx int
+	var bestScore float64
+	for i, v := range stats {
+		var score float64
+		switch settings.ABTesting.DefaultWinningRule {
+		case "reply_rate":
+			score = v.ReplyRate
+		case "click_rate":
+			score = v.ClickRate
+		case "open_rate":
+			score = v.OpenRate
+		default:
+			score = v.ReplyRate
+		}
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+
+	minSample := settings.ABTesting.MinSampleSize
+	if minSample <= 0 {
+		minSample = 30
+	}
+
+	winner := stats[bestIdx]
+	if winner.TotalSent >= minSample {
+		analysis.WinnerID = &winner.VariantID
+		analysis.WinnerName = winner.VariantName
+		if winner.TotalSent >= minSample*3 {
+			analysis.Confidence = "high"
+		} else if winner.TotalSent >= minSample {
+			analysis.Confidence = "medium"
+		}
+	} else {
+		analysis.Confidence = "low"
+	}
+
+	return analysis, nil
+}
+
+func (s *service) ProcessRetryableDeadLetters(ctx context.Context) (int, *errx.Error) {
+	if s.tasksClient == nil {
+		return 0, nil
+	}
+
+	items, err := s.repo.ListRetryableDeadLetters(ctx, 10)
+	if err != nil {
+		return 0, toErrx(err)
+	}
+
+	retried := 0
+	for _, dlq := range items {
+		if dlq.TaskType != "campaign" {
+			continue
+		}
+		task, err := s.taskRepo.GetTask(ctx, dlq.TaskID)
+		if err != nil {
+			return retried, toErrx(err)
+		}
+		if task == nil || task.TaskType != "campaign" {
+			continue
+		}
+
+		if replayed, handled, rerr := s.replayCampaignPass(ctx, task); handled {
+			if rerr != nil {
+				backoff := time.Duration(30*(1<<uint(dlq.Attempts+1))) * time.Second
+				nextRetry := time.Now().UTC().Add(backoff)
+				_ = s.repo.IncrementDeadLetterAttempt(ctx, dlq.ID, &nextRetry)
+				continue
+			}
+			if replayed {
+				retried++
+			}
+			_ = s.repo.MarkTaskDeadLetterReplayed(ctx, dlq.ID)
+			continue
+		}
+	}
+
+	return retried, nil
+}
+
+// worstStepContentScore returns the lowest-scoring email step's score, number,
+// leading issue, and how many steps were scored. Only email steps carry copy: a
+// wait or action node would otherwise score as the campaign's worst content.
+// attachmentsFor gives the file count of one step's send, which differs per
+// step now that a file can be scoped to one.
+func worstStepContentScore(seqs []models.Sequence, attachmentsFor func(models.Sequence) int) (worst, worstStep int, issue string, scored int) {
+	worst = 101
+	for i, seq := range seqs {
+		if seq.Kind != "" && seq.Kind != "email" {
+			continue
+		}
+		scored++
+		attachments := 0
+		if attachmentsFor != nil {
+			attachments = attachmentsFor(seq)
+		}
+		// A step that replies in the thread carries the conversation's
+		// subject, so scoring its own (blank, by design) would report every
+		// follow-up as having no subject line.
+		r := warmlint.ScoreWithAttachments(models.StepSubject(seqs, i), seq.BodyHTML, seq.BodyPlain, attachments)
+		if r.Score >= worst {
+			continue
+		}
+		worst, worstStep, issue = r.Score, seq.Position+1, warmlint.LeadIssue(r)
+	}
+	return worst, worstStep, issue, scored
+}
+
+// plainTextOptOutCheck reports whether a plain-text-only campaign is putting the
+// opt-out link in the body. Link mode is decided by the settings alone; only a
+// hand-placed variable needs the steps, and a step list it could not read
+// reports as FAILED, not passed, like every other check that cannot run.
+func (s *service) plainTextOptOutCheck(ctx context.Context, campaign *models.Campaign, unsub models.UnsubscribeSettings, recommendations *[]string) models.PreflightCheckResult {
+	where := ""
+	if unsub.Effective(campaign.UnsubscribeMode).Mode == models.UnsubscribeModeLink {
+		where = "the opt-out line is set to Unsubscribe link"
+	} else {
+		seqs, err := s.campaignRepo.GetSequencesByCampaignID(ctx, campaign.ID)
+		if err != nil {
+			*recommendations = append(*recommendations, "Re-run preflight; the campaign's steps could not be read.")
+			return models.PreflightCheckResult{
+				Key:         "plain_text_opt_out",
+				Passed:      false,
+				Severity:    "warning",
+				Message:     "Could not read the campaign's steps to check what its opt-out puts in the copy.",
+				Remediation: "Re-run preflight.",
+			}
+		}
+		where = stepPlacingUnsubscribeLink(seqs)
+	}
+
+	check := plainTextOptOutResult(where)
+	if !check.Passed {
+		*recommendations = append(*recommendations, "On a plain-text campaign, let the unsubscribe header carry the opt-out instead of a link in the body.")
+	}
+	return check
+}
+
+// stepPlacingUnsubscribeLink names the first email step whose SHIPPED copy
+// carries the {{.UnsubscribeLink}} variable, or "" when none does. A plain-text
+// campaign sends body_plain, falling back to the text of body_html, so a token
+// that only ever appears in an HTML attribute (the author's own <a href>) never
+// reaches the recipient and is not worth warning about.
+func stepPlacingUnsubscribeLink(seqs []models.Sequence) string {
+	// Named, not numbered: `position` is 0-based on some campaigns and 1-based
+	// on others, so a number computed from it would point at the wrong step.
+	// The list arrives in builder order, so the index is the honest fallback
+	// when a step has no name.
+	for i, seq := range seqs {
+		if seq.Kind != "" && seq.Kind != "email" {
+			continue
+		}
+		body := seq.BodyPlain
+		if strings.TrimSpace(body) == "" {
+			body = mailhtml.ToPlainText(seq.BodyHTML)
+		}
+		if !strings.Contains(seq.Subject, models.UnsubscribeLinkToken) && !strings.Contains(body, models.UnsubscribeLinkToken) {
+			continue
+		}
+		if name := strings.TrimSpace(seq.Name); name != "" {
+			return fmt.Sprintf("the step %q places the unsubscribe link variable", name)
+		}
+		return fmt.Sprintf("step %d places the unsubscribe link variable", i+1)
+	}
+	return ""
+}
+
+// plainTextOptOutResult turns "what puts the link in the body", or "" for
+// nothing, into the check. Only called when campaign.TextOnly is set, so it
+// never fires on an HTML campaign, where the link renders as a word.
+func plainTextOptOutResult(where string) models.PreflightCheckResult {
+	check := models.PreflightCheckResult{
+		Key:      "plain_text_opt_out",
+		Passed:   true,
+		Severity: "warning",
+		Message:  "Plain text only: the opt-out puts no raw URL in the copy.",
+	}
+	if where == "" {
+		return check
+	}
+	check.Passed = false
+	check.Message = fmt.Sprintf("This campaign sends plain text only and %s, so recipients read the whole unsubscribe address instead of a word.", where)
+	check.Remediation = "Keep the List-Unsubscribe header on and switch the opt-out line to Reply to opt out, or turn plain text off so the link can render as a word."
+	return check
+}
+
+// contentScoreCheck scores every step's copy and reports the worst. A step list
+// it could not read reports as FAILED, not passed: a check that did not run
+// must never look like one that succeeded.
+func (s *service) contentScoreCheck(ctx context.Context, campaignID uuid.UUID, floor int, recommendations *[]string) models.PreflightCheckResult {
+	// Out of range means a row written before the floor was clamped.
+	if floor <= 0 || floor > 100 {
+		floor = 60
+	}
+	seqs, err := s.campaignRepo.GetSequencesByCampaignID(ctx, campaignID)
+	if err != nil {
+		*recommendations = append(*recommendations, "Re-run preflight; the campaign's steps could not be read.")
+		return models.PreflightCheckResult{
+			Key:         "content_score",
+			Passed:      false,
+			Severity:    "warning",
+			Message:     "Could not read the campaign's steps to score their copy.",
+			Remediation: "Re-run preflight.",
+		}
+	}
+	if len(seqs) == 0 {
+		return models.PreflightCheckResult{
+			Key:      "content_score",
+			Passed:   true,
+			Severity: "info",
+			Message:  "No steps to score yet.",
+		}
+	}
+
+	// The send path scores the files each step actually carries, so preflight
+	// counts them the same way (campaign-wide plus that step's own) rather than
+	// reporting a score the feed later contradicts.
+	campaignWide := 0
+	perStep := map[uuid.UUID]int{}
+	if s.attachmentRepo != nil {
+		atts, aerr := s.attachmentRepo.ListByCampaign(ctx, campaignID)
+		if aerr != nil {
+			// Scoring as none would pass copy the send path then warns about.
+			*recommendations = append(*recommendations, "Re-run preflight; the campaign's attachments could not be read.")
+			return models.PreflightCheckResult{
+				Key:         "content_score",
+				Passed:      false,
+				Severity:    "warning",
+				Message:     "Could not read the campaign's attachments to score its copy.",
+				Remediation: "Re-run preflight.",
+			}
+		}
+		for _, a := range atts {
+			if a.SequenceID == nil {
+				campaignWide++
+				continue
+			}
+			perStep[*a.SequenceID]++
+		}
+	}
+
+	worst, worstStep, issue, scored := worstStepContentScore(seqs, func(seq models.Sequence) int {
+		return campaignWide + perStep[seq.ID]
+	})
+	if scored == 0 {
+		return models.PreflightCheckResult{
+			Key:      "content_score",
+			Passed:   true,
+			Severity: "info",
+			Message:  "No email steps to score yet.",
+		}
+	}
+
+	if worst >= floor {
+		return models.PreflightCheckResult{
+			Key:      "content_score",
+			Passed:   true,
+			Severity: "info",
+			Message:  fmt.Sprintf("Copy scores %d/100 for spam signals.", worst),
+		}
+	}
+	*recommendations = append(*recommendations, "Rewrite the lowest-scoring step's copy before sending at volume.")
+	return models.PreflightCheckResult{
+		Key:         "content_score",
+		Passed:      false,
+		Severity:    "warning",
+		Message:     fmt.Sprintf("Step %d scores %d/100 for spam signals (floor %d). %s", worstStep, worst, floor, issue),
+		Remediation: "Trim spam-trigger wording, links, images and stacked punctuation in that step.",
+	}
+}
+
+// listQualityCheck projects the campaign's bounce rate for the preflight
+// report, using the same rule StartCampaign refuses on, so the launch dialog
+// cannot say one thing and the launch another.
+func (s *service) listQualityCheck(ctx context.Context, orgID, campaignID uuid.UUID, recommendations *[]string) models.PreflightCheckResult {
+	audience, err := s.audienceRepo.GetCampaignAudience(ctx, orgID, campaignID)
+	if err != nil {
+		return models.PreflightCheckResult{
+			Key:      "list_quality",
+			Passed:   false,
+			Severity: "warning",
+			Message:  "Could not read the campaign's audience to check it.",
+		}
+	}
+	v := listgate.Project(audience)
+	check := models.PreflightCheckResult{
+		Key:         "list_quality",
+		Passed:      !v.Block && !v.Warn,
+		Severity:    "warning",
+		Message:     v.Summary,
+		Remediation: v.Remediation,
+	}
+	if v.Block {
+		check.Severity = "error"
+	}
+	if !check.Passed {
+		*recommendations = append(*recommendations, "Clean or verify the recipient list before sending at volume.")
+	}
+	return check
+}
+
+// WireAudience attaches the launch-time list measurement.
+// EvidenceRecorder mirrors emailverify.EvidenceRecorder without importing it.
+type EvidenceRecorder interface {
+	RecordEvidence(ctx context.Context, contactID uuid.UUID, step models.EvidenceStep, kind, ref, detail string)
+}
+
+// EvidenceAware lets main hand the service the verification evidence ledger.
+type EvidenceAware interface {
+	WireEvidence(e EvidenceRecorder)
+}
+
+func (s *service) WireEvidence(e EvidenceRecorder) { s.evidence = e }
+
+func (s *service) WireAudience(r repository.CampaignAudienceRepository) {
+	s.audienceRepo = r
+}
+
+// AudienceAware is the optional capability the caller uses to attach it.
+type AudienceAware interface {
+	WireAudience(r repository.CampaignAudienceRepository)
+}
+
+// WireAttachments attaches the campaign attachment counter the content check
+// scores with, so preflight and the send path weigh attachments the same way.
+func (s *service) WireAttachments(r repository.AttachmentRepository) {
+	s.attachmentRepo = r
+}
+
+// AttachmentAware is the optional capability the caller uses to attach it.
+type AttachmentAware interface {
+	WireAttachments(r repository.AttachmentRepository)
+}
+
+// main attaches this by type assertion, which fails silently, so pin it here.
+var _ AttachmentAware = (*service)(nil)

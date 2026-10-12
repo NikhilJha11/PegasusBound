@@ -1,0 +1,228 @@
+package campaign
+
+import (
+	"context"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/app/dailythrottle"
+	"github.com/pegasusbound/pegasusbound/internal/app/feature"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/pubsub"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/storage"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+	"github.com/pegasusbound/pegasusbound/internal/scheduler"
+	"github.com/pegasusbound/pegasusbound/internal/tasksched"
+)
+
+const campaignCooldownSeconds = 60
+
+type CampaignService interface {
+	Create(ctx context.Context, userID string, orgID *uuid.UUID, data *models.CreateCampaign) (*models.Campaign, *errx.Error)
+	// Get loads one of orgID's campaigns; any other id is not found.
+	Get(ctx context.Context, orgID, id string) (*models.Campaign, *errx.Error)
+	// allowed limits the results to those campaigns; nil is every campaign in the workspace.
+	Search(ctx context.Context, userID, query, cursor, folder, status, limit string, allowed []uuid.UUID) (*models.CampaignsResult, *errx.Error)
+	Overview(ctx context.Context, orgID string, allowed []uuid.UUID) (*models.CampaignsOverview, *errx.Error)
+	// Estimate projects how many contacts a set of segments reaches and how
+	// many sending days a mailbox pool needs under the per-mailbox caps.
+	// Read-only; the new-campaign flow shows it as its launch plan.
+	Estimate(ctx context.Context, orgID uuid.UUID, in *models.CampaignEstimate) (*models.CampaignEstimateResult, *errx.Error)
+	// SendPlan is today's sending plan for one of orgID's campaigns: what
+	// will go out today and every limit that decided it, derived through the
+	// scheduler's own gates. Read-only.
+	SendPlan(ctx context.Context, orgID uuid.UUID, campaignID string) (*models.CampaignSendPlan, *errx.Error)
+	// WorkspaceCapacity is what the workspace's active mailboxes can send
+	// today between them, under the same clamps. Read-only.
+	WorkspaceCapacity(ctx context.Context, orgID uuid.UUID) (*models.WorkspaceSendCapacity, *errx.Error)
+	// StartSendPlanSnapshotter runs the background loop that re-walks every
+	// active campaign's send plan on an interval and stores it, so SendPlan
+	// serves a stored snapshot instead of computing on the request. A no-op
+	// without the snapshot store or a planner.
+	StartSendPlanSnapshotter(ctx context.Context, interval time.Duration)
+	Update(ctx context.Context, orgID, id string, data *models.UpdateCampaign) (*models.Campaign, *errx.Error)
+	// Delete removes an organization's campaign outright. A running campaign
+	// is stopped as part of it: its pending tasks are cancelled in the same
+	// transaction, so nothing keeps sending for a campaign that is gone.
+	// Returns the deleted campaign so callers can name it after the fact.
+	Delete(ctx context.Context, orgID uuid.UUID, campaignID string) (*models.Campaign, *errx.Error)
+	// Duplicate creates a draft copy of a campaign's configuration owned by
+	// userID. An empty name derives "<source name> (copy)".
+	Duplicate(ctx context.Context, orgID, userID uuid.UUID, campaignID, name string) (*models.Campaign, *errx.Error)
+
+	// Start/Stop
+	StartCampaign(ctx context.Context, orgID uuid.UUID, campaignID string, opts models.StartCampaignOptions) *errx.Error
+	// ResumeVerificationPaused restarts the org's campaigns parked at
+	// paused_undeliverable. Called after verification verdicts change; a
+	// campaign that still has nothing to send parks itself again.
+	ResumeVerificationPaused(ctx context.Context, orgID uuid.UUID)
+	StopCampaign(ctx context.Context, orgID uuid.UUID, campaignID string) *errx.Error
+
+	// Logs
+	GetLogs(ctx context.Context, orgID, campaignID string, limit int, cursor *string) (*models.CampaignLogsResult, *errx.Error)
+
+	// WakeCampaigns pulls the parked wakeup of each listed active campaign
+	// forward when its next slot is sooner than where it is parked. Called after
+	// leads are attached to a campaign: the chain is one self-perpetuating task,
+	// so without this a campaign that had nothing to do keeps sleeping and the
+	// new leads sit at "Queued / Not started". Best effort and never an error to
+	// the caller — the lead was still added.
+	WakeCampaigns(ctx context.Context, orgID uuid.UUID, campaignIDs []string)
+
+	// KeepRunning turns on the campaign's "Keep running for new leads" setting
+	// because a live lead source (a form, an automation) now feeds it, the
+	// same way linking a segment does. reason is written to the campaign's
+	// activity log on the transition; a campaign already continuous is left
+	// alone. Returns ErrNotFound when the campaign is not the organization's.
+	KeepRunning(ctx context.Context, orgID, campaignID uuid.UUID, reason string) *errx.Error
+
+	// Explicit sender pool (feature 1).
+	ListCampaignSenders(ctx context.Context, orgID uuid.UUID, campaignID string) ([]models.CampaignSender, *errx.Error)
+	ReplaceCampaignSenders(ctx context.Context, orgID uuid.UUID, campaignID string, in []models.CampaignSenderInput) ([]models.CampaignSender, *errx.Error)
+
+	// Campaign-scoped tracking domain (feature 5). Resolves the override's CNAME
+	// and flips verified on success; an unresolved record stays "pending".
+	VerifyCampaignTrackingDomain(ctx context.Context, orgID uuid.UUID, campaignID string) (*models.TrackingDomainStatus, *errx.Error)
+
+	// PauseLead parks ONE contact's flow inside ONE campaign until `until`,
+	// or with no end when it is nil. The contact stays subscribed and stays a
+	// lead: this is the lever for "they are away for a week", which
+	// unsubscribing and suppressing both answer far too permanently.
+	PauseLead(ctx context.Context, orgID, campaignID, contactID uuid.UUID, until *time.Time, reason string) (*models.LeadHold, *errx.Error)
+	// ResumeLead lifts the hold now and wakes the campaign so the step goes
+	// out on the next pass rather than when the chain happens to be parked.
+	ResumeLead(ctx context.Context, orgID, campaignID, contactID uuid.UUID) *errx.Error
+	// GetLeadHold reads the live hold on one lead (nil when it is not held).
+	GetLeadHold(ctx context.Context, orgID, campaignID, contactID uuid.UUID) (*models.LeadHold, *errx.Error)
+
+	// ListLeadCC reads the contacts copied on every email to one lead.
+	ListLeadCC(ctx context.Context, orgID, campaignID, contactID uuid.UUID) ([]models.CampaignLeadCC, *errx.Error)
+	// SetLeadCC replaces the contacts copied on one lead and returns the new
+	// list. A copied contact's own lead in the campaign is held meanwhile.
+	SetLeadCC(ctx context.Context, orgID, campaignID, contactID uuid.UUID, contactIDs []string) ([]models.CampaignLeadCC, *errx.Error)
+	// SuggestLeadCC offers the lead's likely colleagues to copy.
+	SuggestLeadCC(ctx context.Context, orgID, campaignID, contactID uuid.UUID) ([]models.CampaignLeadCCSuggestion, *errx.Error)
+}
+
+// Bounds on a manual lead hold. A hold in the past would lift the moment it
+// was written; one years out is indistinguishable from removing the lead, and
+// the member who wants that has "remove from campaign".
+const (
+	leadHoldMaxDays      = 365
+	leadHoldReasonMaxLen = 200
+)
+
+type campaignService struct {
+	campaignRepository repository.CampaignRepository
+	taskRepo           repository.TaskRepository
+	emailRepo          repository.EmailRepository
+	campaignLogRepo    repository.CampaignLogRepository
+	featureGate        feature.FeatureGateService
+	throttle           dailythrottle.Service
+	scheduler          scheduler.SchedulerService
+	tasksClient        tasksched.Scheduler
+	streamingPublisher *pubsub.StreamingPublisher
+	attachmentRepo     repository.AttachmentRepository
+	storage            storage.Store
+	// audienceRepo measures the campaign's list at launch. Optional/nil-safe:
+	// without it no launch is ever refused on list quality.
+	audienceRepo repository.CampaignAudienceRepository
+	// campaignProgressRepo counts the leads verification refused, so a start
+	// with nothing left to send can say why. Optional/nil-safe.
+	campaignProgressRepo repository.CampaignProgressRepository
+	// segments counts an audience for Estimate. Optional: without it an
+	// estimate reports zero recipients.
+	segments SegmentCounter
+	// planCache and capacityCache hold the two derived reads for a few
+	// seconds each; see readCache.
+	planCache     *readCache[*models.CampaignSendPlan]
+	capacityCache *readCache[*models.WorkspaceSendCapacity]
+	// planSnapshotRepo stores the background-computed send plan per campaign so
+	// the read endpoint serves a stored snapshot instead of walking the planner
+	// on the request. Optional/nil-safe: without it SendPlan computes inline
+	// through the single-flight cache, as it did before.
+	planSnapshotRepo repository.CampaignSendPlanSnapshotRepository
+}
+
+// SegmentCounter is the slice of the segment service Estimate needs.
+// Satisfied structurally by segment.Service.
+type SegmentCounter interface {
+	CountAudience(ctx context.Context, orgID uuid.UUID, segmentIDs []string, campaignID *uuid.UUID) (int, *errx.Error)
+}
+
+// SegmentAware lets main hand the campaign service the segment counter.
+type SegmentAware interface {
+	WireSegments(c SegmentCounter)
+}
+
+func (s *campaignService) WireSegments(c SegmentCounter) {
+	s.segments = c
+}
+
+// WireAudience attaches the launch-time list gate.
+func (s *campaignService) WireAudience(r repository.CampaignAudienceRepository) {
+	s.audienceRepo = r
+}
+
+// AudienceAware is the optional capability the caller uses to attach it.
+type AudienceAware interface {
+	WireAudience(r repository.CampaignAudienceRepository)
+}
+
+// AttachmentAware is implemented by the campaign service so main can hand it
+// the attachment repository and object store once those exist. Without them
+// delete leaves attachment objects behind and duplicate skips attachments.
+type AttachmentAware interface {
+	WireAttachments(repo repository.AttachmentRepository, store storage.Store)
+}
+
+// ProgressAware lets main hand the campaign service the progress repository.
+type ProgressAware interface {
+	WireProgress(r repository.CampaignProgressRepository)
+}
+
+func (s *campaignService) WireProgress(r repository.CampaignProgressRepository) {
+	s.campaignProgressRepo = r
+}
+
+// SnapshotAware lets main hand the campaign service the send-plan snapshot
+// store that the background snapshotter writes and SendPlan reads.
+type SnapshotAware interface {
+	WireSnapshots(r repository.CampaignSendPlanSnapshotRepository)
+}
+
+func (s *campaignService) WireSnapshots(r repository.CampaignSendPlanSnapshotRepository) {
+	s.planSnapshotRepo = r
+}
+
+func (s *campaignService) WireAttachments(repo repository.AttachmentRepository, store storage.Store) {
+	s.attachmentRepo = repo
+	s.storage = store
+}
+
+func NewService(
+	campaignRepository repository.CampaignRepository,
+	taskRepo repository.TaskRepository,
+	emailRepo repository.EmailRepository,
+	campaignLogRepo repository.CampaignLogRepository,
+	featureGate feature.FeatureGateService,
+	throttle dailythrottle.Service,
+	scheduler scheduler.SchedulerService,
+	tasksClient tasksched.Scheduler,
+	streamingPublisher *pubsub.StreamingPublisher,
+) CampaignService {
+	return &campaignService{
+		planCache:          newReadCache[*models.CampaignSendPlan](15 * time.Second),
+		capacityCache:      newReadCache[*models.WorkspaceSendCapacity](60 * time.Second),
+		campaignRepository: campaignRepository,
+		taskRepo:           taskRepo,
+		emailRepo:          emailRepo,
+		campaignLogRepo:    campaignLogRepo,
+		featureGate:        featureGate,
+		throttle:           throttle,
+		scheduler:          scheduler,
+		tasksClient:        tasksClient,
+		streamingPublisher: streamingPublisher,
+	}
+}

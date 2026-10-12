@@ -1,0 +1,983 @@
+---
+title: Configuration reference
+description: Every environment variable Pegasusbound reads, what it does, its default, and whether changing it needs a restart.
+---
+
+The environment is authoritative. Pegasusbound never lets a web form overwrite a setting your environment owns, so there is no precedence to reason about and no file that silently rewrites itself behind you.
+
+That rule has three consequences worth stating before the tables:
+
+- **Everything on this page is set in the environment of the running process.** With Docker Compose that is the `.env` next to `docker-compose.yml`. With Kubernetes it is the pod spec or a secret. With a bare binary it is the shell or the systemd unit.
+- **Most resolved values are visible, read only, in the admin panel** under **Instance > Configuration > Environment** (`http://localhost:5174/configuration?tab=environment` on a stock install). Each row shows the variable name, the value Pegasusbound actually resolved, where it came from (`env`, `default`, `derived` or `unset`), and whether changing it needs a restart. That page is how you answer "is my variable actually being picked up", without reading source.
+- **A handful of settings are stored in the database instead**, because no environment variable owns them. They are listed in [settings stored in the database](#settings-stored-in-the-database) and are the only settings editable from a browser.
+
+Secrets are never returned by any API. The configuration page shows a sensitive key as set or unset plus a four character fingerprint of its value, which is enough to confirm that two services hold the same `AUTH_SECRET` without disclosing it to anyone.
+
+<Callout type="info" title="The panel reads the backend, not the whole fleet">
+The configuration registry runs inside the backend process, so every value it shows is the value that process resolved. It does not reach into the realtime, tracking, consumer or worker containers, and it does not list variables only those services read: [realtime service](#realtime-service) and [tracking service](#tracking-service) are absent from the page entirely. When a value has to match across services, compare the fingerprints or read the other container's environment directly.
+</Callout>
+
+## Seeing what is actually set
+
+| How | What you get |
+|---|---|
+| **Instance > Configuration > Environment** in the admin panel | The backend's entries with resolved value, source, group and restart requirement |
+| `make doctor` | The health checks from a shell, including the configuration problems they detect |
+| `GET /admin/instance/config` | The same list as JSON, behind the `manage_settings` admin permission |
+
+Anything flagged on [Instance health](/development/instance-health/) links back to the section of this page that explains the fix.
+
+<Callout type="warn" title="An empty value in .env is not an empty value">
+`docker-compose.yml` reads this file as `${VAR:-default}`, and Compose treats an empty assignment exactly like a missing one. `KMS_LOCAL_MASTER_KEY=` does not blank the key, it substitutes the published default. To leave something unset under Compose, comment the line out.
+</Callout>
+
+## Deployment
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `APP_ENV` | `dev` or `prod`. `dev` tolerates the published default secrets and turns on Gin debug logging. Set `prod` for anything other people can reach | `dev` | yes |
+| `DEPLOYMENT_MODE` | `self_hosted` or `cloud`. Picks the auth defaults in [authentication](#authentication); every one stays individually overridable | `self_hosted` under compose | yes |
+| `ALLOW_INSECURE_DEFAULTS` | `true` lets the backend boot even when a secret still holds its published default. Only for a throwaway instance | unset | yes |
+| `GIN_MODE` | `debug` or `release` | `release` | yes |
+| `ENV_LABEL` | A label the admin panel shows next to the instance name | unset | yes (container start) |
+| `PEGASUSBOUND_CLOUD_URL` | The Pegasusbound Cloud API a self-hosted instance links to for the hosted warmup pool ([guide](/guides/pegasusbound-cloud/)). Outbound HTTPS only | `https://api.pegasusbound.com` | no |
+| `INSTANCE_NAME` | The name shown on the Pegasusbound Cloud approval page when linking this instance | the hostname | no |
+| `PEGASUSBOUND_VERSION` | Version string reported to Pegasusbound Cloud on link requests | `dev` | no |
+| `PEGASUSBOUND_ALLOW_UNSAFE_WEBHOOK_URLS` | `true` lets customer webhooks point at `http://` and private addresses. Development only: it lets any workspace member make the backend reach into your internal network | `false` | yes |
+
+In Gin release mode, access logs omit successful health probes and internal GET lookups, including an expected missing email-message mapping. Authentication failures, server errors, other missing resources and all mutations remain logged. Gin debug mode keeps every access log. Query strings and credential path parameters remain redacted in both modes; organization audit events are unaffected.
+
+<Callout type="warn" title="prod does not mean cloud">
+`APP_ENV=prod` needs no cloud account. Error reporting and GeoIP lookups are used when configured and skipped with a logged note when they are not.
+</Callout>
+
+## Secrets
+
+Five values protect the whole instance. Compose ships a working default for each so a fresh clone boots with no configuration, and every one of those defaults is published in this repository, so they protect nothing.
+
+| Variable | Format | What it protects | Restart needed |
+|---|---|---|---|
+| `AUTH_SECRET` | 32 characters or more, enforced at boot | JWT and session signing. The realtime service reads the same value as `JWT_SECRET` and applies the same floor. Both refuse to start below it: a shorter HS256 key can be recovered offline from any token the service has issued. It also keys the `pegasusbound-verify=` values workspaces publish in `_pegasusbound` `TXT` records to prove a domain, so changing it changes every one of them: [root redirects](/guides/sending-domains/#root-redirects) stop at their next check until the new value is published | yes |
+| `INTERNAL_API_TOKEN` | any random string | The backend's `/api/v1/internal/` routes the tracking and forms services call (click tickets, root redirects, page views, hosted forms). Fleet nodes authenticate with it too when `NODE_BROKER_TOKEN` is unset | yes |
+| `NODE_BROKER_TOKEN` | any random string | Every internal route only a fleet node calls: organization data keys (read, store and open), blob signing, provider access tokens for a mailbox Pegasusbound Cloud manages, the message map and sync lookups, worker config and the node heartbeat. Optional, and falls back to `INTERNAL_API_TOKEN`. The same value has to be set on the control plane and on every node, or those routes answer 401; a node joined after it is set receives it in `node.env` in place of `INTERNAL_API_TOKEN`, and a node joined before has to join again. The installer generates one for a new install; an existing install keeps the shared token until you set one | yes |
+| `NODE_ACCEPT_INTERNAL_TOKEN` | `true` or unset | While `true`, the node-only routes other than the key and blob brokers also accept `INTERNAL_API_TOKEN`. An upgrade does not need it: a heartbeat sent with `INTERNAL_API_TOKEN` is always answered with the node's version and nothing is recorded, so an older node updates itself. Set it only to keep older nodes syncing until they have updated, then remove it: while it is on, the tracking and forms services' token reaches those routes | no |
+| `NODE_LOG_TOKEN` | enrollment-issued 43-character base64url secret, different per node | Only node-specific log ingestion. Issued in the protected fleet join environment, hashed in primary Redis, never derived/exchanged from the fleet-wide broker/internal credential. Rejoin rotates only this evidence credential; deletion revokes it. Deploy backend before upgrading nodes, then rerun authenticated join using the same config directory and UUID, keeping local overrides. No fleet deletion, mailbox reassignment or manual secret copying is required; the script restarts the service. Upgrade alone does not fill unavailable coverage and no historical logs are backfilled. Never share one value fleet-wide | yes |
+| `SECRET_KEY_BASE` | 64 characters or more | Phoenix session signing in the realtime service | yes |
+| `KMS_LOCAL_MASTER_KEY` | base64, exactly 32 bytes | The root key that seals every per-organization data key | yes |
+| `CREDENTIALS_ENCRYPTION_KEY` | exactly 64 hex characters | Mailbox credentials at rest: SMTP and IMAP passwords, and Gmail and Outlook OAuth access and refresh tokens | yes |
+
+Generate real ones before anyone else can reach the instance:
+
+```bash
+cat >> .env <<EOF
+AUTH_SECRET=$(openssl rand -base64 32)
+INTERNAL_API_TOKEN=$(openssl rand -hex 24)
+SECRET_KEY_BASE=$(openssl rand -base64 64 | tr -d '\n')
+KMS_LOCAL_MASTER_KEY=$(openssl rand -base64 32)
+CREDENTIALS_ENCRYPTION_KEY=$(openssl rand -hex 32)
+APP_ENV=prod
+EOF
+```
+
+`make gen-key` prints a single fresh `KMS_LOCAL_MASTER_KEY` if that is all you need.
+
+`APP_ENV=prod` goes last. It is what turns a published default from a logged warning into a refusal to start, so an instance that gets `prod` before the other five will not boot.
+
+Values that must be identical across services, because each service reads its own copy:
+
+| Value | Read by | If it drifts |
+|---|---|---|
+| `AUTH_SECRET`, seen by realtime as `JWT_SECRET` | backend, realtime | The dashboard loads but never goes live: the websocket rejects every token |
+| `INTERNAL_API_TOKEN`, seen by workers as `ENCRYPTED_KEYS_WORKER_TOKEN` | backend, worker, tracking | Workers cannot fetch decryption keys and tracking cannot resolve click tickets. Both fail closed with `401` |
+| `KMS_LOCAL_MASTER_KEY` | backend, consumer, worker | Sealed data keys cannot be opened, so mailbox credentials stop decrypting |
+| `CREDENTIALS_ENCRYPTION_KEY` | backend, worker | Stored SMTP and IMAP passwords and OAuth tokens stop decrypting, so no mailbox can send or sync |
+
+<Callout type="warn" title="Only the backend refuses to boot on a published default">
+The secret check runs in the backend. The consumer and the workers start happily on a published default, so an instance can look healthy while one process is using a key anyone can read from GitHub. The `secret_published_default` check on [Instance health](/development/instance-health/#secret_published_default) is what catches it.
+</Callout>
+
+<Callout type="warn" title="Back up the two encryption keys">
+`KMS_LOCAL_MASTER_KEY` and `CREDENTIALS_ENCRYPTION_KEY` seal every stored credential and every stored message body. Losing them is unrecoverable, and a database backup without them cannot be decrypted.
+</Callout>
+
+## Addresses
+
+Every emailed link (password reset, invitation, the first-run claim link) is built from `APP_URL`. Leave it unset and a self-hosted instance guesses the origin from `CORS_ALLOW_ORIGINS` or `PUBLIC_HOST` instead, and never falls back to the hosted service: a link nobody can open is a support ticket, while a working link to somebody else's dashboard carries a live reset token out of your deployment. Set it.
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `APP_URL` | The dashboard origin. The source of every emailed link | guessed from `CORS_ALLOW_ORIGINS`, then `PUBLIC_HOST` | no (read per request) |
+| `FRONTEND_BASE_URL` | Alternative name for the same value, read when `APP_URL` is unset | unset | no |
+| `API_PUBLIC_URL` | The backend's public base. Frontends, blob URLs and the OIDC redirect derive from it | derived from `PUBLIC_HOST` under compose | yes |
+| `BACKEND_PUBLIC_URL` | The backend's public URL as third parties call it: generated worker configuration, the integration OAuth redirect and the [Slack app](/development/slack-app/) request URLs. Only needed when that differs from `API_PUBLIC_URL` | falls back to `API_PUBLIC_URL` | yes |
+| `APP_ORIGIN` | Default origin the mailbox and integration OAuth callback pages post back to. Only needed when the dashboard is served somewhere other than `APP_URL`. Google per-mailbox flows can instead return to their allowlisted initiating dashboard, as described below | derived from `APP_URL` | yes |
+| `API_HOST` | The listen address | `0.0.0.0:8080` | yes |
+| `PUBLIC_HOST` | Compose only. A hostname or LAN IP that every other URL derives from | `localhost` | yes |
+| `CORS_ALLOW_ORIGINS` | Comma separated origins allowed to call the API. Anything not listed gets `403` on preflight | derived from `PUBLIC_HOST` under compose | yes |
+| `WEBSOCKET_URL` | The websocket URL the dashboard connects to | derived under compose | yes (container start) |
+| `PHX_HOST` | The realtime service's own hostname | `localhost` | yes |
+| `TRACKING_DOMAIN` | The host that serves open pixels, click links and the unsubscribe pages for workspaces that verified their own domain against it, and the `CNAME` value those customers point their tracking subdomain at. Use a separate, neutral domain in production. Unset means campaign mail ships with no pixel and unwrapped links, no custom tracking domain can verify, and every opt-out is served from `API_PUBLIC_URL` | `localhost:3000` under compose, otherwise unset | no |
+| `TRACKING_SERVICE_URL` | Where the backend reaches the tracking service internally | unset | yes |
+| `FORMS_DOMAIN` | The host hosted form pages and embeds are served on (`forms.example.com`, routed to the forms service). The backend builds share links and embed codes from it; unset leaves forms without a public URL | unset | no (read per request) |
+
+<Callout type="warn" title="Setting PUBLIC_HOST turns localhost off">
+Once `PUBLIC_HOST` is set, every derived URL uses it and `http://localhost:5173` stops working, because a `localhost` origin is no longer in `CORS_ALLOW_ORIGINS`. To keep both, list them yourself in `CORS_ALLOW_ORIGINS`.
+</Callout>
+
+## Network and proxy
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `TRUSTED_PROXIES` | Comma separated CIDRs allowed to set `X-Forwarded-For` | empty (trust nothing) | yes |
+
+Empty is correct for a directly exposed backend. Behind a reverse proxy it is not: with no trusted CIDR, Pegasusbound records the proxy's address as the client address, and the per IP login limiter, session records, audit rows and API key IP allowlists all read the wrong address. Set it to the CIDR your proxy connects from:
+
+```bash
+TRUSTED_PROXIES=10.0.0.0/8,172.16.0.0/12
+```
+
+## Authentication
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `AUTH_LOGIN_CODE` | `always`, `new_device` or `off`. Whether a login also requires a code emailed to the account | `off` on self-host, `new_device` on cloud | yes |
+| `REQUIRE_EMAIL_VERIFICATION` | Whether a signup must confirm an emailed code before the account exists | `false` on self-host | yes |
+| `DISABLE_REGISTRATION` | `false`, `invite_only` or `true`. See [registration modes](/development/accounts-and-access/#registration-modes) | `invite_only` on self-host | yes |
+| `DISABLE_PASSWORD_LOGIN` | Turns off email and password entirely, for single sign-on only deployments | `false` | yes |
+| `SSO_AUTO_PROVISION` | `true` lets a verified identity provider assertion create an account regardless of `DISABLE_REGISTRATION` | `false` | yes |
+| `AUTH_IP_RATE_LIMIT` | Unauthenticated auth requests allowed per source IP per 15 minutes | `60` | yes |
+| `CLI_AUTH_IP_RATE_LIMIT` | CLI sign-in handshake requests allowed per source IP per 15 minutes. Its own budget, because one `pegasusbound auth login` polls around 200 times and must not exhaust the allowance above | `500` | yes |
+| `PASSKEY_IP_RATE_LIMIT` | Passkey login challenges allowed per source IP per 15 minutes. Its own budget, because the sign-in page asks for a challenge on load rather than when someone acts, so opening that page must not spend the allowance above. Finishing the ceremony is an authentication attempt and counts against `AUTH_IP_RATE_LIMIT` | `300` | yes |
+| `PUBLIC_IP_RATE_LIMIT` | Requests allowed per source IP per 15 minutes on the remaining public routes: unsubscribe, invitation preview, fleet enrolment and the analytics proxy. Each carries its authorization in a high-entropy token, so this bounds unmetered writes and relayed bandwidth rather than guessing. Counts reads as well as writes, unlike the auth limiter | `600` | yes |
+| `PEGASUSBOUND_BOOTSTRAP_EMAIL` | First owner's address, read only while the users table is empty | unset | yes |
+| `PEGASUSBOUND_BOOTSTRAP_PASSWORD_HASH` | Argon2id PHC string for that owner, as `pegasusboundctl hash-password` prints it. Preferred over the plaintext form. A malformed hash, or one whose cost parameters are below `m=65536,t=3,p=2` with a 16-byte salt and 32-byte key, is refused and no owner is created | unset | yes |
+| `PEGASUSBOUND_BOOTSTRAP_PASSWORD` | Plaintext convenience form. Held to the same rules as any password (length, breached list); one that fails them is refused and no owner is created. Warns at boot, and leaves a password in your process environment | unset | yes |
+| `PEGASUSBOUND_BOOTSTRAP_ORG` | Name of the organization created with that owner. A value that breaks the [naming rules](/api/error-codes/#name-refusals) is ignored with a warning | derived from the name | yes |
+| `TWOFA_SECRET` | Key that encrypts stored TOTP secrets. Falls back to `AUTH_SECRET`, so existing deployments keep working; rotating it invalidates every enrolled TOTP secret | `AUTH_SECRET` | yes |
+| `WEBAUTHN_RP_ID` | Passkey relying party id. Derived from `APP_URL` when unset. Changing it invalidates every enrolled passkey | derived | yes |
+| `WEBAUTHN_RP_ORIGINS` | Origins accepted for passkey ceremonies | derived from `APP_URL` | yes |
+| `WEBAUTHN_RP_DISPLAY_NAME` | The name the passkey prompt shows | `Pegasusbound` | yes |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Sign in with Google in the browser. Both are required; unrelated to the `BOX_GOOGLE_*` mailbox client. The same client carries a Google Workspace administrator's sign-in that [proves a domain](/development/whole-domain-connect/#proving-the-domain) for a whole-domain connect, asking only for `openid` and `email`; that sign-in signs nobody in | unset | yes |
+| `GOOGLE_REDIRECT_URI` | Redirect URI registered at Google. Served by the API, not the dashboard. An administrator's domain proof returns here too and is handed back to the dashboard window that opened it, so no second URI is registered | `API_PUBLIC_URL` plus `/v1/auth/google/callback` | yes |
+| `GOOGLE_IOS_CLIENT_ID` | Additional Google client id accepted from the iOS app. Native only: it does not enable the browser button | unset | yes |
+| `APPLE_APP_ID`, `APPLE_TEAM_ID`, `APPLE_KEY_ID`, `APPLE_KEY_SECRET` | Sign in with Apple. `APPLE_APP_ID` is the Services ID | unset | yes |
+| `APPLE_REDIRECT_URI` | Return URL registered at Apple. Must be HTTPS | `API_PUBLIC_URL` plus `/v1/auth/apple/callback` | yes |
+| `APPLE_IOS_BUNDLE_ID` | Bundle id accepted from the iOS app | `com.pegasusbound.app` | yes |
+| `OIDC_ISSUER_URL` | Generic OpenID Connect issuer. Discovery runs at boot | unset | yes |
+| `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET` | The client Pegasusbound authenticates as | unset | yes |
+| `OIDC_REDIRECT_URL` | Redirect URI registered at the provider. Defaults to `API_PUBLIC_URL` plus `/v1/auth/oidc/callback` | derived | yes |
+| `OIDC_SCOPES` | Scopes requested at the provider | `openid,profile,email` | yes |
+| `OIDC_ALLOWED_DOMAINS` | Email domains allowed to sign in through the provider | empty (any) | yes |
+| `OIDC_DEFAULT_ORG` | Organization uuid every single sign-on user joins | unset | yes |
+| `OIDC_PROVIDER_NAME` | The label on the sign-in button | `Single sign-on` | yes |
+
+Full behavior, including what each registration mode does to the sign-up form, is on [accounts and access](/development/accounts-and-access/).
+
+### Proxying PostHog
+
+<Callout title="Set the UI host whenever you proxy">
+`POSTHOG_HOST` is where events are sent; `POSTHOG_UI_HOST` is where PostHog's own app lives. They are the same thing only when you are not proxying. Point the first at your proxy and leave the second at `https://us.posthog.com` (or `https://eu.posthog.com`), or the SDK builds toolbar and session-replay links against the proxy, which does not serve the app.
+</Callout>
+
+
+Content blockers drop requests to `posthog.com`, so analytics and error reporting quietly stop for a large share of visitors. The backend serves a reverse proxy at `/ingest` for this. Point each frontend at it:
+
+| Tree | Setting | Value |
+|---|---|---|
+| dashboard, admin | `POSTHOG_HOST` | `https://api.example.com/ingest` |
+| marketing site | `PUBLIC_POSTHOG_HOST` | `https://api.example.com/ingest` |
+
+Nothing else changes: the key stays the same, and the proxy forwards the payload untouched. It is on the backend rather than in each frontend because there are three of them, and a proxy copied three times drifts three ways.
+
+The proxy forwards only what PostHog needs to read the request. Cookies and `Authorization` stay on this side, so a session for your instance is never handed to a third party, and the caller's address goes in `X-Forwarded-For` so visitors are geolocated rather than your server.
+
+## Captcha
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `CAPTCHA_PROVIDER` | `none` or `turnstile` | derived, see below | yes |
+| `TURNSTILE_SECRET` | Cloudflare Turnstile secret, read by the backend | unset | yes |
+| `PEGASUSBOUND_TURNSTILE_KEY` | The Turnstile site key, read by the dashboard and admin panel at container start | a test key under compose | yes (container start) |
+| `PEGASUSBOUND_BETA_NOTICE` | One sentence shown to everyone in the dashboard: once in a dialog on first visit, then as a `Beta` pill in the header that reopens it. Empty renders nothing, so a production deployment needs nothing set. Written into `config.js` when the container starts (or when the Pages build runs), so a change needs a restart or a rebuild rather than a reload | unset | yes |
+| `PEGASUSBOUND_CONFIG_OUT` | Where the dashboard and admin panel write their runtime `config.js`. Defaults to the path nginx serves; a static host sets it to the build output so the same script renders the file at build time instead of container start | the nginx path | yes (build or container start) |
+| `PEGASUSBOUND_CSP_CONNECT_ORIGINS` | Additional dashboard CSP connection origins, separated by spaces. Realtime is discovered automatically from the backend; use this as an offline fallback or for other connection destinations. Use exact HTTP(S) or WS(S) URLs, not wildcard hosts or CSP directives. `VITE_CSP_CONNECT_ORIGINS` supplies the build-time/development fallback | unset | yes (build or container start) |
+| `TURNSTILE_BYPASS_TOKEN` | A token that skips verification. Only honoured when `APP_ENV=dev` | unset | yes |
+| `TURNSTILE_SITE_KEY` | The public Turnstile widget key. The backend hands it to the forms service, which renders it on hosted form pages that enable spam protection. The frontends carry their own copy in `PEGASUSBOUND_TURNSTILE_KEY` | unset | no (read per request) |
+
+`CAPTCHA_PROVIDER` has no constant default. Unset, it resolves to `turnstile` when `TURNSTILE_SECRET` holds a value, whether from the environment or from AWS Secrets Manager, and to `none` when it does not, so configuring the secret is what turns captcha on and clearing it is what turns captcha off. The panel reports the resolved value with source `derived`.
+
+Setting `CAPTCHA_PROVIDER=turnstile` explicitly while `TURNSTILE_SECRET` is empty is the one combination that breaks: every verification fails, which means nobody can sign in. Set the secret or set the provider back to `none`.
+
+## Platform mail
+
+Platform mail is the product's own outbound: registration codes, password resets, team invitations, notification digests and login codes where those are enabled. It is separate from campaign mail, which leaves through the mailboxes you connect.
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `MAIL_TRANSPORT` | `smtp`, `log` or `ses` | `log` under compose, `ses` for a bare binary with no `SMTP_HOST` | yes |
+| `EMAIL_NAME` | Display name on platform mail | `Pegasusbound` | yes |
+| `EMAIL_ADDRESS` | From address on platform mail | none, and the backend refuses to start without it | yes |
+| `SMTP_HOST` | Relay hostname | unset | yes |
+| `SMTP_PORT` | Relay port. Follows `SMTP_SECURITY` when unset | derived | yes |
+| `SMTP_USERNAME`, `SMTP_PASSWORD` | Relay credentials. Never sent over an unencrypted connection | unset | yes |
+| `SMTP_SECURITY` | `starttls` (587), `tls` (465) or `none` (25) | `starttls` | yes |
+| `SMTP_AUTH` | `auto`, `plain`, `login`, `cram-md5` or `none` | `auto` | yes |
+| `SMTP_EHLO_NAME` | EHLO name presented to the relay | the sender domain | yes |
+| `SMTP_TLS_INSECURE_SKIP_VERIFY` | Skips certificate verification. Only for a relay with a private certificate authority | `false` | yes |
+| `EMAIL_BRAND_NAME` | The product name in transactional subjects and the header | `Pegasusbound` | yes |
+| `EMAIL_BRAND_LEGAL_ENTITY`, `EMAIL_BRAND_COMPANY_NUMBER`, `EMAIL_BRAND_PLACE_OF_REG`, `EMAIL_BRAND_ADDRESS` | The identification line in the transactional footer | unset on a self-host, which renders no line | yes |
+| `EMAIL_BRAND_WEBSITE_URL`, `EMAIL_BRAND_TERMS_URL`, `EMAIL_BRAND_PRIVACY_URL`, `EMAIL_BRAND_SUPPORT_EMAIL` | The footer's links and support address | unset on a self-host, which renders no link row | yes |
+| `NOTIFICATION_EMAIL_DAILY_CAP` | Notification emails per user per day. `0` means uncapped | `25` | yes |
+| `NOTIFICATION_PUSH_WINDOW` | How long a notification waits before it is also pushed | `5h` | yes |
+
+A self-hosted instance never fills those in with ours. Pegasusbound's own company details and website are the hosted service's, not yours, so an unset `EMAIL_BRAND_*` renders nothing rather than sending your users a footer naming a company they have no relationship with. Set them to your own if your jurisdiction wants an identification line on business email.
+
+Despite the prefix, these are not only about email. `GET /v1/auth/config` serves the public half of them (name, website, terms, privacy, support address) and every surface that used to hardcode `pegasusbound.com` reads it: the sign-in screen's wordmark and its Terms and Privacy links, the copyable API example on the API keys page, a shared stats card, and the "powered by" line at the foot of a [hosted form page](/guides/forms/). Each renders nothing when the value is unset, so a stranger filling in one of your forms is never sent to a website with no relationship to it.
+
+`log` is a real transport, not a broken one: it writes every message to the backend log and delivers nothing. It exists so a fresh install can complete its first sign-in with no relay. What it costs you is password resets, invitation delivery and digests, all of which have a workaround described on [accounts and access](/development/accounts-and-access/#without-a-mail-relay).
+
+Read a code out of the log:
+
+```bash
+docker compose -p pegasusbound logs backend | grep -B2 -A12 "MAIL_TRANSPORT=log"
+```
+
+<Callout type="warn" title="The consumer only warns">
+The backend refuses to start without `EMAIL_ADDRESS` and `EMAIL_NAME`. The consumer logs a warning and silently disables all notification and digest email, so an instance can look healthy while sending nothing. Set both on every process.
+</Callout>
+
+## Pre-send verification
+
+Before a campaign sends to an address, the backend can check it: syntax, then `MX`, then an `SMTP` `RCPT` probe against the recipient's mail server. An address that comes back `invalid` is skipped rather than sent to, which turns a would-be hard bounce into a silent drop. The probe runs from the backend, never from a worker, because workers are your sending IPs.
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `EMAIL_VERIFY_HELO_HOST` | The hostname the probe announces in `EHLO`/`HELO`. Must be a public, fully-qualified name that belongs to this instance | the host of `APP_URL` | yes |
+| `EMAIL_VERIFY_MAIL_FROM` | The envelope sender the probe uses in `MAIL FROM` | `verify@` plus the `HELO` host | yes |
+| `EMAIL_VERIFY_MILLIONVERIFIER_API_KEY` | An instance-wide [MillionVerifier](https://www.millionverifier.com/) key. Every workspace that has not connected its own key is checked through this one, spending its credits, instead of the built-in probe | unset | yes |
+
+<Callout type="warn" title="An unqualified HELO name gets the whole session rejected">
+Mail servers refuse a greeting that is not a real hostname (`localhost`, a bare name, or anything under a reserved suffix such as `.local`, `.internal` or `.lan`). Postfix in particular applies that rejection at `RCPT` time rather than at `HELO`, so it arrives looking exactly like `504 5.5.2 <localhost>: Helo command rejected: need fully-qualified hostname` on the recipient's address. Pegasusbound reads a reply like that as a rejected probe, not as a dead mailbox, so it never marks the contact invalid. If neither `EMAIL_VERIFY_HELO_HOST` nor a usable `APP_URL` host is set, the probe is skipped entirely and every address stays `unknown`, which still sends.
+</Callout>
+
+Verdicts are re-checked after 90 days (30 for an inconclusive one), in passes of 200 contacts a minute that repeat while a backlog remains. A workspace that connected MillionVerifier under Integrations is checked through its own credits whether or not the instance-wide key is set.
+
+`EMAIL_VERIFY_HELO_HOST` is not `SMTP_EHLO_NAME`. `SMTP_EHLO_NAME` is the greeting your platform mail relay sees in [platform mail](#platform-mail); this one is the greeting recipients' servers see from the verifier.
+
+## Encryption
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `KMS_PROVIDER` | `local` (AES master key below), `aws` (AWS KMS), or `brokered` (hold no key material and ask the control plane to unwrap). A joining node is given `brokered` automatically wherever the instance runs `aws`, so no machine in the fleet needs a cloud credential | `local` under compose, `aws` for a bare binary | yes |
+| `KMS_LOCAL_MASTER_KEY` | base64, exactly 32 bytes. The root of trust for every per-organization data key | published default under compose | yes |
+| `KMS_LOCAL_MASTER_KEY_FILE` | Path to a file holding that key instead. Mutually exclusive with the inline value | unset | yes |
+| `KMS_AWS_KEY_ID` | Key id or alias when `KMS_PROVIDER=aws` | unset | yes |
+| `CREDENTIALS_ENCRYPTION_KEY` | exactly 64 hex characters. Seals mailbox SMTP and IMAP passwords at rest | published default under compose | yes |
+| `ENCRYPTED_KEYS_PROVIDER` | `postgres` for the backend and a consumer that has a DSN, `http` for workers | the caller's fallback, so set it explicitly | yes |
+| `ENCRYPTED_KEYS_BACKEND_URL` | Where a worker reaches the backend's key endpoint | unset | yes |
+| `ENCRYPTED_KEYS_WORKER_TOKEN` | The worker's copy of `INTERNAL_API_TOKEN` | unset | yes |
+
+An empty `CREDENTIALS_ENCRYPTION_KEY` does not fail at boot. It disables sealing, so mailbox passwords are stored unsealed. Set it before you connect a single mailbox, and back it up.
+
+## Storage
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `BLOB_PROVIDER` | `filesystem`, `s3`, or `brokered` (hold no bucket credential and ask the control plane to sign each operation; the bytes still travel directly). A joining node is given `brokered` automatically wherever the instance runs `s3` | `filesystem` under compose, `s3` for a bare binary | yes |
+| `BLOB_FS_ROOT` | Directory for stored bodies, attachments, avatars and email body images. The backend, the consumer and every worker on the host must share it | `/data/blobs` | yes |
+| `BLOB_BUCKET` | Bucket name when `BLOB_PROVIDER=s3` | unset | yes |
+| `BLOB_PUBLIC_BASE_URL` | Public base for the backend's `/public` route. Images placed in an email body are served from here, so it has to be an address a recipient's mail client can reach | derived | yes |
+| `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | Credentials for S3 or SES | unset | yes |
+| `AWS_ENDPOINT_URL_S3` | Non-AWS S3 endpoint (MinIO, R2, B2) | unset | yes |
+| `AWS_CONFIG_ENABLED` | `true` reads secrets from AWS SSM or Secrets Manager | `false` | yes |
+
+On `filesystem`, a remote worker writes blobs to its own disk rather than a volume the backend can read. Use `s3` with a bucket both sides reach when workers run off-host.
+
+## Event bus
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs the `-kafka` images, or a build with `GO_TAGS=kafka` | `nats` under compose, `kafka` for a bare binary | yes |
+| `FLEET_IMAGE_VARIANT` | Tag suffix appended to the version handed to fleet nodes, so they pull a build that can talk to this instance's event bus. Defaults to `-kafka` when `EVENTBUS_PROVIDER=kafka` and nothing otherwise; set it empty to turn it off | derived from `EVENTBUS_PROVIDER` | no |
+| `NATS_URL` | JetStream address. Credentials in the URL are honored by every service, including the Rust tracking publisher: `nats://user:pass@host:4222` for a user, `nats://token@host:4222` for a token, `tls://` for TLS | `nats://nats:4222` | yes |
+| `NATS_CREDS` | Path to a NATS credentials file (user JWT plus nkey seed), for a bus that authenticates with JWT rather than a token. Synadia Cloud and any nsc-managed account issue one | unset | yes |
+| `NATS_CREDS_B64` | The same file, base64 encoded, as a single line. This is the form the fleet uses: a node receives environment variables rather than files, and the env file docker reads cannot express a multi-line value. Takes precedence over `NATS_CREDS` | unset | yes |
+| `NATS_MAX_BYTES` | Ceiling on the stream's size on disk. Accepts a plain byte count or a size (`2GiB`, `512MB`, `1G`). Unset leaves the stream bounded only by `NATS_STREAM_MAX_AGE` and the account's own quota, which a managed bus may refuse: Synadia's "Max Bytes Required" rejects any stream created without one | unset (unlimited) | yes |
+| `NATS_STREAM_NAME`, `NATS_SUBJECT_PREFIX` | Stream and subject naming | `pegasusbound` | yes |
+| `KAFKA_BOOTSTRAP_SERVERS` | Broker list when `EVENTBUS_PROVIDER=kafka` | unset | yes |
+| `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | Broker credentials | unset | yes |
+| `SCHEMA_REGISTRY_URL`, `SCHEMA_REGISTRY_KEY`, `SCHEMA_REGISTRY_SECRET` | Registry for the Avro codec | unset | yes |
+| `CODEC_PROVIDER` | `json` or `avro` | `json` under compose, `avro` for a bare binary | yes |
+| `EVENTBUS_HANDLER_TIMEOUT` | How long one handler may take before the delivery is abandoned | `30s` | yes |
+| `PUBSUB_ENABLED` | `false` uses the Redis bridge for realtime fanout, `true` uses Google Pub/Sub | `false` | yes |
+| `GCP_PROJECT_ID` | Project when `PUBSUB_ENABLED=true` | unset | yes |
+
+Kafka event publication waits for the broker's delivery report with all in-sync replica acknowledgements, bounded by the caller's deadline and `EVENTBUS_HANDLER_TIMEOUT`. Local queue admission is not evidence of publication. A rejected or timed-out result keeps the original command unacknowledged for replay; a timeout does not prove the event was never delivered, so consumers still deduplicate replayed outcomes. Generic producer events are drained separately through shutdown, without consuming a publication's independent delivery report.
+
+<Callout title="Topics are created by the bus, not by hand">
+A worker's command topic is named after the node id issued when it joined, so the set of topics is not knowable in advance. The Kafka backend creates what it uses, once per topic per process, rather than depending on the broker's `auto.create.topics.enable`, which is off by default on Confluent Cloud and configurable only on Dedicated clusters, not on Basic, Standard, Enterprise or Freight. The credential therefore needs `CREATE` on topics as well as read and write.
+</Callout>
+
+
+`json` needs nothing and is the default. `avro` resolves every event against `SCHEMA_REGISTRY_URL` and ships only in the `-kafka` images. Producers and consumers have to agree on one: there is no in-band marker, so a consumer on the other codec cannot read what is already on the bus. Change it by draining the bus, not in place. The envelope subjects need `BACKWARD` compatibility, because a new event type adds a union branch; a publisher that meets `FORWARD` or `FULL` sets its subject to `BACKWARD` itself. `PUBSUB_ENABLED` must agree across backend, consumer and realtime.
+
+Go services limit each decoded Avro array or map to 65,536 entries, counted across blocks, and each string or byte field to 1 MiB. Payloads exceeding these limits are rejected. The maintained encoder uses the existing schemas and Confluent framing. Queued messages within these limits remain readable without draining the bus or re-registering subjects. Keep the same codec configuration during the upgrade.
+
+<Callout type="warn" title="The tracking topic is read by two languages">
+`KAFKA_TRACKING_TOPIC` is read by the Rust publisher and the Go subscriber. Override it in one place only and opens and clicks stop being consumed, with no error anywhere.
+</Callout>
+
+## Database
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `PRIMARY_DB` | PostgreSQL connection string. Carries inline credentials, so it is never returned by any API | the compose postgres | yes |
+| `PGSSLROOTCERT` | Certificate bundle used to verify the database's TLS certificate, read by the Postgres driver. Amazon RDS chains to a root in no public trust store, so `sslmode=verify-full` against it needs AWS's bundle; the backend and consumer images ship it at `/etc/ssl/rds/global-bundle.pem`. Prefer `sslrootcert=` in the DSN so the setting travels with the connection it applies to | unset (system trust store) | yes |
+| `DB_MAX_CONNS` | Maximum pooled Postgres connections for one Go process (backend, consumer). The ceiling that matters is the database's `max_connections`, and every replica, consumer and `pegasusboundctl` run takes its own share of it. At boot a process asks the server for that ceiling and lowers its own pool to a quarter of the connections the server leaves unreserved. The quarter assumes four database clients, which is backend and consumer with a rolling deploy running two of each, so it is a per-process guard and not a fleet-wide allocation: more than four clients, or anything else sharing the server, still needs this set deliberately. The clamp only ever lowers the pool, and only when the probe succeeds; a probe that cannot reach the server or read the setting leaves the value below in force. A `pool_max_conns` in the DSN is honoured when this is unset | `25`, lowered to the probed share | yes |
+| `DB_MIN_CONNS` | Connections each Go process keeps open while idle. Capped at `DB_MAX_CONNS` | `2` | yes |
+| `DATABASE_URL` | The realtime service's own name for the same database | the compose postgres | yes |
+| `DATABASE_POOL_SIZE` | Maximum pooled connections **for the realtime service only**. The Go services use the driver default and do not read it | `10` | yes |
+| `DATABASE_SSL` | Whether the realtime service connects to Postgres over TLS | `true`, and `false` under compose | yes |
+| `DATABASE_SSL_CA_FILE` | CA bundle the realtime service verifies Postgres against. Unset verifies against the system store, which has no Amazon RDS root in it, so an RDS database needs this set to `/etc/ssl/rds/global-bundle.pem` (shipped in the image) | unset | yes |
+
+Migrations are embedded in the backend binary and applied on boot. There is no separate migration step, and a standalone `/app/migrate` binary ships in the image for the cases where you want one.
+
+## Realtime upgrade compatibility
+
+Existing `WEBSOCKET_URL` values ending at the host, `/socket`, or `/socket/websocket` remain supported, including custom path prefixes, ports and query parameters. HTTP(S) forms are converted to WS(S). Both discovery and ticket responses use the same normalization.
+
+The dashboard can connect through `/v1/realtime/socket/websocket` on the API origin. No new environment variable, CSP allowlist entry or data migration is required. The API forwards only to the configured realtime gateway and keeps the browser Origin intact. Legacy Docker installs advertising a loopback gateway can fall back to the existing `realtime` service on the same port when the API container cannot reach its own loopback address.
+
+Upgrade the backend, realtime and dashboard images together to the same release; the realtime update preserves per-client IP limits for API-proxied connections. Existing direct clients and older dashboard/backend combinations retain the direct URL. A custom reverse proxy should allow WebSocket upgrades on the API route as well as the direct realtime route; direct connections remain a retry fallback. Keep `CHECK_ORIGIN_HOSTS` and the shared `AUTH_SECRET`/`JWT_SECRET` consistent. A retry label does not prove recovery: **Live** means the socket is open, while **Reconnecting** means it is still retrying.
+
+## Cache
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `REDIS` | Redis connection string. Carries inline credentials, so it is never returned by any API | the compose redis | yes |
+| `REDIS_URL` | The realtime service's own name for the same instance | the compose redis | yes |
+
+Redis holds rate limit counters, the organization key cache, the realtime bridge and the first-run setup token. Flushing it on an unclaimed instance destroys the claim link along with every pending auth session.
+
+## GeoIP
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `GEODB_PATH` | Path to a GeoLite2 City database | none, and the backend refuses to start without the variable | yes |
+| `GEODB_URL` | Where to download that database from when nothing is at `GEODB_PATH` yet | unset, and only a file already there is used | yes |
+| `TRACKING_SCANNER_ASN_DB` | Path to a GeoLite2 ASN database, on the tracking service | unset, and ASN matching is off | yes |
+| `TRACKING_SCANNER_ASN_DB_URL` | Where the tracking service downloads that database from | unset | yes |
+
+`GEODB_PATH` must be set on the backend in every environment. The file itself is optional: a missing file at that path means sessions and audit rows are recorded without a city, and nothing else changes. The consumer reads the same variable, optionally, to put a country and city on each email open and click; without it those records carry client and device only.
+
+These are two different databases and two different files. GeoLite2-City answers where an address is; GeoLite2-ASN answers which network announces it, which is what makes the tracking service's `asn:` scanner entries match. Neither file contains the other's data, so a reader pointed at the wrong one resolves nothing. Both are free on one MaxMind account, as the `GeoLite2-City` and `GeoLite2-ASN` editions, and `geoipupdate` fetches either.
+
+`GEODB_PATH` belongs on the backend and the consumer, `TRACKING_SCANNER_ASN_DB` on the tracking service, and each is ignored when its file is absent: a missing city database costs location labels, a missing ASN database costs `asn:` matching. Pointing `TRACKING_SCANNER_ASN_DB` at a City database is refused at boot with a line naming what it found, rather than matching nothing and saying nothing.
+
+### Getting the databases in
+
+A file you can mount is the simplest answer and needs none of the variables below. Where there is nothing to mount from, which is most container hosts, set the matching `_URL` variable and the service fetches its own copy at startup.
+
+```bash
+# MaxMind's download endpoint, which always serves the current build of an
+# edition, so a restart is how an instance picks up a newer one. Both halves of
+# the credential come from the same page of your MaxMind account: the account
+# id is the username and the licence key is the password.
+GEODB_URL=https://ACCOUNT_ID:LICENCE_KEY@download.maxmind.com/geoip/databases/GeoLite2-City/download?suffix=tar.gz
+TRACKING_SCANNER_ASN_DB_URL=https://ACCOUNT_ID:LICENCE_KEY@download.maxmind.com/geoip/databases/GeoLite2-ASN/download?suffix=tar.gz
+```
+
+<Callout type="warn" title="The older permalink no longer works">
+MaxMind's `app/geoip_download?license_key=` URL is the form most guides still
+show, and a licence key issued today is refused by it with `Invalid license
+key`. Current keys end in `_mmk` and authenticate against the endpoint above,
+with the account id, so a URL that carries only the key fails whatever the key
+is.
+</Callout>
+
+Any URL serving a MaxMind-format database works, and the shape is read from the content rather than the file name, so a `.tar.gz`, a `.mmdb.gz` and a bare `.mmdb` are all accepted. A credential in the userinfo, as above, is sent as HTTP basic authentication. DB-IP's free [Lite databases](https://db-ip.com/db/lite.php) need no account at all and are published in the same format under `dbip-city-lite` and `dbip-asn-lite`; their country data is comparable and their city data is weaker.
+
+Two things to know:
+
+- **Nothing waits for it.** The service starts with location lookups answering `Unknown` and picks the database up when it arrives, so a mirror that is slow or gone costs city labels rather than a deploy's health check.
+- **A file that is already there is kept until it goes stale.** A database less than seven days old is used as it is, with no request at all, so a mounted copy, a volume that survived a restart and a copy you dropped in by hand all win. Past seven days the file is revalidated with `If-Modified-Since`, which normally answers `304 Not Modified`, costs nothing and does not count against MaxMind's daily allowance; only a genuinely newer database is downloaded. With no URL set nothing is ever requested and the file is yours alone.
+- **A refused download is retried.** Four attempts with a growing wait, obeying a `Retry-After` when the server sends one. A throttled or briefly unreachable mirror used to cost that container its geo data for the whole of its life, because the fetch ran once at boot and never again. A refusal that will repeat, such as a bad licence key or a name that does not resolve, is not retried.
+- **A download that is not a database is thrown away, not installed.** An expired licence key returns an error page, and storing that would disable location lookups permanently, because the next start would find a file and not retry. The bytes are opened before they are put in place, and a failure leaves the path empty and one line in the log.
+- **Plain `http` is refused for a URL carrying a credential**, in the query or the userinfo, because it would put the licence key on the wire in the clear. An `http` mirror with nothing secret in its URL is allowed, and a redirect from `https` down to `http` is refused either way.
+
+<Callout type="warn" title="Both URLs are secrets">
+These URLs carry the account's credential, in the userinfo above and in the query on an older-style link. The backend treats both variables as secrets: their values are never returned by any API, and the admin panel reports them as set rather than showing them. Nothing logs either one intact: the userinfo and the query are both stripped, including from the errors `net/http` and `reqwest` build, which embed the URL they were given.
+</Callout>
+
+The tracking service is the exception to the path: it holds its ASN database in memory and never writes it out, so `TRACKING_SCANNER_ASN_DB_URL` works on its own and `TRACKING_SCANNER_ASN_DB` can stay unset.
+
+### Mirror the databases rather than pulling from MaxMind
+
+A GeoLite2 account is allowed 30 direct downloads per 24 hours and answers `429` past that; a paid GeoIP account gets 2,000. Each consumer boot fetches GeoLite2-City and each tracking boot fetches GeoLite2-ASN, so a release costs two downloads and a restart loop costs one per restart. That is a ceiling you can reach on a busy day, and reaching it is worse than a failed download: a container that starts into a `429` has no geo data until it is replaced.
+
+Point the URLs at your own copy instead. `.github/workflows/geoip-mirror.yml` runs on Tuesdays and Fridays, which is MaxMind's own publish cadence, downloads both editions once and uploads them to a private bucket. The whole fleet then reads from there, and MaxMind sees two requests a week however often you deploy. An intra-region pull of a 60 MB file is also a second or two rather than however long MaxMind takes.
+
+It needs these repository settings, and skips itself when `MAXMIND_ACCOUNT_ID` is unset so a fork never fails on it:
+
+| Setting | Kind | Meaning |
+| --- | --- | --- |
+| `MAXMIND_ACCOUNT_ID` | variable | The numeric account id |
+| `MAXMIND_LICENSE_KEY` | secret | A licence key for that account |
+| `GEOIP_MIRROR_BUCKET` | variable | Bucket the copies are written to |
+| `GEOIP_MIRROR_REGION` | variable | Its region |
+| `GEOIP_MIRROR_PREFIX` | variable | Key prefix, including the trailing slash |
+| `GEOIP_MIRROR_AWS_ACCESS_KEY_ID` | secret | Credentials that may write that prefix, and nothing else |
+| `GEOIP_MIRROR_AWS_SECRET_ACCESS_KEY` | secret | |
+
+Then set `GEODB_URL` and `TRACKING_SCANNER_ASN_DB_URL` to the mirrored objects. Both accept a credential in the userinfo or the query, so a presigned URL or an object under a non-guessable key works without the services holding bucket credentials. Only the mirror job holds the MaxMind licence key, which is the other reason to prefer this: the key stops being deployment configuration on several services and becomes one repository secret.
+
+Keep the copies private. GeoLite2 may not be redistributed, which is also why nothing is ever baked into the published images. If you would rather have no account at all, DB-IP's Lite databases are CC-BY 4.0 and need none.
+
+## Workers
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `WORKER_ID` | Stable uuid for this worker. Leave unset when running scaled replicas, which share one environment | derived, then random | yes |
+| `WORKER_BIND_IP` | Source address to bind outbound connections to, and the seed for a derived `WORKER_ID` | unset | yes |
+| `WORKER_PUBLIC_IP` | Public IPv4 reported by the worker, never replaced by the backend-observed address, which may be a reverse proxy. Otherwise the node discovers HTTPS egress IPv4 using `api.ipify.org` every ten minutes. Set this explicitly when mail and HTTPS have different egress routes | detected | yes |
+| `PEGASUSBOUND_WORKER_CAPACITY` | Assigned-mailbox planning target for this worker. This guides placement and is not a mailbox-provider send limit | `100` | yes |
+| `WORKER_COMMAND_CONCURRENCY` | Kafka worker command lanes, from `1` to `64`. Commands are grouped by the mailbox in the payload, including older task-keyed sends. Each mailbox stays in order; independent lanes run concurrently. NATS remains serial. Invalid values use the default | `8` | yes |
+| `PEGASUSBOUND_NODE_REGION` | Free-form label for where this node egresses from, e.g. `eu-central`. Placement prefers a worker near where a mailbox's provider expects sign-ins; unset scores neutral. Written by the join script from `--region` | unset | yes |
+| `ENCRYPTED_KEYS_BACKEND_URL` | Backend base the worker fetches organization keys from | unset | yes |
+| `ENCRYPTED_KEYS_WORKER_TOKEN` | The worker's copy of `INTERNAL_API_TOKEN` | unset | yes |
+| `MAIL_TLS_INSECURE` | Skips certificate verification on mailbox connections | `false` | yes |
+
+<Callout type="warn" title="An unset key URL is silent">
+An empty `ENCRYPTED_KEYS_BACKEND_URL` or `ENCRYPTED_KEYS_WORKER_TOKEN` lets the worker start, subscribe and never register. There is no log line. The `no_worker_heartbeat` check on [Instance health](/development/instance-health/#no_worker_heartbeat) is what surfaces it.
+</Callout>
+
+Workers hold no database connection by design. Everything relational they need arrives over the backend's internal HTTP API.
+
+### What a joining node is given
+
+`pegasusbound join` renders `/etc/pegasusbound/node.env` from the backend's own environment, so most of this page reaches a node without being set twice. Three things are decided rather than copied:
+
+- **The crypto and blob providers are translated.** An instance on `KMS_PROVIDER=aws` hands its nodes `brokered`, and one on `BLOB_PROVIDER=s3` hands them `brokered` too, so no machine in the fleet carries a cloud credential. Providers that need no credential pass through unchanged.
+- **A worker never receives `PRIMARY_DB`.** A consumer does, because it opens Postgres itself. An instance that keeps its DSN in a secret manager rather than the environment has none to send, and the join script says so.
+- **Addresses are inherited literally.** `NATS_URL`, `REDIS` and `ENCRYPTED_KEYS_BACKEND_URL` are used exactly as the backend has them, and a value that only resolves inside your container network produces a node that enrols cleanly and reaches nothing.
+
+### Settings the control plane cannot know
+
+`node.env` is rewritten on every join. Next to it, `/etc/pegasusbound/node.local.env` is created once and never written again, and the container reads it second, so a name repeated there wins.
+
+That is where a per-machine value belongs: a DSN this instance does not hold, credentials for infrastructure of your own, or a deliberate override back to a direct provider.
+
+```bash
+printf 'PRIMARY_DB=%s\n' "postgres://..." >> /etc/pegasusbound/node.local.env
+systemctl restart pegasusbound-consumer
+```
+
+## Mailbox connections
+
+Needed on the backend **and** every worker: the backend starts the OAuth flow, and each worker refreshes the token when it expires.
+
+| Variable | What it does | Default |
+|---|---|---|
+| `BOX_GOOGLE_CLIENT_ID`, `BOX_GOOGLE_CLIENT_SECRET` | The Google app used by Gmail mailboxes connected with per-mailbox Google sign-in. Both are required to enable new connects. Keep them set while any mailbox uses Google sign-in. Also carries a Workspace administrator's domain proof when `GOOGLE_CLIENT_ID` is not set. Redirect URI is your API base plus `/addresses/google/callback` | unset |
+| `BOX_GOOGLE_OAUTH_CONNECT` | Optional backend kill switch for new Gmail OAuth connects. Unset enables the capability when both Google mailbox credentials are present; explicit `false` or an invalid value disables it. Existing Google sign-in mailboxes keep working and can re-authorize either way. Announced as `gmail_oauth_connect` on `GET /v1/auth/config` | enabled when configured |
+| `BOX_OUTLOOK_CLIENT_ID`, `BOX_OUTLOOK_CLIENT_SECRET` | Connect Outlook and Microsoft 365 mailboxes. Redirect URI is your API base plus `/addresses/outlook/callback` | unset |
+
+Plain SMTP and IMAP mailboxes need none of this. If a worker is missing these values, the mailbox connects fine and then silently stops about an hour later, when its first access token expires.
+
+### Google sign-in per dashboard deployment
+
+The dashboard has a separate visibility flag. It affects only **per-mailbox Google sign-in** in the connect dialog and mailbox import, not Microsoft sign-in, Google dashboard login or Workspace whole-domain grants.
+
+| Variable | Where to set it | Default |
+|---|---|---|
+| `PEGASUSBOUND_GMAIL_OAUTH_CONNECT` | Dashboard container environment or Cloudflare Pages environment. Set to `true` to offer Google mailbox sign-in when the backend supports it | `false` |
+| `VITE_GMAIL_OAUTH_CONNECT` | `web/.env` for local Vite or a direct Vite build. Runtime configuration takes precedence | `false` |
+
+Two dashboard deployments can share one backend and set this flag differently. For example:
+
+```dotenv
+# Public dashboard environment
+PEGASUSBOUND_GMAIL_OAUTH_CONNECT=false
+
+# Assessment dashboard environment (a separate deployment)
+PEGASUSBOUND_GMAIL_OAUTH_CONNECT=true
+```
+
+Both dashboards point `PEGASUSBOUND_API_URL` at the same API and set `PEGASUSBOUND_APP_URL` to their own dashboard URL. Containers generate `/config.js` at startup, so no second image is needed. Cloudflare Pages renders it during `build:pages`; set the variable on the intended Pages project and redeploy.
+
+The customer dashboard also generates a Content Security Policy from the same deployment settings. Static bootstrap scripts and styles use build-generated hashes; scripts and styles injected as markup are not generally allowed. API, Sentry and PostHog origins are derived from their configured URLs. Before nginx starts, the dashboard reads the public `/v1/auth/config` endpoint at its configured API URL and allows only the exact `websocket_url` origin. Existing backend `WEBSOCKET_URL` configuration therefore needs no duplicate CSP setting. If `WEBSOCKET_URL` is also passed into the web container, it supplies the origin directly without an HTTP request.
+
+`pnpm build:pages` performs the same discovery at build time, using `curl` and `jq` on the build host (both are included in the dashboard container). Discovery uses bounded retries and never weakens CSP if the backend is unreachable or returns invalid configuration. An unavailable backend produces a startup/build warning; restart the dashboard or rebuild Pages after it is ready. Offline/custom deployments can explicitly allow the realtime origin through `PEGASUSBOUND_CSP_CONNECT_ORIGINS`, for example `wss://realtime.example.com`. Pass it into the web service's environment, not only the Compose `.env`. Changing origins requires a container restart or a Pages rebuild. Pages remains fully static and needs no Function.
+
+The Pages dashboard removes Cloudflare's default `Access-Control-Allow-Origin: *` header from its static responses. Dashboard assets are not a cross-origin public API. This does not change the backend's `CORS_ALLOW_ORIGINS` or the public image URLs used in customer emails.
+
+Email bodies render in a separate static, script-disabled sandbox. That document permits email styling and the reader's remote-content choice without relaxing the dashboard policy. Dashboard images load from its own origin, the configured API, data URLs or temporary blob URLs. External UI images and editor previews use the backend's image-preview endpoint, which allows HTTPS public destinations only, checks every connection and redirect, and caps images at 5 MiB and requests at ten seconds. Owned public images are read through the configured blob store, so filesystem storage and private MinIO endpoints need no public-network exception. The unsafe-webhook development flag does not relax image-fetching restrictions.
+
+This proxy is display-only. Existing records need no migration, and saved and sent email HTML retains its original image URLs, links and styles. Recipients do not use the dashboard proxy or need a session to load email images. Incoming messages keep their separate remote-content consent and do not use this proxy. Dashboard inline style attributes remain permitted for editor-generated email designs; inline scripts and arbitrary style blocks do not. Development uses fresh per-response nonces for Vite's script and stylesheet injection.
+
+On the shared backend, keep `APP_URL` as the primary dashboard and add both exact dashboard origins to `CORS_ALLOW_ORIGINS`, for example `https://app.example.com,https://assessment.example.com`. Google and Microsoft mailbox connects, reauthorization, whole-domain administrator grants, integration OAuth and Slack identity verification bind the initiating browser origin to their server-side OAuth state. The callback posts only to that allowlisted origin, and a popup without an opener returns to its `/oauth-return` page. Missing, expired or consumed routing state shows a retry notice instead of forwarding a code to another dashboard. Valid legacy states without an origin still use the primary dashboard. Wildcards are not accepted as OAuth return origins. Provider-registered callback URIs stay on the same API.
+
+Email/password login, OTP/2FA, signup, logout and ordinary dashboard navigation use local routes. Password-reset and invitation emails initiated from an allowlisted dashboard link back to that dashboard. Stripe checkout, credit top-ups, billing portal and warmup-plan returns use the initiating dashboard and retain safe same-origin paths. Referral share links use that dashboard's signup page too. Requests without a trusted browser origin use the primary dashboard.
+
+For Pegasusbound's hosted assessment dashboard, the shared backend needs both of these origins:
+
+```dotenv
+APP_URL=https://app.pegasusbound.com
+CORS_ALLOW_ORIGINS=https://app.pegasusbound.com,https://tac-security-assessment.pegasusbound.com
+```
+
+This is an environment example, not a built-in allowlist. Preserve any other existing origins, such as the admin dashboard: append `https://tac-security-assessment.pegasusbound.com` to the current `CORS_ALLOW_ORIGINS` value rather than replacing the list. On Railway, update the backend service's variable and redeploy it; changing the frontend variable or merging code does not update the live backend environment. Keep `APP_URL` and `APP_ORIGIN` pointing at the primary dashboard, not the assessment dashboard. The assessment frontend sets `PEGASUSBOUND_APP_URL=https://tac-security-assessment.pegasusbound.com` and `PEGASUSBOUND_GMAIL_OAUTH_CONNECT=true`.
+
+Before giving assessors access:
+
+- Set the assessment frontend's `PEGASUSBOUND_API_URL` to the shared API, and use an exact `PEGASUSBOUND_APP_URL` origin without a trailing slash.
+- Allow the assessment hostname on the existing Cloudflare Turnstile widget. A widget restricted to `app.pegasusbound.com` does not cover its sibling assessment hostname. Keep CAPTCHA enabled.
+- Append the assessment origin to the realtime service's `CHECK_ORIGIN_HOSTS`, preserving its existing origins. The API origin allowlist does not configure websocket origin checks.
+- For password-only assessor accounts, use **Admin > Testers**. These accounts are exempt from the emailed login-code step, but still use CAPTCHA and existing permission checks. Accounts with 2FA enabled still need their second factor.
+- Keep the existing `WEBAUTHN_RP_ID` unchanged. An `app.pegasusbound.com` passkey RP ID cannot serve a sibling assessment hostname, and changing it invalidates existing credentials. Reviewers can use email/password; passkey support across both hosts needs a separate migration decision.
+
+This is not a global rewrite of every primary-dashboard link. Dashboard Google/Apple/OIDC login remains primary-dashboard routed; assessment reviewers should use email/password. Server-generated notifications, Slack-launched links, CLI/bootstrap links and self-hosted Cloud broker returns retain their canonical instance routing. Cloud broker return origins remain bound to the registered instance, not the hosted assessment dashboard.
+
+Existing Google OAuth mailboxes can still re-authorize with the frontend flag off. App-password and SMTP/IMAP options stay available. When linked to Pegasusbound Cloud, Google consent is brokered by Cloud rather than the local backend, but the frontend opt-in is still required.
+
+<Callout type="warn" title="Visibility is not authorization">
+Hiding the button does not prevent an authenticated client from calling the API. Use `BOX_GOOGLE_OAUTH_CONNECT=false` to disable new Google OAuth connects on the backend. A frontend flag does not change Google's restricted-scope verification or security assessment requirements, and a second dashboard on the same backend shares its data. Agree the assessment scope and reviewer account with your assessor before scanning.
+</Callout>
+
+### Whole-domain connects
+
+A workspace can connect every mailbox on a [Google Workspace domain or Microsoft 365 organization](/guides/mailbox-import/#connect-a-whole-google-workspace-domain) through one administrator's grant (**Add account > Google > Whole Workspace domain**, **Add account > Microsoft > Whole organization**). These are read by the backend only: it mints every token for those mailboxes itself and hands them to workers per use, so workers need nothing here. The complete setup, step by step, is in [whole-domain mailbox connects](/development/whole-domain-connect/).
+
+| Variable | What it does | Default |
+|---|---|---|
+| `GOOGLE_WORKSPACE_DELEGATION_KEY` | The JSON key of a Google Cloud service account with domain-wide delegation. Its `client_id` is what a Workspace super admin authorizes. Unset, Google Workspace grants are off. A value that is not a service account key logs one line at boot and leaves them off | unset |
+| `GOOGLE_WORKSPACE_DELEGATION_KEY_FILE` | A path to the same key as a file, for a mounted secret. Read when `GOOGLE_WORKSPACE_DELEGATION_KEY` is empty | unset |
+
+Google, once per instance:
+
+1. In the [Google Cloud console](https://console.cloud.google.com/), create a project or pick the one you will keep. Its project ID is permanent.
+2. Under **APIs & Services > Library**, enable the **Gmail API** and the **Admin SDK API**.
+3. Under **IAM & Admin > Service accounts**, create a service account (for example `pegasusbound-workspace`). Grant it no roles on the project.
+4. On its **Keys** tab, choose **Add key > Create new key > JSON**. A new Google Cloud organization blocks this by default with the **Disable service account key creation** policy, which an Organization Policy Administrator can lift for this project.
+5. Put the key's path in `GOOGLE_WORKSPACE_DELEGATION_KEY_FILE` (mounted read only) or its JSON in `GOOGLE_WORKSPACE_DELEGATION_KEY`, and restart the backend.
+
+Each customer's authorization is tied to the service account's Client ID, so create the service account once and rotate its keys, never the account: a recreated one has a new Client ID and every domain would have to authorize it again. The key can mint a token for any address on any domain that has authorized it, so treat it like `CREDENTIALS_ENCRYPTION_KEY`: it is the one credential behind every such mailbox.
+
+A Google grant is recorded only for the workspace that proves it controls the domain, and only when the directory lists the admin address as a super administrator. The proof is one of:
+
+- **The administrator's Google sign-in**, through the dashboard's own sign-in client (`GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`) and its existing redirect URI (`GOOGLE_REDIRECT_URI`, or `API_PUBLIC_URL` plus `/v1/auth/google/callback`), with the `openid` and `email` scopes only. The callback recognizes the proof and hands it back to the dashboard window rather than signing anyone in, so no new redirect URI needs registering. When that client is not configured, the `BOX_GOOGLE_*` mailbox client is used instead, the same way. Neither depends on `BOX_GOOGLE_OAUTH_CONNECT`.
+- **A `TXT` record** at `_pegasusbound.<domain>` holding a `pegasusbound-verify=` value unique to the workspace and domain, always available and the only proof when neither client is set. The value is keyed by `AUTH_SECRET`.
+
+Microsoft 365 organizations reuse the Outlook app, `BOX_OUTLOOK_CLIENT_ID` and `BOX_OUTLOOK_CLIENT_SECRET`, and are on whenever those are set. The app registration needs three additions for them:
+
+- **Supported account types**: accounts in any organizational directory (multitenant), so another organization can consent to it.
+- **Redirect URI**: the existing one, your API base plus `/addresses/outlook/callback`. Admin consent returns there too.
+- **API permissions**: the Microsoft Graph **application** permissions `Mail.ReadWrite`, `Mail.Send` and `User.Read.All`, next to the delegated ones single-mailbox sign-in already uses.
+
+Do not grant admin consent for those in your own tenant unless you are testing with it. Consent is given per customer organization, by that organization's Global Administrator, through the dashboard. The organization a grant names is the one the administrator signed in to, read from the consent sign-in itself, never from the request. Publisher verification is optional.
+
+Application permissions reach every mailbox in a consenting organization. We recommend that each organization scope the app to the mailboxes Pegasusbound should reach with an Exchange Online `ApplicationAccessPolicy` (or RBAC for Applications); a mailbox outside the policy is refused when it connects. The customer steps are in [connect a whole Microsoft 365 organization](/guides/mailbox-import/#connect-a-whole-microsoft-365-organization).
+
+`GET /emails/grants/config` reports what is still missing, as `google_missing` and `microsoft_missing`: the names of the settings above that are unset, and an empty list once a provider is ready.
+
+## Integrations
+
+| Variable | What it does | Default |
+|---|---|---|
+| `<PROVIDER>_OAUTH_CLIENT_ID`, `<PROVIDER>_OAUTH_CLIENT_SECRET` | OAuth clients for the CRM and messaging integrations | unset |
+| `HUBSPOT_OAUTH_CLIENT_ID`, `HUBSPOT_OAUTH_CLIENT_SECRET` | Your HubSpot app. Needed on the backend and on every consumer: the consumer runs the [HubSpot mode](/guides/hubspot/) pull and sync queue and refreshes the token as it goes. The secret also verifies HubSpot's webhook signatures | unset |
+| `PIPEDRIVE_OAUTH_CLIENT_ID`, `PIPEDRIVE_OAUTH_CLIENT_SECRET` | Your Pipedrive app (see [Pipedrive self-hosting](/guides/pipedrive/#self-hosting)). Needed on the backend and on every consumer: the consumer runs the [Pipedrive mode](/guides/pipedrive/) pull and sync queue and refreshes the token as it goes. The secret also derives the password Pipedrive presents on each webhook delivery, and verifies the Pegasusbound panel's signed calls | unset |
+| `SALESFORCE_OAUTH_CLIENT_ID`, `SALESFORCE_OAUTH_CLIENT_SECRET` | Your Salesforce app (see [Salesforce self-hosting](/guides/salesforce/#self-hosting)). Needed on the backend, which runs the sync, and on every consumer, which runs Salesforce automation actions and refreshes the token for them | unset |
+| `GOOGLE_SHEETS_OAUTH_CLIENT_ID`, `GOOGLE_SHEETS_OAUTH_CLIENT_SECRET` | Google Web application client for [contact sync sources](/guides/contacts-crm/). Both are required on the backend. Separate settings from Google dashboard login and Gmail mailbox OAuth | unset |
+| `INTEGRATIONS_OAUTH_REDIRECT_URL` | Shared redirect URI for those flows | `BACKEND_PUBLIC_URL` (else `API_PUBLIC_URL`) plus `/integrations/oauth/callback` |
+| `SLACK_OAUTH_CLIENT_ID`, `SLACK_OAUTH_CLIENT_SECRET` | The instance's own [Slack app](/development/slack-app/). Unset, the dashboard reports Slack as not set up and no workspace can connect it | unset |
+| `SLACK_SIGNING_SECRET` | Verifies every request Slack sends to the events and interactivity URLs. Without it Slack still posts notifications and inbox conversations, but the assistant and buttons are off, and those URLs answer `503` `slack_not_configured` | unset |
+
+The three Slack values come from the Slack app's **Basic Information** page. Set them on the backend and the consumer and restart both; the shipped `docker-compose.yml` passes all three to both. The request URLs are built on `BACKEND_PUBLIC_URL` when it is set, otherwise on `API_PUBLIC_URL`. See [Slack app](/development/slack-app/) for creating the app from its manifest.
+
+### Google Sheets app
+
+Google Sheets connects from **Contacts > Sync sources**, not the integrations catalog. The on-demand sync reads the selected tab and imports contacts only when you run it.
+
+Different permissions alone do not require a separate Google Cloud project, but consent configuration and verification are shared by the OAuth clients within a project. To keep Sheets consent and verification separate from an existing Google login or Gmail setup, use a dedicated project with its own consent configuration and Web application client. A second client in the same project does not provide that isolation. Google also [recommends a separate test project when evaluating new scopes for an approved app](https://support.google.com/cloud/answer/13464018?hl=en). A separate project still needs the verification required for its requested scopes.
+
+1. In your [Google Cloud project](https://console.cloud.google.com/), [enable the Google Sheets API](https://developers.google.com/workspace/sheets/api/quickstart/go#enable_the_api).
+2. Configure the project's Google Auth Platform branding and audience. For an external app in Testing, add the Google accounts that will connect as test users. For a public launch, follow [Google's sensitive-scope verification requirements](https://developers.google.com/workspace/sheets/api/scopes).
+3. Create an OAuth client of type **Web application**, or reuse an existing Web application client in that project. Add the exact backend callback to its **Authorized redirect URIs**: `INTEGRATIONS_OAUTH_REDIRECT_URL` when set, otherwise `BACKEND_PUBLIC_URL` (else `API_PUBLIC_URL`) plus `/integrations/oauth/callback`. For example, `https://api.example.com/integrations/oauth/callback`. It is not the dashboard URL, the Google login callback, or the Gmail mailbox callback.
+4. The current client requests `https://www.googleapis.com/auth/spreadsheets` and `https://www.googleapis.com/auth/userinfo.email`. Include these scopes in the consent configuration. The Sheets scope is sensitive and grants read/write access, even though contact sync does not write back. It is not the restricted Gmail scope; an existing Google login or Gmail approval does not automatically approve Sheets access.
+5. Set the client's ID and secret as `GOOGLE_SHEETS_OAUTH_CLIENT_ID` and `GOOGLE_SHEETS_OAUTH_CLIENT_SECRET` in the backend's process environment, then restart or redeploy the backend. For containers, explicitly pass both variables into the service; adding them to a Compose `.env` alone does not forward them. Do not put the secret in dashboard build variables. Changing these settings requires a restart, not a database migration.
+
+Neither `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` nor `BOX_GOOGLE_CLIENT_ID` / `BOX_GOOGLE_CLIENT_SECRET` is used as a fallback. If either Sheets credential is missing, **Connect with Google** returns `501` with an OAuth-not-configured message before contacting Google. On Pegasusbound Cloud, the service operator configures the client once for all workspaces; workspace members only authorize their own Google account.
+
+After setup, [connect a sync source](/guides/contacts-crm/): authorize an account that can access the spreadsheet, paste its ID, select a tab, map the columns (including email), and save. Run **Sync now** whenever you want to import new rows. The first row should contain column headers, with one contact per subsequent row.
+
+### HubSpot app
+
+[HubSpot mode](/guides/hubspot/) on a self-hosted instance uses a HubSpot app you create in your own HubSpot developer account:
+
+- **Redirect URL**: the value of `INTEGRATIONS_OAUTH_REDIRECT_URL`, or `BACKEND_PUBLIC_URL` (else `API_PUBLIC_URL`) plus `/integrations/oauth/callback` when it is unset
+- **Required scopes**: `oauth`, `crm.objects.contacts.read`, `crm.objects.contacts.write`, `crm.objects.companies.read`, `crm.objects.companies.write`, `crm.objects.deals.read`, `crm.objects.deals.write`, `crm.objects.owners.read`, `crm.schemas.contacts.read`, `crm.schemas.contacts.write`
+- **Optional scopes**: `crm.lists.read` (import from HubSpot lists) and `sales-email-read`. An account that cannot grant them still connects
+- **Webhooks** (optional): target URL `<backend>/api/v1/integrations/hubspot/webhooks`, subscribed to `contact.creation`, `contact.propertyChange`, `contact.deletion`, `deal.creation`, `deal.propertyChange` and `deal.deletion`. Every HubSpot request is verified against its `X-HubSpot-Signature-v3` signature over the public URL, `BACKEND_PUBLIC_URL` (else `API_PUBLIC_URL`) plus the path, so that URL must be the address HubSpot calls. Without webhooks the consumer's one-minute pull keeps everything current
+
+`APP_URL` is also what the `pegasusbound_link` property on HubSpot contacts links to. A consumer that joined the fleet with `pegasusbound join` is handed the HubSpot variables and `APP_URL` with the rest of its environment; a worker never is.
+
+The repository's `hubspot-app/` directory is the same app as a HubSpot developer project: the app definition, the Pegasusbound card on contact records, the "Add to Pegasusbound campaign" workflow action and the webhook subscriptions. Replace `https://api.pegasusbound.com` with your backend URL in its `*-hsmeta.json` files and in `src/app/cards/PegasusboundCard.tsx`, then upload it with the HubSpot CLI (`hs project upload` from that directory). The CLI leaves out files under a hidden directory, so upload from a path with no dot-folder in it; otherwise the card build reports its entrypoint as missing. The card is permitted to fetch only `<backend>/api/v1/integrations/hubspot/app/` (`permittedUrls.fetch` in `app-hsmeta.json`). The card and the workflow action call these public routes, each verified with the app's client secret. The card routes take the portal and user from the values HubSpot appends to the query; the webhook and workflow action routes take the portal from the body and refuse a request that carries those query values:
+
+| Route | Called by |
+|---|---|
+| `POST /api/v1/integrations/hubspot/webhooks` | HubSpot webhooks |
+| `POST /api/v1/integrations/hubspot/app/card` | The Pegasusbound card, to show a contact |
+| `POST /api/v1/integrations/hubspot/app/enroll` | The card's "Add to campaign" |
+| `POST /api/v1/integrations/hubspot/app/pause` | The card's pause and resume |
+| `POST /api/v1/integrations/hubspot/actions/enroll` | The "Add to Pegasusbound campaign" workflow action |
+| `POST /api/v1/integrations/hubspot/actions/campaigns` | The workflow action's campaign list |
+
+### Pipedrive app
+
+[Pipedrive mode](/guides/pipedrive/) on a self-hosted instance uses a Pipedrive app you create in the Pipedrive Developer Hub:
+
+- **Callback URL**: the value of `INTEGRATIONS_OAUTH_REDIRECT_URL`, or `BACKEND_PUBLIC_URL` (else `API_PUBLIC_URL`) plus `/integrations/oauth/callback` when it is unset
+- **Scopes**: deals, contacts and activities with full access, and users read. Leads full access (an interested reply adds a lead), contact fields full access (the Pegasusbound person fields) and webhooks full access (instant updates) are used when granted; without them those steps are skipped. Pipedrive takes scopes from the app, not from the request
+- **Webhooks**: none to set up. Pegasusbound registers its own, per connection, at `<backend>/api/v1/integrations/pipedrive/webhooks/<connection id>` when a workspace switches, and removes them when it switches away. They need `BACKEND_PUBLIC_URL` (else `API_PUBLIC_URL`) to be an `https` address Pipedrive can reach; otherwise the consumer checks Pipedrive every five minutes instead
+
+- **App extensions** (optional): the Pegasusbound panel on person and deal pages. Under **App extensions**, add a JSON panel with the API endpoint `<backend>/api/v1/integrations/pipedrive/app/panel`, the JSON data structure from `pipedrive-app/panel.schema.json`, and the Person details and Deal details locations. Add two JSON modals with the same locations: "Add to Pegasusbound campaign" (`<backend>/api/v1/integrations/pipedrive/app/enroll`, schema `pipedrive-app/enroll-modal.schema.json`) and "Pause in Pegasusbound" (`<backend>/api/v1/integrations/pipedrive/app/pause`, schema `pipedrive-app/pause-modal.schema.json`), and add both as actions of the panel. Leave every JWT secret blank: Pipedrive then signs each call with the app's client secret, which is what the backend checks, along with the user and company the token names. Pipedrive needs the backend on `https` with a certificate from a public authority
+
+`APP_URL` is also what the **Open in Pegasusbound** person field links to. A consumer that joined the fleet with `pegasusbound join` is handed the Pipedrive variables, `APP_URL` and `BACKEND_PUBLIC_URL` (or `API_PUBLIC_URL`) with the rest of its environment, since the consumer is what registers the webhooks; a worker never is.
+
+Salesforce reads `SALESFORCE_OAUTH_CLIENT_ID` and `SALESFORCE_OAUTH_CLIENT_SECRET`, from an External Client App or Connected App in your own org with PKCE required and the `api`, `refresh_token` and `id` scopes. One app serves production, sandbox and My Domain logins; each member picks theirs when connecting. See [Salesforce self-hosting](/guides/salesforce/#self-hosting).
+
+## AI and search
+
+| Variable | What it does | Default |
+|---|---|---|
+| `AI_PROVIDER` | `openai`, `openrouter`, `groq`, `ollama`, `anthropic` or `custom`. Omit every AI variable to run with AI off, in which case AI endpoints return a clean `503` | unset |
+| `AI_API_KEY` | Provider key. Not needed for `ollama` | unset |
+| `AI_MODEL`, `AI_MODEL_TRIAL`, `AI_MODEL_PAID` | Model selection, optionally split by plan | provider preset |
+| `AI_BASE_URL` | Required for `custom`. Any OpenAI compatible endpoint | unset |
+| `AI_FREE` | Treats AI usage as uncharged | derived |
+| `SEARCH_PROVIDER`, `SEARCH_API_URL`, `SEARCH_API_KEY` | Web search for the assistant (`serper` or `searxng`) | unset |
+| `MAILHOST_ISPDB` | `true` lets mailbox server detection ask Mozilla's Thunderbird ISPDB (`autoconfig.thunderbird.net`) about a domain whose MX records and own autoconfig file name no known provider. Only the domain name is sent. See [data control](/development/data-control/#outbound-calls) | `false` on a self-host, `true` on Pegasusbound Cloud |
+| `MAILVENDOR_SANDBOX_URL` | Development only. Points every inbox vendor client at the [sandbox's mock vendor API](/development/sandbox/#mock-inbox-vendors) (`<url>/inboxkit`, `<url>/mailforge`) instead of the real vendors. Ignored unless `APP_ENV` is `dev` | unset |
+| `TYPESAFE_API_KEY` | TypeSafe API key. Turns on the typed judgments: reply classification, the copy judgment in the Advisor and the editor, warmup content lint, bounce classification, import column mapping and per-form triage. Inbox tagging needs the switch below as well. See [data control](/development/data-control/#typesafe-judgments) for what each one sends | unset |
+| `INBOX_TAGGING_ENABLED` | `true` enables automatic inbox tagging when `TYPESAFE_API_KEY` is also set. Message subject, current body, and the previous outbound body are sent to TypeSafe | `false` |
+
+<Callout type="warn" title="An unset provider still uses a key">
+An empty `AI_PROVIDER` with a set `AI_API_KEY` falls back to `api.openai.com`, so the key goes to OpenAI. Set both or neither.
+</Callout>
+
+Model compatibility needs no configuration. Backends disagree about the request shape: newer OpenAI models want `max_completion_tokens` rather than `max_tokens`, refuse any temperature but the default, and some refuse function tools unless reasoning is switched off, while most OpenAI compatible backends only know the older shape. The provider learns this from the first rejection of each parameter and remembers it, so a model is walked to a working shape on its first call and every later call starts there.
+
+Set these on the backend and the consumer.
+
+Automatic inbox tagging is read by the backend, consumer, and `pegasusboundctl`. Both inbox-tagging variables are required; a key by itself does not start classification. See [Automatic inbox tagging](/guides/inbox-tagging/).
+
+## Tasks and billing
+
+Warmup replies use the same persisted SQL task identity with either queue provider. They wait at least 45 minutes after the exact parent receipt and recheck mailbox windows, roles, consent, standing, suppression and remaining budgets before native dispatch. Queue callbacks do not grant sending authority. See [diagnostic generation and rollout](/development/warmup-generation/).
+
+Per-mailbox `test_mode`, `test_send_enabled` and `test_receive_enabled` separate diagnostic sending from receiving; new mailboxes default off and legacy NULL values keep prior behavior. Positive `shared_daily_limit` and `rolling_recipient_limit` optionally constrain all outbound lanes above their separate cold/diagnostic allocations. These are database-backed mailbox PATCH fields, not environment variables or global admin settings. Current participation, calendars, suppression, provider holds and durable reservations are rechecked by protocol-2 executors. See [defaults, repair evidence and rollout](/development/send-safety/).
+
+| Variable | What it does | Default |
+|---|---|---|
+| `TASKS_PROVIDER` | `local` (an in-process Postgres poller) or `gcloud` (Cloud Tasks) | `local` |
+| `TASKS_LOCAL_POLL_INTERVAL` | How often the local poller looks for due work | `1s` |
+| `BILLING_PROVIDER` | `none` (every feature unlocked, no trial expiry; the dashboard reports the workspace as self-hosted rather than on a free tier and hides billing) or `stripe` | `none` |
+| `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `STRIPE_PUBLISHABLE_KEY` | Required together when `BILLING_PROVIDER=stripe`. The backend exits at boot if any is missing | unset |
+
+The local task dispatcher runs at most eight handlers at once, lowered to one third of the backend's effective Postgres pool ceiling with a minimum of one. This leaves room for API requests and reconciliation. Work beyond that limit stays pending in Postgres without a dispatch attempt or failure stamp. The ceiling applies across polling rounds, not separately to each batch, and does not change sending authority or unknown-outcome protections.
+
+Stripe Tax also needs account-side setup. In **Tax > Settings**, confirm the head office address, use the business-use SaaS product tax code (`txcd_10103001`) as the default, and choose whether prices include tax or have tax added at checkout. Apply the same tax code and an explicit tax behavior to every subscription and credit-pack product and price. A price set to inclusive or exclusive cannot be changed later, so replacing that choice requires a new Price and an update to the matching plan or `STRIPE_CREDIT_PACK_*_PRICE_ID` value.
+
+Add a Tax registration only after the business is registered with that tax authority. Automatic tax returns zero with a `not_collecting` reason in jurisdictions where no active registration applies. Enabling Stripe Tax is not a substitute for registering or filing.
+
+Stripe Checkout always requests the billing address needed for tax and lets business buyers provide a legal name and business tax ID. The active default billing portal configuration must allow updates to payment methods, billing email, billing address, name, and tax ID, and must show invoice history. This lets a customer correct its tax location or registration before a renewal.
+
+Point the webhook endpoint at `/webhook/stripe` using API version `2026-08-26.dahlia`, matching stripe-go v86. Subscribe to `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `checkout.session.expired`, `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.paid`, `invoice.payment_failed`, `invoice.finalization_failed`, `payment_intent.succeeded` and `charge.refunded`. If you replace the endpoint, update `STRIPE_WEBHOOK_SECRET` to the new endpoint's signing secret before disabling the old endpoint. The handler accepts the previous webhook shape during an endpoint upgrade, but new endpoints should use the matching version.
+
+Turning on Stripe Tax does not update existing subscriptions. Review and migrate them from **Tax > Migrations** after setting the prices' tax behavior. Stripe applies the tax change from the next billing cycle without prorating it. The Dashboard migration does not operate on sandbox subscriptions, so update those individually when testing.
+
+Delayed sends run through the local poller, so the backend must be running for scheduled work to fire.
+
+## Observability
+
+### Error reporting
+
+Every runtime in Pegasusbound can report its errors, and none of them do unless you say where. Where is the operator's choice, not a requirement of the software, so the default install reports nowhere and contacts no host.
+
+There are two backends and you can run either, both, or neither:
+
+- **PostHog** is the default. One project key carries error tracking for every service, and the same key carries the handful of product events described below, so there is one account to have rather than two.
+- **Sentry** is still fully supported. An instance that already reports to Sentry keeps working unchanged, and setting `POSTHOG_ERROR_TRACKING=false` keeps a PostHog key configured for analytics while sending no exceptions there.
+
+Set both and every error goes to both. Each variable is read by one process, so pointing the backend at a project does not make the dashboard report too.
+
+| Variable | Read by | What it does | Default |
+|---|---|---|---|
+| `POSTHOG_KEY` | backend, consumer, worker | Server-side error tracking, and the server-side product events below | unset |
+| `PEGASUSBOUND_POSTHOG_UI_HOST` / `PUBLIC_POSTHOG_UI_HOST` | Where PostHog's own app is, used for toolbar and session-replay links. Only differs from the host above when you proxy, and it must when you do | `https://us.posthog.com` | yes (build or container start) |
+| `POSTHOG_PROXY_INGEST` | Upstream the `/ingest` reverse proxy forwards capture traffic to. The frontends are pointed at `https://<api host>/ingest` so content blockers, which drop requests to posthog.com, do not silently remove your analytics and error reporting | `https://us.i.posthog.com` | yes |
+| `POSTHOG_PROXY_ASSETS` | Upstream for `/ingest/static/*`. PostHog serves its browser bundle from a different host than it ingests on, and sending one to the other 404s | `https://us-assets.i.posthog.com` | yes |
+| `POSTHOG_KEY` | forms service | The forms service's own errors. It reads its own environment, like tracking | unset |
+| `POSTHOG_KEY` | tracking service | Rust errors and panics, posted to the capture endpoint directly | unset |
+| `POSTHOG_KEY` | realtime service | Elixir exceptions, with the stack trace the rescue site caught | unset |
+| `POSTHOG_HOST` | every server-side service | Capture host. Point it at a self-hosted PostHog if you run one | `https://us.i.posthog.com` |
+| `POSTHOG_ERROR_TRACKING` | every server-side service | `false` keeps the key for product analytics and reports no exceptions to PostHog | `true` |
+| `SENTRY_DSN` | backend, consumer, worker | Server-side error reporting. Optional in every environment, including `prod` | unset |
+| `SENTRY_DSN` | forms service | The forms service's own errors | unset |
+| `SENTRY_DSN` | tracking service | Rust errors and panics. An invalid DSN disables reporting with a log line rather than stopping the service | unset |
+| `SENTRY_DSN` | realtime service | An empty string is treated as unset on purpose, because the library rejects `""` hard enough to take the node down | unset |
+| `PEGASUSBOUND_POSTHOG_KEY` | web, admin containers | Browser error tracking, read at container start like the other `PEGASUSBOUND_*` values. The same key carries the product analytics and session replay below | unset |
+| `PEGASUSBOUND_POSTHOG_KEY` | forms service | Stamped into the public form page for the form app's pageviews, web vitals and browser errors. Separate from the forms service's own `POSTHOG_KEY`: one is a Go process, the other is a page a stranger loads | unset |
+| `PEGASUSBOUND_POSTHOG_HOST` | web, admin containers, forms service | Capture host for the browser | `https://us.i.posthog.com` |
+| `PEGASUSBOUND_POSTHOG_ERROR_TRACKING` | web, admin containers, forms service | `false` reports no browser exceptions to PostHog anywhere, including the form pages the forms service stamps. Everything else the key turns on keeps running | `true` |
+| `PEGASUSBOUND_POSTHOG_SESSION_REPLAY` | web, admin containers | `false` records no sessions and keeps everything else. Form pages never record, whatever this says | `true` |
+| `PEGASUSBOUND_COMPANY_LOGOS` | web container | `on` shows a company logo on each contact whose address is on a company domain, fetched by the browser from DuckDuckGo's favicon service with only the domain sent; `off` shows initials. Unset is off on a self-host and on for Pegasusbound Cloud. See [outbound calls](/development/data-control/#outbound-calls) | unset |
+| `PEGASUSBOUND_SENTRY_DSN` | web, admin containers | The Sentry half of the same thing. Unset means the SDK is never fetched and no host is contacted | unset |
+| `PEGASUSBOUND_SENTRY_DSN` | forms service | Stamped into the public form page, along with the service's `APP_ENV` as the environment | unset |
+| `PEGASUSBOUND_SENTRY_ENVIRONMENT` | web, admin containers | The environment label browser events carry, whichever backend receives them. Defaults to the build mode. Form pages do not read it: the forms service stamps its own `APP_ENV` into the page instead | unset |
+| `APP_ENV` | every server-side service | Doubles as the environment label on the events that service reports. Browser events take theirs from `PEGASUSBOUND_SENTRY_ENVIRONMENT` instead, because the container serving the bundle is not the process reporting the error | `dev` |
+| `PEGASUSBOUND_RELEASE` | tracking, realtime | The build events are tagged with. The published images set it from the release tag; the Go services and the frontends read the same value from their build stamp instead | `dev` |
+
+Configuring neither backend means nothing leaves the process and no host is contacted. The dashboard, the admin panel and form pages go further and never load an SDK at all, so there is not even a script; the Go, Rust and Elixir services still record errors, to their own logs.
+
+A PostHog key can name PostHog Cloud (US or EU) or your own PostHog through `POSTHOG_HOST`. A Sentry DSN can point at Sentry Cloud, a self-hosted Sentry, or any Sentry-compatible server such as GlitchTip; nothing in Pegasusbound assumes sentry.io.
+
+The distinct id on a server-side PostHog exception names the process that raised it (`pegasusbound-backend`, `pegasusbound-worker`), person profiles are switched off per event, and IP geolocation is disabled, since the address would be the server's. A browser exception belongs to the signed-in person the app identified, so it sits next to that person's session replay.
+
+Exceptions still carry the context that makes them answerable, as searchable properties:
+
+| Property | On | What it is for |
+|---|---|---|
+| `organization_id`, `user_id` | browser and request-scoped server exceptions | "Show me every error this workspace hit." Flat properties, so one filter finds them on the server side too, where no person is identified |
+| `request_id` | server panics, and browser exceptions whose trail includes a failed call | The id the API already returns in its error envelope, so one incident is findable in PostHog and in the backend's logs |
+| `http_route`, `http_method` | server panics | The route pattern, never the raw path: one issue per route instead of one per record, and a probe for `/wp-admin` cannot mint issues |
+| `service`, `environment`, `release` | everything | Which process, which deployment, which build |
+
+Browser exceptions also carry a trail of steps: the routes visited and the API calls that failed just before, each with its method, path, status and request id. In the dashboard and the admin panel the exception also sits next to the session replay it happened in, when `PEGASUSBOUND_POSTHOG_SESSION_REPLAY` is on; see the analytics section below for what those two surfaces record.
+
+The `admin` panel and the dashboard also tag events with the build they were served from. That value is baked at image build time, because it has to match the release the source maps were uploaded under, so it cannot be changed by a container variable afterwards.
+
+### Source maps
+
+A browser stack trace is minified without them. Uploading them is optional and off unless the build is given credentials, so a fork, a self-host build and a local `pnpm build` emit no source maps at all and the shipped bundle is identical.
+
+| Build variable | Backend | What it does |
+|---|---|---|
+| `POSTHOG_CLI_API_KEY`, `POSTHOG_CLI_PROJECT_ID` | PostHog | Both set makes the build run `pnpm sourcemaps:posthog` after `vite build`, which injects a chunk id, uploads, and deletes the `.map` files it sent. The `web`, `admin` and `forms` images all do this, so a form page's stack trace is readable too |
+| `POSTHOG_CLI_HOST` | PostHog | The instance to upload to, for PostHog EU or a self-hosted one |
+| `SENTRY_AUTH_TOKEN`, `SENTRY_ORG`, `SENTRY_PROJECT` | Sentry | All three set puts the Sentry Vite plugin in the build |
+
+In this repository's release workflow the two project ids are repository variables and the two keys are repository secrets, passed to the image build as build secrets. Nothing in the app has to match a release name: PostHog pairs a stack frame with its map through the chunk id the CLI injected into the served file, so an event from any build resolves as long as that build's maps were uploaded.
+
+A static host builds with `pnpm build:pages` instead of an image, and that runs the same upload when the same two variables are set in the host's build environment. Setting them there matters more than it looks: with no maps uploaded, PostHog falls back to fetching `<bundle>.js.map` from the site itself, a static host answers that with its SPA fallback, and every frame in every issue reads `Invalid source map: bad json` beside a minified function name.
+
+### Product analytics and session replay
+
+These are the same two keys as the error tracking above, and they exist for the hosted service. A self-hosted instance that sets no key loads no analytics and sends no usage data: the installer never asks about them, and a build with none of them set contains no analytics script to block. An instance that does set a key gets everything below.
+
+| Variable | Read by | What it does | Default |
+|---|---|---|---|
+| `POSTHOG_KEY` | backend | Server-side product events (a completed signup, a started trial, a started subscription), under the account id of the person they happened to, with the workspace as a group | unset |
+| `POSTHOG_HOST` | backend | Capture host. Point it at a self-hosted PostHog if you run one | `https://us.i.posthog.com` |
+| `PEGASUSBOUND_POSTHOG_KEY` | web, admin containers | Browser analytics and session replay, read at container start. Unset means the SDK chunk is never fetched | unset |
+| `PEGASUSBOUND_POSTHOG_HOST` | web, admin containers | Capture host for the browser | `https://us.i.posthog.com` |
+| `PEGASUSBOUND_POSTHOG_SESSION_REPLAY` | web, admin containers | `false` keeps the analytics and records no sessions | `true` |
+| `PUBLIC_POSTHOG_KEY` | `site/` build | Marketing site analytics. Build-time: unset produces a site with no analytics code in it at all | unset |
+| `PUBLIC_POSTHOG_HOST` | `site/` build | Capture host for the site | `https://us.i.posthog.com` |
+
+What each surface sends, with a key set:
+
+| Surface | Identity | Captured |
+|---|---|---|
+| Dashboard | The signed-in account (`identify` with email and name) and its workspace as an `organization` group | Pageviews and pageleaves, autocapture of every click, heatmaps, rage and dead clicks, web vitals and network timing, session replay with console logs, surveys, exceptions, and the named events `mailbox_connected` and `campaign_launched` |
+| Admin panel | The signed-in operator | The same set, so a slow screen or a broken action in the operator surface is findable the same way |
+| Marketing site | Nobody. Cookieless: nothing is stored in the browser and no person is ever created | Pageviews and pageleaves with scroll depth, autocapture, heatmaps, rage and dead clicks, web vitals, exceptions. No session replay: the SDK has no session in cookieless mode, and one would need a consent banner |
+| Public form pages | Nobody. Cookieless, for the stranger filling in a customer's form | Pageviews, autocapture, heatmaps, web vitals, exceptions and the funnel events `form_viewed`, `form_started` and `form_submitted`, each carrying the form's public id. Never recorded |
+
+The person in the dashboard and the person on a server-side event are the same account id, so a signup counted by the backend, the session that led to it and the subscription the Stripe webhook later reports are one funnel. The acquisition parameters the marketing site carries into the signup link land on that person write-once at signup. Countries come from PostHog's own GeoIP on the address the event arrived from; the `/ingest` proxy above forwards the visitor's address for exactly this, and the server-side events send the signup request's address along.
+
+Session replay masks what is typed into a password field in the browser, before anything is sent. Every other input and every screen is recorded, which is what makes a replay answer "what exactly happened", and it is also why the hosted service's privacy page describes it in those words.
+
+### Push
+
+| Variable | What it does | Default |
+|---|---|---|
+| `APNS_KEY` or `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPIC` | Mobile push on backend and consumer. Partial configuration disables push with a warning, never a crash | unset |
+
+## Updates
+
+| Variable | What it does | Default | Restart needed |
+|---|---|---|---|
+| `UPDATE_CHECK_ENABLED` | Polls GitHub Releases for a newer Pegasusbound and shows it in the admin panel's top bar and on Setup and health | `true` | yes |
+| `UPDATE_CHECK_INTERVAL` | How often the release check runs. Minimum `5m` | `30m` | yes |
+| `UPDATE_CHANNEL` | `stable` follows releases; `dev` also offers prereleases | `stable` | yes |
+| `RELEASES_GITHUB_REPO` | The `owner/repo` whose releases count as Pegasusbound versions. Point a fork's instance at the fork | `pegasusbound/pegasusbound` | yes |
+| `RELEASES_GITHUB_TOKEN` | Optional GitHub token; only raises the API rate limit | unset | yes |
+| `UPDATER_URL` | The host-side updater that applies an update (pull, rebuild, restart). Unset, or `none`, leaves the panel report-only | `http://updater:8095` under compose | yes |
+| `UPDATER_TOKEN` | The bearer token the backend presents to the updater, which can pull and restart the instance. Give it its own value so the token the tracking and forms services hold cannot start an update; the installer generates one | `INTERNAL_API_TOKEN` | yes |
+
+The updater's own variables (`UPDATER_MODE`, `UPDATER_COMMAND`, `UPDATER_REPO_DIR` and the rest) are on [Updates](/development/updates/#configuration); it is a separate process and its environment is not on the configuration page.
+
+## Forms service
+
+The public face of hosted forms (`cmd/forms`): it serves the React (TanStack) form app built from `forms/`, the per-form page shells, the embed loader and public submissions, on its own port so form traffic never touches the API origin. It reads its own environment; none of these appear in the admin panel except `FORM_IP_RATE_LIMIT`.
+
+| Variable | What it does | Default |
+|---|---|---|
+| `FORMS_PORT` | Listen port | `8090` |
+| `FORMS_STATIC_DIR` | The built forms app (`pnpm build` output). The service exits at boot when `index.html` is missing there | `forms/dist` |
+| `BACKEND_INTERNAL_URL` | Where the service resolves forms and forwards submissions, the same variable the tracking service uses. **Required**: the service exits at boot without it | none |
+| `INTERNAL_API_TOKEN` | Bearer token for those calls, matching the backend's. **Required**: the service exits at boot on an empty value | none |
+| `FORM_IP_RATE_LIMIT` | Public form submissions allowed per source IP per 10 minutes, per forms-service instance | `30` |
+| `POSTHOG_KEY`, `POSTHOG_HOST`, `POSTHOG_ERROR_TRACKING` | The service's own error tracking. Unset means none | unset |
+| `SENTRY_DSN` | The same through Sentry, alongside PostHog or instead of it | unset |
+| `PEGASUSBOUND_POSTHOG_KEY`, `PEGASUSBOUND_POSTHOG_HOST`, `PEGASUSBOUND_POSTHOG_ERROR_TRACKING` | Stamped into the form page so the browser app reports too. Unset, or error tracking off, means the page loads no reporting SDK at all | unset |
+| `PEGASUSBOUND_SENTRY_DSN` | The Sentry half of the same stamping | unset |
+| `TRUSTED_PROXIES` | CIDRs whose `X-Forwarded-For` the service believes, same convention as the backend. Empty trusts nothing and uses the socket peer; set it behind a reverse proxy or the submit limiter throttles the proxy's address instead of the visitor's | empty |
+
+## Tracking service
+
+The Rust open and click service. It reads its own environment, so these have to be set on that container, and none of them appear in the admin panel.
+
+Run a single copy of it. Its event deduplication, its per-source rate limits and its click-ticket caches are per process and in memory, with no shared store behind them, so a second replica does not halve the work: it doubles the budgets a flooding source gets and lets the same open be published twice. One container handles the pixel and click load of a large instance comfortably; scale the workers instead. If you must run more than one, put a sticky-by-source-address hash in front of them, which keeps a given source on one process and restores both properties.
+
+| Variable | What it does | Default |
+|---|---|---|
+| `TRACKING_HOST`, `TRACKING_PORT` | Listen address | `0.0.0.0`, `3000` |
+| `BACKEND_INTERNAL_URL` | Where tracking resolves opaque `/c/<id>` click tickets. **Required**: the service exits at boot without it | none |
+| `INTERNAL_API_TOKEN` | Bearer token for that lookup. **Required**: the service exits at boot on an empty value | none |
+| `TRACKING_RATE_LIMIT_PER_MIN` | Counted pixel and click requests per source per minute. Over budget, pixels are still served but not counted, and click redirects get `429` | `300` |
+| `TRACKING_PAGEHIT_RATE_LIMIT_PER_MIN` | Website page views accepted per source per minute, on top of the shared budget above. Over budget, the snippet gets `429` | `60` |
+| `TRACKING_TRUSTED_PROXIES` | CIDRs the tracking service accepts a forwarded client address from. Empty trusts nothing and uses the socket peer, which is correct for a directly exposed service; set it behind a reverse proxy or the per-source rate limits and the location stored with page views are caller-controlled. Same convention as the backend's `TRUSTED_PROXIES` | empty |
+| `TRACKING_IP_HASH_KEY` | Secret the source-address token in tracking events is keyed with. The token names one source for deduplication, rate limits and the click burst rule; keyed, it cannot be turned back into the address by enumeration | `INTERNAL_API_TOKEN` |
+| `TRACKING_CLIENT_IP_HEADER` | The one header a trusted proxy sets with the client address. No other header is read, so a caller cannot smuggle an address past a generic proxy in `CF-Connecting-IP`. For `x-forwarded-for` the proxy-appended last entry is used; set `cf-connecting-ip` behind Cloudflare | `x-forwarded-for` |
+| `TRACKING_SCANNER_BUILTINS` | Whether the known-scanner catalogue shipped with Pegasusbound is loaded: Microsoft 365's Exchange Online Protection ranges and Barracuda's Email Gateway Defense blocks. `false` leaves only your own entries | `true` |
+| `TRACKING_SCANNER_NETWORKS` | Extra scanner sources, comma separated, each a CIDR or `asn:<number>` with an optional label. For sources that never carry a person's own request, so their pixel fetches and their clicks are both treated as automated | empty |
+| `TRACKING_SCANNER_CLICK_NETWORKS` | The same, for sources that also proxy a mail client's own image fetches. Only their click tickets are treated as automated, because their pixel fetches are genuine opens | empty |
+| `TRACKING_SCANNER_ASN_DB` | Path to a MaxMind GeoLite2-ASN database, which is what makes `asn:` entries match on an instance whose edge writes no ASN header. A separate file from `GEODB_PATH`; unset or unreadable logs one line at boot and leaves ASN matching off. It removes the need for an edge header, not for `TRACKING_TRUSTED_PROXIES`: the lookup reads the client address, and behind a reverse proxy without that variable the client address is the proxy | unset |
+| `TRACKING_SCANNER_ASN_DB_URL` | Where to download that database from when no file is mounted at the path above. The result is held in memory and never written out, so this needs no writable path and no volume. Carries a licence key on a MaxMind permalink, so it is treated as a secret and never logged. See [GeoIP](/development/configuration/#geoip) | unset |
+| `TRACKING_SCANNER_ASN_HEADER` | Header a trusted proxy sets with the source ASN, an alternative to the database above and preferred over it where both are set. Read only from a proxy in `TRACKING_TRUSTED_PROXIES`. On Cloudflare, a transform rule writing `ip.src.asnum` | empty |
+| `EVENTBUS_PROVIDER` | `nats` or `kafka`. Kafka needs the `tracking:*-kafka` image, or a build with `CARGO_FEATURES=kafka` | `nats` |
+| `NATS_URL`, `NATS_SUBJECT_PREFIX` | JetStream address and subject prefix. The publish subject is `<prefix>.<topic>` | `nats://localhost:4222`, `pegasusbound` |
+| `CODEC_PROVIDER` | `json` or `avro`, and it has to match the consumer's. `avro` is refused at boot without `SCHEMA_REGISTRY_URL` | `json` |
+| `KAFKA_TRACKING_TOPIC` | Event topic, read by the Rust publisher **and** the Go subscriber | `tracking-events` |
+| `KAFKA_BOOTSTRAP_SERVERS`, `KAFKA_SASL_USERNAME`, `KAFKA_SASL_PASSWORD` | Broker transport when `EVENTBUS_PROVIDER=kafka` | unset |
+| `SCHEMA_REGISTRY_URL`, `SCHEMA_REGISTRY_KEY`, `SCHEMA_REGISTRY_SECRET` | Registry for the Avro codec | unset |
+| `AWS_CONFIG_ENABLED` | `true` falls back to AWS SSM and Secrets Manager for any value missing from the environment | `false` |
+| `APP_ENV` | Environment label used in logs, and on reported errors | `dev` |
+| `POSTHOG_KEY`, `POSTHOG_HOST`, `POSTHOG_ERROR_TRACKING` | Error and panic reporting. Unset means none | unset |
+| `SENTRY_DSN` | The same through Sentry. An invalid value logs and disables it rather than stopping the service | unset |
+| `PEGASUSBOUND_RELEASE` | The build reported errors are tagged with | `dev` |
+
+A catalogue entry is `<source> <scope> <certainty> <label>`. **Scope** is which requests it may judge: `all` for a network that never carries a person's own request, `clicks` for one that also proxies a mail client's image fetches, where a pixel fetch is a genuine open. **Certainty** is how much the match settles, and defaults to `certain`: the source only ever filters mail, so a match is the whole verdict. `probable` says the source can also carry a person, which browser isolation makes true of the mail-security vendors, and a match then widens the consumer's machine window (`tracking.machine_window_probable_seconds`) instead of deciding. The two columns are independent. A `probable` entry moves events in one direction only, from counted-as-human to counted-as-automated, so it can never let a scan count as engagement; outside the window the event is judged exactly as an unrecognised one would be. The cost is the other side of that: a recipient who really does click inside the window is classified automated, and separately, a click from **any** recognised network is redirected without its identification ticket, because the edge has no dispatch time and cannot tell the delivery-time scan from the isolated human click the way the consumer can. So an isolated click the consumer later counts as a person's still leaves no website-visit attribution for that contact.
+
+`asn:` entries need the source ASN, and there are two ways to have it. `TRACKING_SCANNER_ASN_DB` resolves it from the address itself and needs no ASN header and no transform rule, which is the option for an instance behind nginx, Caddy, a cloud load balancer, or exposed directly. `TRACKING_SCANNER_ASN_HEADER` takes it from a header your edge writes, which on Cloudflare is one transform rule. Where both are configured the header wins on any request that carries one, so adding the database never changes a verdict your edge has already given; a request the header does not cover falls through to the database.
+
+Neither removes the need for `TRACKING_TRUSTED_PROXIES` behind a reverse proxy, for different reasons. The header is read **only** from a peer listed there, so a header with that variable empty resolves nothing at all. The database reads the client address, and with that variable empty the client address is the proxy's, so the lookup returns the proxy's network rather than the requester's. With no usable source at all, the ASN half of the catalogue is inert and the tracking service says so at boot, naming both.
+
+Which entries ship on, and how, follows from that. Microsoft 365's Exchange Online Protection ranges and Barracuda's Email Gateway Defense blocks are the mail-filtering tier itself, where no recipient ever reads their mail, so they are `certain` and settle the verdict outright. Proofpoint, Mimecast and Cisco Secure Email are `probable` and matched by ASN: they are pure mail-security networks, but Proofpoint Isolation and Mimecast Browser Isolation render a clicked page in the vendor's own cloud and stream it to the recipient, so a click from there can have a person behind it. Isolation is usually scoped to uncategorised URLs, which is what a new outreach domain looks like. The probable window is what makes them safe to ship on: the scan runs within minutes of the send, and the isolated click runs whenever the person got to it.
+
+The rest of Microsoft's and Google's networks stay commented out even as `probable`, because they are whole cloud allocations rather than mail-security networks. A recipient on Windows 365, Azure Virtual Desktop or a corporate NAT gateway sits inside them all day, so a match says almost nothing about who is asking. `tracking/scanner-networks.txt` documents every entry and is the place to change them.
+
+## Realtime service
+
+The Elixir websocket service. Its runtime configuration is read only when the release boots in `prod`, which is how the shipped image runs. Like tracking, it reads its own environment and appears nowhere in the admin panel.
+
+| Variable | What it does | Default |
+|---|---|---|
+| `JWT_SECRET` | Must equal the backend's `AUTH_SECRET`. **Required**: the service refuses to boot without it | none |
+| `SECRET_KEY_BASE` | Phoenix session signing. **Required** | none |
+| `DATABASE_URL` | Postgres, used to validate API keys. **Required** | none |
+| `REDIS_URL` | The Redis bridge the backend publishes events onto | `redis://localhost:6379/0` |
+| `PHX_HOST` | The service's own hostname | `localhost` |
+| `PORT` | Listen port | `4000` |
+| `CHECK_ORIGIN_HOSTS` | Origins a browser may open a socket from, comma separated, e.g. `https://app.example.com,https://admin.example.com`. Not this service's own host | unset |
+| `CHECK_ORIGIN` | Legacy host-based form, consulted only when `CHECK_ORIGIN_HOSTS` is empty. `true` accepts an upgrade only from `PHX_HOST` | `false` |
+| `PUBSUB_ENABLED` | `true` swaps the Redis bridge for Google Pub/Sub | `false` |
+| `GCP_PROJECT_ID` | Required when `PUBSUB_ENABLED=true`; the service refuses to boot without it | unset |
+| `MAX_CONNECTIONS_PER_USER` | Concurrent sockets one account may hold. The caller's plan limit applies too, whichever is lower | `10` |
+| `MAX_CONNECTIONS_PER_IP` | Concurrent sockets from one address | `50` |
+| `MAX_CONNECTIONS_GLOBAL` | Concurrent sockets on this node | `100000` |
+| `RATE_LIMIT_WS_MESSAGE` | Websocket messages per minute | `120` |
+| `RATE_LIMIT_WS_CONNECT` | Socket handshakes per minute | `30` |
+| `RATE_LIMIT_WS_JOIN` | Channel joins per minute, counted per `phx_join` on an open socket | `30` |
+| `RATE_LIMIT_WS_EVENT` | Client events per minute, which is what bounds presence updates | `60` |
+| `POSTHOG_KEY`, `POSTHOG_HOST`, `POSTHOG_ERROR_TRACKING` | Error reporting. Unset means none | unset |
+| `SENTRY_DSN` | The same through Sentry. An empty string is treated as unset on purpose, because the library rejects `""` hard enough to take the node down | unset |
+| `PEGASUSBOUND_RELEASE` | The build reported errors are tagged with | `dev` |
+
+<Callout type="warn" title="The origin check is off until you list your origins">
+With neither variable set, a websocket upgrade is accepted from any origin. A short-lived ticket is still required to open the socket, and channel membership is checked on every join, so an attacker needs a real credential either way. On a deployment reachable from the internet, set `CHECK_ORIGIN_HOSTS` to your dashboard and admin origins.
+
+List the origins the **browser connects from**, not the websocket host. The `Origin` header on an upgrade names the page that opened the socket, which is the dashboard. Setting `CHECK_ORIGIN=true` and pointing `PHX_HOST` at the websocket hostname refuses every real connection, which is the trap this variable replaces. The installer sets `CHECK_ORIGIN_HOSTS` correctly for you.
+</Callout>
+
+## Settings stored in the database
+
+These are the only settings a browser can change, and no environment variable owns any of them. They live in the admin panel under **Instance > Configuration > Settings** (`/configuration?tab=settings`). Reads are cached for 30 seconds in each process, so a change takes effect everywhere within that window.
+
+| Setting | Type | Default | What it does |
+|---|---|---|---|
+| `invitations.ttl_hours` | integer, 1 to 720 | `168` | How long a new invitation stays valid. Read when the invitation row is written, so it applies to invitations created after the change, not to existing ones |
+| `invitations.links_enabled` | boolean | `true` | Whether the copyable invitation link is returned at all. Off makes `GET /organization/invitations/:id/link` return `404` with an explanation, so an invitation can only arrive by mail |
+| `access.allow_invited_signup` | boolean | `true` | Whether holding a live invitation lets someone create their own account under `invite_only`. Off means an administrator creates every account with `pegasusboundctl user create` |
+| `sync.backfill_days` | integer, 1 to 730 | `90` | How far back a newly connected mailbox's initial import reaches, newest first |
+| `sync.backfill_messages` | integer, 1 to 100000 | `5000` | The most messages that import stores per mailbox |
+| `sync.daily_messages_per_mailbox` | integer, 1 to 100000 | `2000` | New (live) messages one mailbox may store per UTC day. Over it, mail waits for the next day; replies to the mailbox's own sends have a separate budget of the same size |
+| `sync.daily_messages_per_org` | integer, 1 to 2000000 | `25000` | New plus imported messages one organization may store per UTC day |
+| `retention.engagement_event_days` | integer, 1 to 3650 | `365` | How long the per-event open and click logs (client, device, approximate location) are kept. Campaign progress keeps its own summary that outlives them, so counts, filters and branching never change |
+| `retention.form_event_days` | integer, 1 to 3650 | `180` | How long form funnel events (views, starts, field-level drop-off) are kept. Funnel reports range up to 90 days, so anything shorter shortens the report too |
+| `retention.audit_log_days` | integer, 1 to 3650 | `90` | How long the audit trail is kept. It carries IP addresses, user agents and change payloads, so this is also how long that data is held |
+| `retention.warmup_mail_days` | integer, 3 to 3650 | `30` | How long warmup mail stays in each mailbox before Pegasusbound deletes it, wherever the mailbox's filing setting keeps it (Trash on Gmail), with the stored copy of its body. A mailbox can set its own window on the Warmup tab of its drawer or through `warmup_retention_days` on the API; this is what every other mailbox follows. The floor leaves room for the engagement and for a reply in the thread to finish |
+| `retention.warmup_event_days` | integer, 30 to 3650 | `365` | How long the per-message warmup records (tokens, receipts, tampering events, spam reports) are kept. The pool health bands read the last 30 days, which is the floor. The daily sent and received counts behind the warmup analytics are separate and never pruned |
+| `tracking.machine_window_open_seconds` | integer, 1 to 900 | `60` | How soon after a send was dispatched an open is recorded as automated rather than a person's. The clock starts when the send is handed to a worker, so this window also covers the sending provider's queue and the transit to the recipient, not just reading time. Raise it when delivery-time scanners are being counted as opens; lower it when recipients who read immediately are being missed. A change applies within a minute and only to events recorded after it |
+| `tracking.machine_window_click_seconds` | integer, 1 to 900 | `30` | The same window for click tickets. Kept separate because the two mistakes cost different things: a misjudged open loses a metric, a misjudged click loses the automation behind an interested lead |
+| `tracking.machine_window_probable_seconds` | integer, 1 to 86400 | `600` | The window used instead of the two above when the tracking service recognised the source as a mail-security network that also renders clicked pages for people, which Proofpoint, Mimecast and Cisco do through browser isolation. Such a match cannot settle whether a person is behind the request, so it widens the window rather than deciding: inside it the event is the delivery-time scan, past it the recipient who got to the mail later. Never applied shorter than the window for the kind of event in hand, so naming a network can only ever catch more scans. Its ceiling reaches a day because how long a vendor takes to detonate a link is the vendor's property, not the instance's |
+| `deliverability.enforce_domain_auth` | boolean | `true` | Whether a sending domain that fails SPF or DMARC stops cold campaign sending and warmup sending from every mailbox on it. Off keeps the check running and still shows the state and the Advisor card, it just never blocks |
+| `deliverability.auth_grace_hours` | integer, 1 to 720 | `72` | How long a domain must stay failing before the gate applies. The clock starts when the background check first sees the failure, so this is also how much warning the owner gets |
+| `warmup_generation` | object | Existing saved provider/model configuration, with generation enabled and bounded control defaults | Effective provider, cadence, stop, daily reservation cap, AI selection share, pools and canonical reply-count controls. See [all supported fields and defaults](/development/warmup-generation/) before editing; do not remove credentials while batches drain |
+| `placement.tests_per_month_trial` | integer, 1 to 100000 | `3` | How many free [placement tests](/guides/placement-tests/) a workspace on a free trial may run per calendar month on the instance seed panel. Only an instance running with `DEPLOYMENT_MODE=cloud` meters; a self-hosted instance never counts its own tests. Tests on a workspace's own seed inboxes are never counted |
+| `placement.tests_per_month_paid` | integer, 1 to 100000 | `40` | The same free allowance for a workspace on a paid plan. Past it, a test costs `placement.credits_per_test` credits |
+| `placement.seeds_per_test` | integer, 1 to 100 | `20` | The most seed inboxes one test sends to. Every copy is a send from the sending mailbox's daily limit, so this is also how much of that limit one test takes. A test is sized down to what the mailbox has left that day, and refused below five seeds |
+| `placement.spacing_seconds` | integer, 5 to 600 | `60` | The average gap between two copies of a test from one mailbox, varied by up to a third either way. A test started as quick uses the smaller of this and 8 seconds |
+| `placement.credits_per_test` | integer, 0 to 10000 | `25` | What a test on the instance panel costs in credits once a paid workspace has used its free tests for the month. The workspace agrees to the price before each paid test, and a test that delivers no copy is refunded. `0` turns paid tests off. Only an instance running with `DEPLOYMENT_MODE=cloud` meters, so a self-hosted instance never charges |
+| `placement.batch_senders_max` | integer, 1 to 100000 | `10000` | The most sending mailboxes one [placement batch](/guides/placement-tests/#testing-a-fleet-with-batches) may hold. An infrastructure safeguard on batch size only; how many run at once is the next setting |
+| `placement.batch_sender_concurrency` | integer, 1 to 500 | `20` | How many of one workspace's batch mailboxes may be sending their copies at the same time, across all its batches. The next mailbox starts when one has sent every copy; each mailbox keeps its own daily limit and minimum gap |
+| `placement.batch_instance_concurrency` | integer, 1 to 5000 | `200` | The same limit across every workspace together. It bounds how much batch mail the instance seed panel takes in at once, so a seed never receives enough in an hour to trip the sync flood rule, which deactivates a mailbox |
+| `placement.batch_starts_per_minute` | integer, 1 to 600 | `10` | How many mailboxes one batch starts per minute, so a large batch ramps up instead of starting its whole concurrency at once |
+
+The four `sync.*` values are read by the backend when a mailbox is loaded onto a worker (on connect, on reassignment, and by the reconciler's periodic republish), so a change reaches every mailbox within 30 minutes without a restart (the republish gives each mailbox one turn per 30 minutes, spread out so no worker gets them all at once). The fixed pacing numbers around them (burst per five minutes, hourly, backfill pace, the flood threshold and the chronic-overage rule) are compiled constants listed under **Instance > Configuration > Effective limits**; see [Mailboxes](/guides/mailboxes/#what-gets-synced) for how the budgets behave. The four `sync.*` values also have a companion read view on **Operations > Sync**, which shows each mailbox's backfill progress and fair-use throttle against them and can clear a throttle or restart a backfill.
+
+The five `retention.*` values are read by the pruning sweeps on every pass, so shortening one takes effect on the next sweep rather than at the next restart. Deletion is permanent and there is no grace period: what already sits outside a shortened window goes on that sweep. The warmup mail window is the one that reaches into customers' mailboxes: the consumer retires each message and the worker holding the mailbox deletes it there, so shortening it empties the warmup folders of the whole instance down to the new window within a few hours. See [data control](/development/data-control/#what-is-kept-and-for-how-long) for what each log holds and what a shorter window costs.
+
+An unattended install can seed the whole document before anyone signs in, with `PEGASUSBOUND_SETTINGS_BOOTSTRAP` holding the same partial JSON the admin API takes:
+
+```bash
+PEGASUSBOUND_SETTINGS_BOOTSTRAP={"sync":{"backfill_days":30},"retention":{"audit_log_days":30}}
+```
+
+It is applied only while the settings row has never been written, so from the first save in the panel onwards the panel is authoritative and the variable is a no-op. That is what [`install.sh --wizard`](/development/install/) writes when you answer its retention questions.
+
+The two `deliverability.*` values are read on every scheduling pass and every warmup send, so turning the gate off releases blocked mailboxes within the 30 second cache window. Turning it back on does not stop anything retroactively: a domain still has to spend its whole grace window failing first. Only a sustained failure gates, so a domain reading `unknown` (never checked, DNS could not answer, or a special-use domain that cannot resolve) always sends. Manual sends and unibox replies are never gated; see [domain authentication](/guides/deliverability/#domain-authentication).
+
+The `placement.*` allowance, seed and spacing values are read when a test starts, so a change applies to the next test and never to one already sending. The four `placement.batch_*` values are read on every pass of the batch runner, about every 30 seconds, so a change reaches running batches within a minute; lowering the concurrency never stops a mailbox already sending, it only delays the next start. A value of zero or below resolves to the default, and one above the range to its ceiling. Which mailboxes form the instance seed panel is not a setting: an administrator marks them from the admin panel.
+
+Changing them is audited, and every value is validated and clamped server side on write as well as on read, so a row written by an older version still resolves.
+
+## Variables that do not do what their name suggests
+
+| Variable | What actually happens |
+|---|---|
+| `KAFKA_CLUSTER` | Nothing. A loader exists but no caller does. Remove it |
+| `SENTRY_DSN_API` | Nothing, for the same reason. Superseded by `SENTRY_DSN` |
+| `CAPTCHA_PROVIDER` | Read, but derived when unset rather than defaulting to a constant. See [captcha](#captcha) |
+
+## See also
+
+- [Install](/development/install/) for the one-command install that writes all of this for you
+- [Data control](/development/data-control/) for where each store lives and what each retention window governs
+- [First run](/development/first-run/) for claiming a fresh instance
+- [Accounts and access](/development/accounts-and-access/) for who may sign in and how to invite people
+- [Instance health](/development/instance-health/) for the checks that read these values back
+- [Troubleshooting](/development/troubleshooting/) for the errors these settings produce

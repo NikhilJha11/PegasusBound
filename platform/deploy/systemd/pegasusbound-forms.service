@@ -1,0 +1,23 @@
+[Unit]
+Description=Pegasusbound forms service (hosted form pages, embeds and submissions)
+Documentation=https://docs.pegasusbound.com/development/bare-metal/
+After=network-online.target pegasusbound-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pegasusbound
+Group=pegasusbound
+EnvironmentFile=/etc/pegasusbound/pegasusbound.env
+WorkingDirectory=/opt/pegasusbound
+ExecStart=/opt/pegasusbound/bin/forms
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

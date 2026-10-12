@@ -1,0 +1,67 @@
+# air config for the pegasusbound hot-reload dev container.
+#
+# Generic across all three Go services — the build target is read from
+# the PEGASUSBOUND_CMD env var, which is set per service in
+# docker-compose.yml (backend / consumer / worker).
+#
+# Tradeoffs:
+#   - `delay = 800` debounces save-bursts. Below ~500ms editors can fire
+#     two file events for one save (write + flush), which kicks two
+#     builds.
+#   - `kill_delay = "2s"` gives the old binary time to drain in-flight
+#     work (Kafka commits, HTTP requests) before the new one starts.
+#   - `include_ext` deliberately omits `.sql` — migrations are embedded
+#     and require an explicit re-embed (go build) which the .go change
+#     in migrate.go will trigger anyway.
+
+root = "."
+tmp_dir = "tmp"
+testdata_dir = "testdata"
+
+[build]
+  # Built with the same flags as the production Dockerfiles so the
+  # behavior under watch matches what ships. -tags musl is required
+  # because we're on alpine. -buildvcs=false skips git stamping:
+  # the bind-mounted .git is owned by the host user and the container
+  # runs as root, so git refuses ("dubious ownership") and the build
+  # aborts. Dev binaries don't need VCS info.
+  cmd = "go build -tags musl -buildvcs=false -o ./tmp/main ./cmd/${PEGASUSBOUND_CMD}"
+  bin = "./tmp/main"
+  full_bin = ""
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  exclude_dir = [
+    "web",
+    "tracking",
+    "realtime",
+    "docs",
+    "tmp",
+    "bin",
+    "dist",
+    "build",
+    ".git",
+    ".github",
+    ".agentd",
+    "node_modules",
+  ]
+  include_dir = []
+  exclude_file = []
+  exclude_regex = ["_test\\.go"]
+  exclude_unchanged = true
+  follow_symlink = false
+  log = "build-errors.log"
+  delay = 800
+  stop_on_error = false
+  send_interrupt = true
+  kill_delay = "2s"
+
+[color]
+  main = "magenta"
+  watcher = "cyan"
+  build = "yellow"
+  runner = "green"
+
+[log]
+  time = true
+
+[misc]
+  clean_on_exit = true

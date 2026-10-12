@@ -1,0 +1,417 @@
+import { NoAccess } from "@/components/layout/NoAccess";
+import { useAccessRestricted, usePermission } from "@/hooks/usePermission";
+import { useEffect, useMemo } from "react";
+import useBrowseState from "@/hooks/useBrowseState";
+import { useUserProfile } from "@/hooks/context/user";
+import { analyticsRange, analyticsHiddenMetrics, analyticsCampaignFilter } from "@/lib/browse-accounts-analytics";
+import { Link } from "@tanstack/react-router";
+import {
+    ActivityIcon,
+    AlertTriangleIcon,
+    ArrowUpRightIcon,
+    Loader2Icon,
+    MailCheckIcon,
+    MousePointerClickIcon,
+    RefreshCcwIcon,
+    ReplyIcon,
+    SendIcon,
+    TriangleAlertIcon,
+} from "lucide-react";
+import {
+    EmptyBlock,
+    Page,
+    PageBody,
+    PageTopbar,
+    SectionBar,
+    Stat,
+    StatStrip,
+} from "@/components/layout/Page";
+import { MultiTrend, type TrendSeries } from "@/components/ui/charts";
+import { TONE_DOT } from "@/components/ui/tones";
+import type { DitherTone } from "@/components/ui/dither";
+import AnalyticsShareButton from "@/components/app/analytics/AnalyticsShareButton";
+import CampaignScopePicker from "@/components/app/analytics/CampaignScopePicker";
+import { ALL_CAMPAIGNS, isScoped, scopeLabel } from "@/components/app/analytics/campaignScope";
+import useDashboard from "@/lib/api/hooks/app/analytics/useDashboard";
+import DirectMailSection from "@/components/app/analytics/DirectMailSection";
+import OriginBadge from "@/components/app/engagement/OriginBadge";
+import type { DashboardCampaignFilter, RecentActivityItem } from "@/lib/api/models/app/analytics/DashboardOverview";
+
+const AUTO_OPENS_TIP = "Auto-opens: pixel fetches from privacy proxies (e.g. Apple Mail) or within seconds of sending, not a person reading. Logged as delivery proof, not counted as opens";
+const AUTO_CLICKS_TIP = "Auto-clicks: links followed by a security gateway scanning the email, not a person; not counted as clicks";
+const UNFILTERED_TIP = "Not campaign data, so the campaign filter does not apply";
+
+type Range = "7d" | "30d" | "90d";
+type Metric = "sent" | "opens" | "clicks" | "replies";
+
+const RANGE_LABEL: Record<Range, string> = {
+    "7d": "Last 7 days",
+    "30d": "Last 30 days",
+    "90d": "Last 90 days",
+};
+
+const METRICS: { key: Metric; label: string; tone: DitherTone }[] = [
+    { key: "sent", label: "Sent", tone: "sky" },
+    { key: "opens", label: "Opens", tone: "emerald" },
+    { key: "clicks", label: "Clicks", tone: "violet" },
+    { key: "replies", label: "Replies", tone: "amber" },
+];
+
+function pct(v: number | undefined): string {
+    return v == null ? "—" : `${v.toFixed(1)}%`;
+}
+function num(v: number | undefined): string {
+    return (v ?? 0).toLocaleString();
+}
+
+export default function AnalyticsPage() {
+    const canView = usePermission("VIEW_ANALYTICS");
+    // Hand-written mail is reported workspace-wide, outside a restricted scope.
+    const restricted = useAccessRestricted();
+    const [range, setRange] = useBrowseState<Range>("analytics.range", "7d", analyticsRange);
+    // Legend toggles: every metric charts together; hidden ones drop out.
+    const [hiddenMetrics, setHiddenMetrics] = useBrowseState<Metric[]>("analytics.hiddenMetrics", [], analyticsHiddenMetrics);
+    const [filter, setFilter] = useBrowseState<DashboardCampaignFilter>("analytics.campaigns", ALL_CAMPAIGNS, analyticsCampaignFilter);
+    const dash = useDashboard(range, filter);
+    const d = dash.data;
+    const os = d?.overall_stats;
+    const scoped = isScoped(filter);
+    const { user } = useUserProfile();
+    const label = scopeLabel(filter, d?.scope, (id) => user.folders?.find((f) => f.id === id)?.title, () => undefined);
+
+    // Drop selections the server no longer recognises (deleted, or moved out of the workspace).
+    const echoed = dash.isPlaceholderData ? undefined : d?.scope;
+    useEffect(() => {
+        if (!echoed) return;
+        const campaigns = filter.campaigns.filter((id) => echoed.campaigns.some((c) => c.id === id));
+        const folders = filter.folders.filter((id) => echoed.folders.some((f) => f.id === id));
+        if (campaigns.length !== filter.campaigns.length || folders.length !== filter.folders.length) {
+            setFilter({ campaigns, folders });
+        }
+    }, [echoed, filter, setFilter]);
+
+    const toggleMetric = (k: Metric) =>
+        setHiddenMetrics((cur) => {
+            if (cur.includes(k)) return cur.filter((x) => x !== k);
+            // Keep at least one series on the graph.
+            if (cur.length >= METRICS.length - 1) return cur;
+            return [...cur, k];
+        });
+
+    const trend = useMemo(() => {
+        const rows = d?.daily_trend ?? [];
+        const series: TrendSeries[] = METRICS.filter((m) => !hiddenMetrics.includes(m.key)).map((m) => ({
+            key: m.key,
+            label: m.label,
+            tone: m.tone,
+            values: rows.map((p) => p[m.key] ?? 0),
+        }));
+        return { labels: rows.map((p) => p.date), series };
+    }, [d?.daily_trend, hiddenMetrics]);
+
+    const breakdown = [
+        { label: "Sent", value: os?.total_emails_sent, icon: SendIcon, dot: "bg-slate-400" },
+        { label: "Opens", value: os?.total_opens, icon: MailCheckIcon, dot: "bg-emerald-500", note: os?.machine_opens ? `${num(os.machine_opens)} auto, not counted` : undefined, noteTitle: AUTO_OPENS_TIP },
+        { label: "Clicks", value: os?.total_clicks, icon: MousePointerClickIcon, dot: "bg-violet-500", note: os?.machine_clicks ? `${num(os.machine_clicks)} auto` : undefined, noteTitle: AUTO_CLICKS_TIP },
+        { label: "Replies", value: os?.total_replies, icon: ReplyIcon, dot: "bg-amber-500" },
+        { label: "Bounces", value: os?.total_bounces, icon: TriangleAlertIcon, dot: "bg-rose-500" },
+    ];
+
+    const shareData = {
+        title: scoped ? label : "Workspace performance",
+        subtitle: RANGE_LABEL[range],
+        metrics: [
+            { label: "Sent", value: num(os?.total_emails_sent), sub: "emails" },
+            { label: "Open rate", value: pct(os?.open_rate) },
+            { label: "Reply rate", value: pct(os?.reply_rate) },
+            { label: "Bounce rate", value: pct(os?.bounce_rate) },
+        ],
+        daily: (d?.daily_trend ?? []).map((p) => ({ label: p.date, value: p.sent })),
+    };
+
+    if (!canView) return <NoAccess feature="analytics" permissionLabel="View analytics" />;
+
+    return (
+        <Page>
+            <PageTopbar eyebrow="Analytics" subtitle={scoped ? "Selected campaigns" : "Deliverability across the workspace"}>
+                {dash.isPlaceholderData && dash.isFetching && (
+                    <Loader2Icon className="w-3.5 h-3.5 text-slate-400 animate-spin" aria-label="Updating" />
+                )}
+                <CampaignScopePicker value={filter} onChange={setFilter} scope={d?.scope} />
+                <RangeTabs value={range} onChange={setRange} />
+                <AnalyticsShareButton data={shareData} filename={`pegasusbound-analytics-${range}.png`} />
+            </PageTopbar>
+
+            <StatStrip cols={4}>
+                <Stat label="Total sent" value={num(os?.total_emails_sent)} sub="in range" accent={!!os && os.total_emails_sent > 0} />
+                <Stat label="Open rate" value={pct(os?.open_rate)} sub="after delivery" />
+                <Stat label="Reply rate" value={pct(os?.reply_rate)} sub="incl. positive" />
+                <Stat label="Bounce rate" value={pct(os?.bounce_rate)} sub="hard + soft" last />
+            </StatStrip>
+
+            {dash.isError ? (
+                <PageBody>
+                    <ErrorState onRetry={() => dash.refetch()} isRefetching={dash.isFetching} />
+                </PageBody>
+            ) : (
+                <>
+                    <div className="grid lg:grid-cols-[1fr_300px] min-h-0 flex-1">
+                        <section className="flex flex-col min-h-0 lg:border-r lg:border-slate-200">
+                            <SectionBar label="Email performance">
+                                <div className="inline-flex items-center gap-0.5 rounded-md bg-slate-100 p-0.5 max-w-full overflow-x-auto">
+                                    {METRICS.map((m) => {
+                                        const visible = !hiddenMetrics.includes(m.key);
+                                        return (
+                                            <button
+                                                key={m.key}
+                                                onClick={() => toggleMetric(m.key)}
+                                                className={`h-6 px-2 rounded text-[11px] font-medium transition-colors inline-flex items-center gap-1.5 ${
+                                                    visible
+                                                        ? "bg-white text-slate-900 shadow-sm"
+                                                        : "text-slate-400 hover:text-slate-600"
+                                                }`}
+                                            >
+                                                <span className={`size-1.5 rounded-full ${visible ? TONE_DOT[m.tone] : "bg-slate-300"}`} />
+                                                {m.label}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </SectionBar>
+                            <div className="flex-1 px-5 py-4">
+                                {dash.isPending ? (
+                                    <div className="h-[280px] rounded-md bg-slate-50 animate-pulse" />
+                                ) : (
+                                    <MultiTrend
+                                        labels={trend.labels}
+                                        series={trend.series}
+                                        height={280}
+                                        emptyLabel={scoped ? "No sends from these campaigns in this window" : "No sends in this window yet"}
+                                    />
+                                )}
+                            </div>
+                        </section>
+
+                        <aside className="flex flex-col min-h-0 bg-slate-50/40">
+                            <SectionBar label="Breakdown" />
+                            <div className="divide-y divide-slate-200/60">
+                                {breakdown.map((q) => (
+                                    <div key={q.label} className="h-9 px-4 flex items-center gap-2">
+                                        <span className={`size-1.5 rounded-full ${q.dot}`} />
+                                        <span className="text-[12px] text-slate-700">{q.label}</span>
+                                        {"note" in q && q.note && (
+                                            <span
+                                                className="text-[9.5px] text-slate-400 font-mono"
+                                                title={q.noteTitle}
+                                            >
+                                                {q.note}
+                                            </span>
+                                        )}
+                                        <span className="ml-auto font-mono text-[11px] text-slate-500 tabular-nums">
+                                            {dash.isPending ? "—" : num(q.value)}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                            {d?.account_health && (
+                                <>
+                                    <SectionBar label="Account health">
+                                        {scoped && <WorkspaceWide />}
+                                    </SectionBar>
+                                    <div className="px-4 py-3 grid grid-cols-3 gap-2 text-center">
+                                        <HealthCell n={d.account_health.healthy_accounts} label="Healthy" tone="text-emerald-600" />
+                                        <HealthCell n={d.account_health.warning_accounts} label="At risk" tone="text-amber-600" />
+                                        <HealthCell n={d.account_health.error_accounts} label="Issues" tone="text-rose-600" />
+                                    </div>
+                                </>
+                            )}
+                        </aside>
+                    </div>
+
+                    <SectionBar label="Top campaigns">
+                        <Link
+                            to="/app/campaigns"
+                            className="inline-flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-900 transition-colors"
+                        >
+                            All campaigns
+                            <ArrowUpRightIcon className="w-3 h-3" />
+                        </Link>
+                    </SectionBar>
+                    {dash.isPending ? (
+                        <div className="divide-y divide-slate-200/60">
+                            {Array.from({ length: 3 }).map((_, i) => (
+                                <div key={i} className="h-11 px-5 flex items-center gap-3">
+                                    <div className="size-1.5 rounded-full bg-slate-200" />
+                                    <div className="h-3 w-40 bg-slate-100 rounded animate-pulse" />
+                                    <div className="ml-auto h-3 w-24 bg-slate-100 rounded animate-pulse" />
+                                </div>
+                            ))}
+                        </div>
+                    ) : (d?.top_campaigns?.length ?? 0) === 0 ? (
+                        scoped ? (
+                            <EmptyBlock title="No sends in this window" body="None of the selected campaigns sent in this period. Try a longer period or another selection." />
+                        ) : (
+                            <EmptyBlock title="No campaign sends yet" body="Once a campaign starts sending, your best performers show up here." />
+                        )
+                    ) : (
+                        <div className="divide-y divide-slate-200/60">
+                            {d!.top_campaigns.map((c) => {
+                                const dot =
+                                    c.status === "active" ? "bg-emerald-500" : c.status === "paused" ? "bg-amber-500" : "bg-slate-300";
+                                return (
+                                    <Link
+                                        key={c.campaign_id}
+                                        to="/app/campaigns/$id"
+                                        params={{ id: c.campaign_id }}
+                                        className="group h-11 px-5 flex items-center gap-3 hover:bg-slate-50 transition-colors"
+                                    >
+                                        <span className={`size-1.5 rounded-full shrink-0 ${dot}`} />
+                                        <span className="min-w-0 flex-1 text-[12.5px] font-medium text-slate-900 truncate" title={c.name}>{c.name}</span>
+                                        <span className="ml-auto flex items-center gap-2 md:gap-4 font-mono text-[11px] text-slate-500 tabular-nums shrink-0">
+                                            <span title="Emails sent">{num(c.emails_sent)} sent</span>
+                                            <span title="Open rate" className="hidden md:inline text-emerald-600">{pct(c.open_rate)} open</span>
+                                            <span title="Reply rate" className="text-amber-600">{pct(c.reply_rate)} reply</span>
+                                        </span>
+                                    </Link>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {!restricted && <DirectMailSection period={range} unfiltered={scoped} />}
+
+                    <SectionBar label="Recent activity" />
+                    <PageBody>
+                        {dash.isPending ? (
+                            <div className="divide-y divide-slate-200/60">
+                                {Array.from({ length: 4 }).map((_, i) => (
+                                    <div key={i} className="h-10 px-5 flex items-center gap-3">
+                                        <div className="size-4 rounded-full bg-slate-100" />
+                                        <div className="h-3 w-64 bg-slate-100 rounded animate-pulse" />
+                                    </div>
+                                ))}
+                            </div>
+                        ) : (d?.recent_activity?.length ?? 0) === 0 ? (
+                            <EmptyBlock
+                                title="Nothing yet"
+                                body={scoped
+                                    ? "Opens, clicks, replies and bounces from the selected campaigns will stream in here."
+                                    : "Opens, clicks, replies and bounces will stream in here as your campaigns send."}
+                            />
+                        ) : (
+                            <div className="divide-y divide-slate-200/60">
+                                {d!.recent_activity.map((a, i) => (
+                                    <ActivityRow key={i} a={a} />
+                                ))}
+                            </div>
+                        )}
+                    </PageBody>
+                </>
+            )}
+        </Page>
+    );
+}
+
+// Marks a section the campaign filter does not narrow, so it never reads as filtered.
+function WorkspaceWide() {
+    return (
+        <span className="text-[10.5px] text-slate-400" title={UNFILTERED_TIP}>
+            Workspace-wide
+        </span>
+    );
+}
+
+function HealthCell({ n, label, tone }: { n: number; label: string; tone: string }) {
+    return (
+        <div>
+            <div className={`font-mono text-[18px] tabular-nums leading-none ${tone}`}>{n}</div>
+            <div className="text-[10px] uppercase tracking-[0.12em] text-slate-400 mt-1">{label}</div>
+        </div>
+    );
+}
+
+const ACTIVITY_TONE: Record<string, { tone: string; verb: string }> = {
+    sent: { tone: "text-slate-500", verb: "Sent to" },
+    opened: { tone: "text-emerald-600", verb: "Opened by" },
+    clicked: { tone: "text-violet-600", verb: "Clicked by" },
+    replied: { tone: "text-amber-600", verb: "Reply from" },
+    bounced: { tone: "text-rose-600", verb: "Bounced" },
+};
+
+function ActivityRow({ a }: { a: RecentActivityItem }) {
+    const meta = ACTIVITY_TONE[a.type] ?? { tone: "text-slate-500", verb: a.type };
+    return (
+        <div className="h-10 px-5 flex items-center gap-3">
+            <ActivityIcon className={`w-3.5 h-3.5 shrink-0 ${meta.tone}`} />
+            <span className="text-[12.5px] text-slate-900 truncate">
+                <span className={meta.tone}>{meta.verb}</span> {a.contact_email}
+                {a.type === "replied" && a.sender_email && (
+                    // The mailbox that emailed them, which a shared reply inbox would otherwise hide.
+                    <span className="text-slate-400" title={`Answers an email sent from ${a.sender_email}`}>
+                        {" "}to {a.sender_email}
+                    </span>
+                )}
+            </span>
+            {a.origin && (
+                <span className="hidden sm:inline-flex min-w-0 max-w-[16rem]">
+                    <OriginBadge
+                        origin={a.origin}
+                        kind={a.type === "clicked" ? "click" : "open"}
+                        className="text-[11.5px] text-slate-500"
+                    />
+                </span>
+            )}
+            <span className="text-[11.5px] text-slate-400 truncate hidden md:inline">{a.campaign_name}</span>
+            <span className="ml-auto font-mono text-[10.5px] text-slate-400 tabular-nums shrink-0">
+                <span className="md:hidden">
+                    {new Date(a.timestamp).toLocaleString("en-US", { month: "short", day: "numeric" })}
+                </span>
+                <span className="hidden md:inline">
+                    {new Date(a.timestamp).toLocaleString("en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                </span>
+            </span>
+        </div>
+    );
+}
+
+function RangeTabs({ value, onChange }: { value: Range; onChange: (v: Range) => void }) {
+    const opts: Range[] = ["7d", "30d", "90d"];
+    return (
+        <div className="inline-flex items-center gap-0.5 rounded-md bg-slate-100 p-0.5">
+            {opts.map((o) => (
+                <button
+                    key={o}
+                    onClick={() => onChange(o)}
+                    className={`h-7 px-2.5 rounded text-[12px] font-medium transition-colors ${
+                        value === o ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-900"
+                    }`}
+                >
+                    {o}
+                </button>
+            ))}
+        </div>
+    );
+}
+
+function ErrorState({ onRetry, isRefetching }: { onRetry: () => void; isRefetching: boolean }) {
+    return (
+        <div className="px-5 py-12 text-center">
+            <div className="mx-auto mb-3 size-8 rounded-md bg-rose-50 text-rose-600 flex items-center justify-center">
+                <AlertTriangleIcon className="w-4 h-4" />
+            </div>
+            <p className="text-[12.5px] text-slate-900 font-medium">Couldn't load analytics</p>
+            <p className="text-[11.5px] text-slate-500 mt-1 max-w-[44ch] mx-auto leading-relaxed">
+                The request failed. The backend may be down or returning an error.
+            </p>
+            <button
+                type="button"
+                onClick={onRetry}
+                disabled={isRefetching}
+                className="mt-4 h-7 px-2.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white text-[12px] font-medium inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+            >
+                {isRefetching ? <Loader2Icon className="w-3 h-3 animate-spin" /> : <RefreshCcwIcon className="w-3 h-3" />}
+                Try again
+            </button>
+        </div>
+    );
+}

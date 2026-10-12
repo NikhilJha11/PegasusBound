@@ -1,0 +1,369 @@
+---
+import '../styles/global.css';
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+
+interface Props {
+  title: string;
+  description?: string;
+  ogImage?: string;
+  /** Real pixel size of ogImage; scrapers render the card before fetching it. */
+  ogImageWidth?: number;
+  ogImageHeight?: number;
+  ogImageAlt?: string;
+  /** og:type — 'website' for most pages, 'article' for Learn essays */
+  ogType?: string;
+  /** Extra structured data injected per-page (e.g. BlogPosting, SoftwareApplication) */
+  jsonLd?: Record<string, unknown> | Record<string, unknown>[];
+  noIndex?: boolean;
+  /** Toggle "marketing chrome" header/footer */
+  bare?: boolean;
+}
+
+const {
+  title,
+  description = 'Pegasusbound is the deliverability platform for cold email. Warm your inboxes, send at scale, keep your reputation clean.',
+  ogImage = '/og-image.jpg',
+  ogImageWidth = 1920,
+  ogImageHeight = 1008,
+  ogImageAlt = 'The Pegasusbound dashboard, showing the unified inbox across connected mailboxes',
+  ogType = 'website',
+  jsonLd,
+  noIndex = false,
+  bare = false,
+} = Astro.props;
+
+const extraJsonLd = jsonLd ? (Array.isArray(jsonLd) ? jsonLd : [jsonLd]) : [];
+
+// Cookieless analytics, hosted-only. Unset means no script tag is emitted at
+// all: this is a build-time variable, so a build without it produces a site
+// with no analytics code in it, not a site that decides at runtime.
+const posthogKey = import.meta.env.PUBLIC_POSTHOG_KEY ?? '';
+const posthogHost = import.meta.env.PUBLIC_POSTHOG_HOST ?? 'https://us.i.posthog.com';
+// Where the PostHog app itself lives, as opposed to where events are sent.
+// They differ whenever the host above is a reverse proxy, and without this the
+// SDK builds toolbar links against the proxy, which does not serve the app.
+const posthogUiHost = import.meta.env.PUBLIC_POSTHOG_UI_HOST ?? 'https://us.posthog.com';
+
+const siteOrigin = (Astro.site ?? new URL('https://pegasusbound.com')).toString().replace(/\/$/, '');
+const canonical = new URL(Astro.url.pathname, Astro.site ?? 'https://pegasusbound.com').toString();
+const ogImageAbsolute = new URL(ogImage, Astro.site ?? 'https://pegasusbound.com').toString();
+// Blog covers are .webp; declaring them as jpeg makes some scrapers skip the card.
+const ogImageType = ogImage.endsWith('.webp')
+  ? 'image/webp'
+  : ogImage.endsWith('.png')
+    ? 'image/png'
+    : 'image/jpeg';
+
+// Schema.org Organization payload, sourced from the real company record.
+const organizationJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'Organization',
+  '@id': `${siteOrigin}#org`,
+  name: 'Pegasusbound',
+  legalName: 'Mindroot Ltd',
+  url: siteOrigin,
+  logo: `${siteOrigin}/web-app-manifest-512x512.png`,
+  image: `${siteOrigin}/og-image.jpg`,
+  description,
+  email: 'team@pegasusbound.com',
+  foundingDate: '2024',
+  address: {
+    '@type': 'PostalAddress',
+    streetAddress: '71-75 Shelton Street',
+    addressLocality: 'London',
+    addressRegion: 'England',
+    postalCode: 'WC2H 9JQ',
+    addressCountry: 'GB',
+  },
+  contactPoint: [
+    {
+      '@type': 'ContactPoint',
+      contactType: 'customer support',
+      email: 'team@pegasusbound.com',
+      availableLanguage: ['en'],
+    },
+  ],
+  identifier: 'Companies House 16543299',
+  sameAs: [
+    'https://github.com/pegasusbound/pegasusbound',
+  ],
+};
+
+const websiteJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'WebSite',
+  name: 'Pegasusbound',
+  url: siteOrigin,
+  publisher: { '@id': `${siteOrigin}#org` },
+};
+---
+<!doctype html>
+<html lang="en" class="bg-background text-foreground">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="generator" content={Astro.generator} />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Favicons: rounded sky chip variants generated from the social avatar.
+         Sized PNGs are preferred by modern browsers; the .ico is a legacy
+         fallback for older clients that still poke /favicon.ico. -->
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="48x48" href="/favicon-48x48.png" />
+    <link rel="icon" type="image/png" sizes="96x96" href="/favicon-96x96.png" />
+    <link rel="shortcut icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="apple-mobile-web-app-title" content="Pegasusbound" />
+    <meta name="application-name" content="Pegasusbound" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="theme-color" content="#0284c7" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#075985" media="(prefers-color-scheme: dark)" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="format-detection" content="telephone=no" />
+
+    <!-- Open Graph -->
+    <meta property="og:type" content={ogType} />
+    <meta property="og:site_name" content="Pegasusbound" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:image" content={ogImageAbsolute} />
+    <meta property="og:image:secure_url" content={ogImageAbsolute} />
+    <meta property="og:image:type" content={ogImageType} />
+    <meta property="og:image:width" content={String(ogImageWidth)} />
+    <meta property="og:image:height" content={String(ogImageHeight)} />
+    <meta property="og:image:alt" content={ogImageAlt} />
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:site" content="@pegasusbound" />
+    <meta name="twitter:creator" content="@pegasusbound" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImageAbsolute} />
+    <meta name="twitter:image:alt" content={ogImageAlt} />
+
+    <!-- Crawler hints -->
+    <meta name="robots" content={noIndex ? 'noindex,nofollow' : 'index,follow,max-image-preview:large,max-snippet:-1'} />
+    <meta name="googlebot" content={noIndex ? 'noindex,nofollow' : 'index,follow,max-image-preview:large,max-snippet:-1'} />
+
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <link rel="alternate" type="application/rss+xml" title="Pegasusbound Blog" href="/blog/rss.xml" />
+
+    <!-- Structured data: Organization + WebSite (+ optional per-page schema) -->
+    <script type="application/ld+json" is:inline set:html={JSON.stringify(organizationJsonLd)} />
+    <script type="application/ld+json" is:inline set:html={JSON.stringify(websiteJsonLd)} />
+    {extraJsonLd.map((schema) => (
+      <script type="application/ld+json" is:inline set:html={JSON.stringify(schema)} />
+    ))}
+    <!--
+      Cookieless analytics. Nothing is written to this browser: no cookie, no
+      localStorage, no sessionStorage, and so no consent banner. The visitor is
+      derived on PostHog's side from a daily-rotated salt plus IP, root domain
+      and user agent, and the salt is deleted at the end of the day. That only
+      holds if nobody is ever identified, which is what person_profiles:
+      'never' enforces.
+
+      Everything that works without a stored session is on: pageviews and
+      pageleaves with scroll depth, autocapture, heatmaps, rage and dead
+      clicks, web vitals and exceptions, with the country resolved from the
+      request on PostHog's side. Session replay is the one thing that cannot
+      run here: the SDK has no session manager in cookieless mode, and a
+      session needs a cookie, which needs a consent banner. The dashboard
+      records sessions; this site counts.
+
+      The dashboard identifies the person on sign-in, and the acquisition
+      parameters this page carries into the signup link (below) land on that
+      person from the server, so where a customer came from survives the
+      daily salt rotation without anything being stored in this browser.
+    -->
+    {posthogKey && (
+      <script is:inline define:vars={{ posthogKey, posthogHost, posthogUiHost }}>
+        !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug getPageViewId captureTraceFeedback captureTraceMetric".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
+        window.posthog.init(posthogKey, {
+          api_host: posthogHost,
+          ui_host: posthogUiHost,
+          cookieless_mode: 'always',
+          person_profiles: 'never',
+          autocapture: true,
+          capture_pageview: true,
+          capture_pageleave: true,
+          capture_dead_clicks: true,
+          capture_heatmaps: true,
+          rageclick: true,
+          capture_performance: { web_vitals: true },
+          capture_exceptions: true,
+          disable_session_recording: true,
+          respect_dnt: false,
+          // Browser noise the window error handler reports with no stack and
+          // no bug behind it: "Script error." is what a cross-origin script is
+          // flattened to, and the ResizeObserver notice is a benign scheduling
+          // message the spec requires browsers to fire. Between them they were
+          // the two largest issues in error tracking, all of it from this page,
+          // which is what buried the real ones. The dashboard and the admin
+          // panel already drop the same three.
+          before_send: function (event) {
+            if (!event || event.event !== '$exception') return event;
+            var noise = [
+              'Script error.',
+              'ResizeObserver loop completed with undelivered notifications.',
+              'ResizeObserver loop limit exceeded',
+            ];
+            // A link scanner's embedded browser (Outlook Safe Links and the like)
+            // rejects with this while it walks the page; it is not our code.
+            var scanner = 'Object Not Found Matching Id:';
+            var isNoise = function (v) {
+              return typeof v === 'string' && (noise.indexOf(v.trim()) !== -1 || v.indexOf(scanner) !== -1);
+            };
+            var isSdkTimeout = function (type, value) {
+              return type === 'AbortError' && typeof value === 'string' && value.indexOf('PostHog request timed out') === 0;
+            };
+            var exceptions = event.properties && event.properties.$exception_list;
+            if (Array.isArray(exceptions)) {
+              for (var i = 0; i < exceptions.length; i++) {
+                var value = exceptions[i] && (exceptions[i].value || exceptions[i].$exception_value);
+                if (isNoise(value)) return null;
+                var type = exceptions[i] && (exceptions[i].type || exceptions[i].$exception_type);
+                if (isSdkTimeout(type, value)) return null;
+              }
+            }
+            var message = event.properties && event.properties.$exception_message;
+            if (isNoise(message)) return null;
+            // Keep accepting flattened payloads while cached SDK chunks are
+            // still in browsers during a rolling release.
+            var values = event.properties && event.properties.$exception_values;
+            var types = event.properties && event.properties.$exception_types;
+            if (!Array.isArray(values)) return event;
+            for (var i = 0; i < values.length; i++) {
+              if (isNoise(values[i])) return null;
+              if (Array.isArray(types) && isSdkTimeout(types[i], values[i])) return null;
+            }
+            return event;
+          },
+        });
+        window.posthog.register({ service: 'site' });
+      </script>
+    )}
+    <!--
+      Carry where a visitor came from through to the dashboard, in the query
+      string and nowhere else: the first page they landed on (wb_lp), the
+      external site that sent them (wb_ref, a bare host) and any UTM tags. The
+      dashboard reads them at signup, including a Google or SSO signup started
+      from its login page, and the backend records them once on the new
+      organization. Nothing is stored in this browser.
+
+      First touch wins: once a page carries these, links to other pages on
+      this site carry them on, so a visitor who lands on a post from a
+      campaign and signs up from the pricing page is still attributed to it.
+      The landing path also survives internal navigation without a referrer.
+
+      Done here rather than in each CTA because there are dozens of these
+      links across the site and a new one should not have to remember.
+    -->
+    <script is:inline>
+      (function () {
+        var DASHBOARD_HOST = 'app.pegasusbound.com';
+        var UTM = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+
+        // This script sits in <head>, so the anchors it rewrites do not exist
+        // yet. Wait for the parsed document before touching any of them.
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', decorate);
+        } else {
+          decorate();
+        }
+        // Hydrated components may add or replace links after DOMContentLoaded.
+        ['click', 'auxclick', 'contextmenu'].forEach(function (name) {
+          document.addEventListener(name, function (event) {
+            var link = event.target && event.target.closest && event.target.closest('a[href]');
+            if (link) decorateLink(link);
+          }, true);
+        });
+
+        function acquisition() {
+          var params = new URLSearchParams(location.search);
+          var carried = new URLSearchParams();
+
+          UTM.forEach(function (name) {
+            var value = params.get(name);
+            if (value && value.trim()) carried.set(name, value.trim().slice(0, 255));
+          });
+
+          // A wb_ value already on this URL came from an earlier page and wins.
+          var landing = params.get('wb_lp');
+          var path = location.pathname;
+          if (landing && landing.charAt(0) === '/' && landing.charAt(1) !== '/') {
+            try {
+              var landingUrl = new URL(landing, location.origin);
+              if (landingUrl.origin === location.origin) path = landingUrl.pathname;
+            } catch (e) { /* Keep the current path if the carried path is invalid. */ }
+          }
+          carried.set('wb_lp', path.slice(0, 255));
+
+          var ref = params.get('wb_ref');
+          ref = externalHost(ref);
+          if (!ref && document.referrer) ref = externalHost(document.referrer);
+          if (ref) carried.set('wb_ref', ref.slice(0, 255));
+          return carried;
+        }
+
+        function externalHost(value) {
+          if (!value) return '';
+          try {
+            var host = new URL(value.indexOf('://') !== -1 ? value : 'https://' + value).hostname.toLowerCase();
+            return host === location.hostname || host === 'pegasusbound.com' || host.endsWith('.pegasusbound.com') ? '' : host;
+          } catch (e) { return ''; }
+        }
+
+        function decorateLink(link) {
+          var url;
+          try {
+            url = new URL(link.href, location.href);
+          } catch (e) {
+            return;
+          }
+          if (url.protocol !== 'https:' && url.protocol !== 'http:') return;
+          var toDashboard = url.hostname === DASHBOARD_HOST;
+          var toPage = url.origin === location.origin && !/\.[a-z0-9]+$/i.test(url.pathname) &&
+            (url.pathname !== location.pathname || url.search !== location.search);
+          if (!toDashboard && !toPage) return;
+          acquisition().forEach(function (value, name) {
+            url.searchParams.set(name, value);
+          });
+          link.href = url.toString();
+        }
+
+        function decorate() {
+          document.querySelectorAll('a[href]').forEach(decorateLink);
+        }
+      })();
+    </script>
+    <!-- Phone diagnostics: ?noshell / ?noanim switch heavy subsystems off (global.css). -->
+    <script is:inline>
+      var diagParams = new URLSearchParams(location.search);
+      document.documentElement.dataset.diag = ['noshell', 'noanim'].filter(function (f) { return diagParams.has(f); }).join(' ');
+    </script>
+  </head>
+  <body class="min-h-screen flex flex-col antialiased">
+    {!bare && <Header />}
+    <main class="relative flex-1">
+      <!-- Faint guide lines down both sides of the content tie every section
+           of a page into one column. -->
+      {!bare && (
+        <div aria-hidden="true" class="pointer-events-none absolute inset-0 z-[5] hidden md:block">
+          <div class="container-page h-full"><div class="h-full border-x border-slate-900/[0.06] md:-mx-6"></div></div>
+        </div>
+      )}
+      <slot />
+    </main>
+    {!bare && <Footer />}
+  </body>
+</html>

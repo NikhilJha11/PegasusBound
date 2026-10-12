@@ -1,0 +1,199 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import PillarPosts from '../components/PillarPosts.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import PlacementHeroScene from '../components/scenes/deliverability/PlacementHeroScene.astro';
+import SendersScene from '../components/scenes/deliverability/SendersScene.astro';
+import DomainsScene from '../components/scenes/deliverability/DomainsScene.astro';
+import AdvisorScene from '../components/scenes/deliverability/AdvisorScene.astro';
+import SuppressionScene from '../components/scenes/deliverability/SuppressionScene.astro';
+import HealthScene from '../components/scenes/deliverability/HealthScene.astro';
+
+// Defaults from internal/config/constants.go; health policy from CLAUDE.md;
+// placement tests, the Advisor, sending behavior and suppression from
+// docs/content/docs/guides/*.mdx.
+
+const posture = [
+  { stage: 'New mailbox', range: '10 to 20 a day', note: 'The first weeks are for reputation, not pipeline.' },
+  { stage: 'Proven', range: '30 to 50 a day', note: 'The normal range for a healthy cold mailbox.' },
+  { stage: 'Above 50', range: 'with a reason', note: 'Only on clean complaint and bounce numbers. The dashboard warns past 100.' },
+];
+
+const faq: [string, string][] = [
+  ['Is deliverability tracked per mailbox or per account?', 'Per mailbox. Each one has its own cap, gap and health, so one account can hold mailboxes in very different states at once, and a struggling mailbox never drags the others down.'],
+  ['Why is the default cap 50 a day?', 'It is the top of the range most cold mailboxes can hold without drawing provider attention. You can raise it for a mailbox with clean numbers, up to 5,000, and the dashboard warns you past 100. More volume should come from more healthy mailboxes, not from pushing one harder.'],
+  ['What happens when a mailbox starts landing in spam?', 'At 10% spam placement it is put on watch and warmup slows; at 20% warmup and cold sending both drop to half. It lifts on its own once placement recovers. Complaints and bounces are what take a mailbox out of the warmup pool.'],
+  ['How does suppression work across campaigns?', 'Suppression covers the whole workspace. Once an address bounces, complains, unsubscribes or asks to be removed, every campaign skips it from then on.'],
+  ['Which records does Pegasusbound check?', 'SPF and DMARC on each sending domain, with the exact record to publish when one is missing, and whether a mailbox tracks clicks on its own verified domain rather than a shared one.'],
+  ['Do you guarantee the inbox?', 'No, and be wary of anyone who does. Placement also depends on your content, your list and your domain’s history. What Pegasusbound controls is how each mailbox sends, how its reputation is watched, and how fast it is slowed down when something slips.'],
+];
+
+const link = 'group mt-6 inline-flex items-center gap-2 text-[16px] md:text-[17px] text-[color:var(--brand)] hover:text-[color:var(--brand-strong)]';
+const chevron = '<polyline points="9 18 15 12 9 6" />';
+const bands = [
+  { state: 'Watch', spam: '10%', complaints: '0.03%', bounces: '–', action: 'Lower warmup volume, wider spacing' },
+  { state: 'Throttled', spam: '20%', complaints: '–', bounces: '–', action: 'Half volume for warmup and cold sending' },
+  { state: 'Quarantined', spam: '–', complaints: '0.10%', bounces: '5%', action: 'Out of the pool for 7 days, cold sending paused' },
+  { state: 'Blocked', spam: '–', complaints: '0.30%', bounces: '10%', action: 'Out of the pool for 30 days' },
+];
+---
+<Layout
+  title="Email Deliverability Platform for Cold Email | Pegasusbound"
+  description="Per-mailbox sending limits, inbox placement tests at Gmail, Outlook and Yahoo, SPF and DMARC checks and workspace-wide suppression, so cold email keeps reaching the inbox."
+>
+  <!-- HERO: a centred statement over a finished placement test. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="mx-auto max-w-4xl text-center">
+      <div class="text-[14px] text-slate-500">Deliverability</div>
+      <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+        Know where your email lands before your prospects do.
+      </h1>
+      <p class="mx-auto mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+        Every mailbox sends within its own limits, is judged on its own reputation, and can be tested against real inboxes at Gmail, Outlook and Yahoo. When one starts to slip, Pegasusbound slows it down before the damage spreads.
+      </p>
+      <div class="mt-9 flex flex-wrap items-center justify-center gap-3">
+        <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+          Start free <Icon name="arrowRight" size={14} />
+        </a>
+        <a href="https://docs.pegasusbound.com/guides/placement-tests/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+          How placement tests work
+        </a>
+      </div>
+    </div>
+    <div class="mt-14 md:mt-20">
+      <PlacementHeroScene />
+    </div>
+    <p class="mt-4 text-[13.5px] text-slate-400">A placement test sends your real email from a real mailbox to seed inboxes at Gmail, Google Workspace, Outlook.com, Microsoft 365, Yahoo and iCloud, then reads where every copy landed.</p>
+  </section>
+
+  <!-- ONE MAILBOX AT A TIME: copy beside the Accounts table. -->
+  <Rule class="mt-20" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="One mailbox at a time." title="Every mailbox is its own sender, with its own limits." text="Each mailbox sends at most 50 cold emails a day by default and, with a variable sending plan, keeps its own workday: a start and finish that move by a few minutes each day, a lunch break, and an irregular gap between sends. Spreading volume across many healthy mailboxes is what keeps cold email out of spam." />
+        <dl class="mt-8 divide-y divide-slate-200 border-y border-slate-200">
+          {posture.map((p) => (
+            <div class="grid grid-cols-[1fr_auto] items-baseline gap-x-4 gap-y-1 py-3.5 text-[14.5px] sm:grid-cols-[120px_130px_1fr]">
+              <dt class="text-slate-400">{p.stage}</dt>
+              <dd class="font-medium text-slate-900 text-right sm:text-left">{p.range}</dd>
+              <dd class="col-span-2 leading-[1.5] text-slate-500 sm:col-span-1">{p.note}</dd>
+            </div>
+          ))}
+        </dl>
+        <a href="https://docs.pegasusbound.com/guides/sending-behavior/" class={link}>
+          How sending behavior works
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform group-hover:translate-x-0.5" set:html={chevron} />
+        </a>
+      </div>
+      <SendersScene />
+    </div>
+  </section>
+
+  <!-- SENDING DOMAINS: the domain list, a failing one open. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:gap-16">
+      <div class="lg:order-2">
+        <SectionIntro lead="Sending domains." title="Every domain checked, with the fix spelled out." text="Pegasusbound checks SPF and DMARC on every domain you send from and shows the exact record to publish when one is missing, host and value ready to copy. It also shows whether each domain tracks clicks on its own verified subdomain instead of a host shared with other senders." />
+        <p class="mt-4 max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">
+          DKIM is never called missing, because DNS cannot list a provider's keys. When a domain is flagged, Pegasusbound says where the key goes and which console screen generates it.
+        </p>
+      </div>
+      <div class="lg:order-1">
+        <DomainsScene />
+      </div>
+    </div>
+  </section>
+
+  <!-- ADVISOR: findings and their fixes on the Accounts page. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-end lg:gap-16">
+      <SectionIntro lead="The Advisor." title="It tells you what is wrong, and offers to fix it." />
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500 lg:pb-1">
+        Fixed rules with fixed thresholds watch complaints, bounces, placement, authentication, caps and copy, and stay quiet until there is enough data to be right. Each finding says why it matters and what to do. Where the fix is a setting, you see the exact change before anything is applied, and most changes can be undone.
+      </p>
+    </div>
+    <div class="mt-12">
+      <AdvisorScene />
+    </div>
+  </section>
+
+  <!-- SUPPRESSION: a reply asking to stop, and the list it lands on. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="Suppression." title="Once someone opts out, every campaign knows." text="Suppression covers the whole workspace. A bounce, a complaint, an unsubscribe or a reply asking to stop takes an address out of every campaign at once, including campaigns you create later." />
+        <p class="mt-4 max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">
+          Add customers, partners or a whole domain by hand to keep them out of outreach. Lifting an entry the recipient made themselves asks you to confirm and is written to the audit log.
+        </p>
+      </div>
+      <SuppressionScene />
+    </div>
+  </section>
+
+  <!-- HEALTH: the bands as a table, beside the workspace's mailboxes ranked. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="When a mailbox slips." title="Slowed at 10%, halved at 20%, removed only for misconduct." text="Spam placement slows a mailbox down until it recovers. Complaints and bounces are what take it out of the warmup pool, for 7 or 30 days." />
+    <div class="mt-12 grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div>
+        <!-- A table from sm up; on a phone each band is its own row. -->
+        <div class="hidden sm:block">
+          <table class="w-full text-left text-[14.5px]">
+            <thead>
+              <tr class="border-b border-slate-200 text-[13px] text-slate-400">
+                <th class="py-3 pr-4 font-normal">State</th>
+                <th class="py-3 pr-4 font-normal">Spam placement</th>
+                <th class="py-3 pr-4 font-normal">Complaints</th>
+                <th class="py-3 pr-4 font-normal">Bounces</th>
+                <th class="py-3 font-normal">What happens</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 text-slate-600">
+              {bands.map((r) => (
+                <tr><td class="py-4 pr-4 font-medium text-slate-900">{r.state}</td><td class="py-4 pr-4">{r.spam}</td><td class="py-4 pr-4">{r.complaints}</td><td class="py-4 pr-4">{r.bounces}</td><td class="py-4">{r.action}</td></tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <ul class="divide-y divide-slate-200 border-y border-slate-200 sm:hidden">
+          {bands.map((r) => (
+            <li class="py-4">
+              <div class="flex items-baseline justify-between gap-4">
+                <span class="text-[15.5px] font-medium text-slate-900">{r.state}</span>
+                <span class="text-right text-[13px] text-slate-400">{[r.spam !== '–' && `Spam ${r.spam}`, r.complaints !== '–' && `Complaints ${r.complaints}`, r.bounces !== '–' && `Bounces ${r.bounces}`].filter(Boolean).join(' · ')}</span>
+              </div>
+              <p class="mt-1 text-[14.5px] leading-[1.5] text-slate-500">{r.action}</p>
+            </li>
+          ))}
+        </ul>
+        <p class="mt-5 max-w-xl text-[14px] leading-[1.6] text-slate-400">Placement is judged only at Gmail, Outlook and Yahoo, once a mailbox has 20 verified warmup deliveries in a week.</p>
+        <a href="/warmup/" class="mt-6 inline-flex items-center gap-1.5 text-[15px] font-medium text-slate-900 hover:text-slate-600">
+          How warmup health works <Icon name="arrowRight" size={13} />
+        </a>
+      </div>
+      <HealthScene />
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Deliverability, answered." />
+
+  <PillarPosts
+    title="Read more about deliverability"
+    items={[
+      { kicker: 'Basics', href: '/blog/delivery-rate-is-not-inbox-placement/', title: 'Delivery rate is not inbox placement' },
+      { kicker: 'Authentication', href: '/blog/spf-dkim-dmarc-alignment-cold-email/', title: 'SPF, DKIM and DMARC alignment for cold email' },
+      { kicker: 'Complaints', href: '/blog/complaint-rate-that-gets-you-throttled/', title: 'The complaint rate that gets you throttled' },
+    ]}
+  />
+
+  <CTA photo="reeded-glass" title="Test your next email before it goes out." description="Connect a mailbox, run a placement test, and see where it lands at Gmail, Outlook and Yahoo." />
+</Layout>

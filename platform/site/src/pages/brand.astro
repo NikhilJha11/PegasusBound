@@ -1,0 +1,242 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Logo from '../components/Logo.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import Photo from '../components/Photo.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import Rule from '../components/page/Rule.astro';
+import BrandHeroScene from '../components/scenes/brand/BrandHeroScene.astro';
+import HeaderScene from '../components/scenes/brand/HeaderScene.astro';
+import SocialScene from '../components/scenes/brand/SocialScene.astro';
+import IconScene from '../components/scenes/brand/IconScene.astro';
+import TabScene from '../components/scenes/brand/TabScene.astro';
+import SignatureScene from '../components/scenes/brand/SignatureScene.astro';
+import VoiceScene from '../components/scenes/brand/VoiceScene.astro';
+
+// Every download below is a real file under public/brand.
+const assets = [
+  { label: 'Mark', format: 'SVG', href: '/brand/pegasusbound-mark.svg' },
+  { label: 'Mark, white', format: 'SVG', href: '/brand/pegasusbound-mark-white.svg' },
+  { label: 'Logo', format: 'PNG', href: '/brand/pegasusbound-logo.png' },
+  { label: 'Logo, white', format: 'PNG', href: '/brand/pegasusbound-logo-white.png' },
+  { label: 'Logo, steel', format: 'PNG', href: '/brand/pegasusbound-logo-steel.png' },
+  { label: 'App icon', format: 'PNG', href: '/brand/app-icon.png' },
+  { label: 'Social avatar', format: 'JPG', href: '/brand/social-avatar.jpg' },
+];
+
+const colors = [
+  { name: 'Ink', hex: '#0F172A', use: 'Text, buttons, the mark', dark: true },
+  { name: 'Slate', hex: '#64748B', use: 'Secondary text', dark: true },
+  { name: 'Hairline', hex: '#E2E8F0', use: 'Borders and rules' },
+  { name: 'Paper', hex: '#FFFFFF', use: 'Every surface' },
+  { name: 'Sky', hex: '#0284C7', use: 'Links and live states', dark: true },
+  { name: 'Sky light', hex: '#E0F2FE', use: 'Highlights' },
+];
+
+const voice = [
+  { t: 'Say what it does', b: 'Describe the product in plain words. “Warmup starts at 10 emails a day” beats any adjective.' },
+  { t: 'Keep the defaults conservative', b: 'Fifty emails a day, spaced out across a working day, warmup from ten. We talk about safe sending, not maximum throughput.' },
+  { t: 'Only real numbers', b: 'No invented open rates or customer counts. A number on a page comes from the product or the repository.' },
+  { t: 'Short sentences, no hype', b: 'Write like a person explaining their work to a colleague. Few exclamation marks, fewer em dashes.' },
+];
+
+const dos = ['Give the mark clear space at least its own height on every side.', 'Use the ink mark on white.', 'Use the white mark on dark or busy backgrounds.', 'Use the solid white or ink mark over photography.'];
+const donts = ['Stretch, skew or rotate the mark.', 'Recolour it outside ink and white.', 'Add shadows, glows, outlines or gradients.', 'Combine it with another logo into one lockup.'];
+// Where each download is previewed: the ground it is drawn for.
+const ground: Record<string, string> = {
+  'Mark, white': 'bg-slate-900',
+  'Logo, white': 'bg-slate-900',
+  'Logo, steel': 'bg-slate-100',
+};
+const MARK = 'M140 548C300 462 468 300 616 120L596 292C478 418 326 516 140 548ZM140 640C326 604 498 504 640 352L612 476C490 580 330 638 140 640ZM140 724C318 716 470 656 594 560L566 650C452 722 302 744 140 724Z';
+const mockups = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const mockupsBody = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+---
+<Layout
+  title="Pegasusbound Brand Assets and Guidelines"
+  description="Download the Pegasusbound logo and mark, and find the colours, typography and voice we use across the product and site."
+>
+  <!-- HERO: the copy, then the mark on a slide, a phone and a card. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="flex flex-wrap items-end justify-between gap-8">
+      <div class="max-w-3xl">
+        <div class="text-[14px] text-slate-500">Brand</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">The Pegasusbound brand, ready to use.</h1>
+        <p class="mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">Logos, colours and type for writing about Pegasusbound, building on it, or putting it on a slide. Use them when you refer to Pegasusbound.</p>
+      </div>
+      <a href="#downloads" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">Download assets <Icon name="arrowRight" size={14} class="rotate-90" /></a>
+    </div>
+    <div class="mt-12 md:mt-16"><BrandHeroScene /></div>
+  </section>
+
+  <!-- IN USE: the mark where people actually see it. -->
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-2 lg:items-end lg:gap-20">
+      <h2 class="text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.08]"><span class="text-slate-400">In use.</span> <span class="text-slate-900">One mark, the same everywhere.</span></h2>
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">The product, the site, the social card and the icon all draw the same paper plane. These are the real ones, with the files they use.</p>
+    </div>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-6">
+      <article class="lg:col-span-3">
+        <HeaderScene />
+        <h3 class={mockups}>In the product header</h3>
+        <p class={mockupsBody}>The lockup sits top left of every dashboard page: the ink mark, a 10 px gap and the wordmark in Inter Extra Bold.</p>
+      </article>
+      <article class="lg:col-span-3">
+        <SocialScene />
+        <h3 class={mockups}>On a shared link</h3>
+        <p class={mockupsBody}>A link to pegasusbound.com unfurls with the dashboard on sky, and the avatar is the app icon cropped round.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <IconScene />
+        <h3 class={mockups}>As the app icon</h3>
+        <p class={mockupsBody}>The white mark on sky, from 1024 px down to the favicon.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <TabScene />
+        <h3 class={mockups}>In a browser tab</h3>
+        <p class={mockupsBody}>The favicon is the app icon at 32 px.</p>
+      </article>
+      <article class="md:col-span-2 lg:col-span-2">
+        <SignatureScene />
+        <h3 class={mockups}>In an email footer</h3>
+        <p class={mockupsBody}>Where SVG won’t render, use the PNG logo.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- DOWNLOADS: one row per file, each with its preview. -->
+  <Rule />
+  <section id="downloads" class="container-page scroll-mt-28 py-20 md:py-28">
+    <div class="grid gap-12 lg:grid-cols-[1fr_1.4fr] lg:gap-20">
+      <SectionIntro lead="Downloads." title="The files, in the formats you need." text="Use the SVG wherever you can. It stays sharp at any size." />
+      <ul class="divide-y divide-slate-200 border-y border-slate-200">
+        {assets.map((a) => (
+          <li>
+            <a href={a.href} download class="group flex items-center gap-4 py-3">
+              <span class={`flex h-14 w-24 shrink-0 items-center justify-center overflow-hidden rounded-md ring-1 ring-slate-200 ${ground[a.label] ?? 'bg-white'}`}>
+                {a.label === 'App icon' || a.label === 'Social avatar'
+                  ? <img src={a.href} alt="" width="40" height="40" loading="lazy" class="size-10 rounded-[9px]" />
+                  : <img src={a.href} alt="" loading="lazy" class={a.format === 'SVG' ? 'h-7 w-auto' : 'h-auto w-[76px]'} />}
+              </span>
+              <span class="flex-1 text-[16px] text-slate-900">{a.label}</span>
+              <span class="inline-flex items-center gap-3">
+                <span class="rounded bg-slate-50 px-2 py-0.5 font-mono text-[12px] text-slate-500 ring-1 ring-slate-200">{a.format}</span>
+                <Icon name="arrowRight" size={14} class="rotate-90 text-slate-300 transition-colors group-hover:text-slate-900" />
+              </span>
+            </a>
+          </li>
+        ))}
+      </ul>
+    </div>
+  </section>
+
+  <!-- COLOUR: large swatches, then the same colours in a piece of the product. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-2 lg:items-end lg:gap-20">
+      <h2 class="text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.08]"><span class="text-slate-400">Colour.</span> <span class="text-slate-900">Mostly ink on white, with a little sky.</span></h2>
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">Black-blue ink carries the text and the buttons. Sky is the one accent, saved for links and anything live.</p>
+    </div>
+    <div class="mt-12 grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      {colors.map((c) => (
+        <div class="overflow-hidden rounded-[6px] ring-1 ring-slate-200">
+          <div class="flex aspect-square items-end p-4" style={`background:${c.hex}`}>
+            <span class={`font-mono text-[12.5px] ${c.dark ? 'text-white/80' : 'text-slate-500'}`}>{c.hex}</span>
+          </div>
+          <div class="bg-white p-4">
+            <div class="text-[15px] font-medium text-slate-900">{c.name}</div>
+            <div class="mt-0.5 text-[13px] text-slate-500">{c.use}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+    <!-- The same six, as the dashboard spends them. -->
+    <div class="mt-3 overflow-hidden rounded-[6px] bg-white ring-1 ring-slate-200">
+      <div class="flex flex-wrap items-center gap-x-6 gap-y-4 px-6 py-5">
+        <span class="inline-flex h-8 items-center gap-1.5 rounded-md bg-sky-600 px-3 text-[13px] font-medium text-white"><Icon name="plus" size={13} />Add account</span>
+        <span class="inline-flex h-8 items-center rounded-md border border-slate-200 px-3 text-[13px] font-medium text-slate-700">Sending domains</span>
+        <span class="inline-flex items-center gap-1.5 text-[12px] font-medium uppercase tracking-[0.08em] text-sky-700"><span class="size-1.5 rounded-full bg-sky-500 animate-pulse"></span>Live</span>
+        <span class="inline-flex h-6 items-center rounded-md bg-sky-50 px-2 text-[12px] font-medium text-sky-700">3 replies</span>
+        <span class="text-[14px] font-medium text-slate-900">alex@northwind.dev</span>
+        <span class="text-[13px] text-slate-500">Google Workspace</span>
+        <span class="ml-auto font-mono text-[12px] text-slate-400">#0284C7 · #0F172A · #64748B · #E2E8F0</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- TYPE: a specimen. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-12 lg:grid-cols-[1fr_1.4fr] lg:gap-20">
+      <SectionIntro lead="Type." title="Inter, set tight and medium." text="Headings use Inter at medium weight with tight letter spacing. Body text is Inter regular in slate. Code and numbers that line up use the system monospace." />
+      <div class="rounded-[6px] bg-white p-8 ring-1 ring-slate-200 md:p-10">
+        <div class="text-[64px] md:text-[88px] font-medium tracking-[-0.05em] leading-none text-slate-900">Aa</div>
+        <div class="mt-8 text-[28px] font-medium tracking-[-0.04em] leading-tight text-slate-900">Cold email that lands in the inbox.</div>
+        <p class="mt-4 max-w-md text-[16px] leading-[1.65] text-slate-500">Warmup starts at 10 emails a day and adds one a day up to 40, so every mailbox earns its reputation before it sends.</p>
+        <div class="mt-6 font-mono text-[14px] text-slate-600">50 a day · 40 warmup · 0.10%</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- VOICE: the rules beside a sentence the product actually writes. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[minmax(0,0.85fr)_minmax(0,1fr)] lg:gap-16">
+      <div>
+        <SectionIntro lead="Voice." title="How we write about Pegasusbound." />
+        <div class="mt-10 space-y-8">
+          {voice.map((v) => (
+            <div>
+              <h3 class="text-[19px] font-medium text-slate-900">{v.t}</h3>
+              <p class="mt-2 text-[16px] leading-[1.65] text-slate-500">{v.b}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+      <VoiceScene />
+    </div>
+  </section>
+
+  <!-- USAGE: the mark, used well and badly. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="Using the mark." title="A few rules, shown." />
+    <div class="mt-12 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {dos.map((d, i) => (
+        <figure>
+          <div class={`relative flex aspect-[4/3] items-center justify-center overflow-hidden rounded-[6px] ring-1 ring-slate-200 ${i === 2 ? 'bg-slate-900' : 'bg-white'}`}>
+            {i === 3 && <Photo name="paint-blue" sizes="(min-width: 1024px) 25vw, 50vw" class="absolute inset-0 h-full w-full object-cover" />}
+            {i === 0 ? (
+              <span class="relative inline-flex p-[52px] outline-1 outline-dashed outline-sky-400 bg-sky-50/40">
+                <svg viewBox="0 0 746 764" class="w-[52px] text-slate-900" fill="currentColor"><path d={MARK} /></svg>
+              </span>
+            ) : (
+              <span class={`relative inline-flex items-center gap-2.5 ${i >= 2 ? 'text-white' : 'text-slate-900'}`}><Logo class="w-10 h-10" /><span class="text-[28px] font-extrabold tracking-tight">Pegasusbound</span></span>
+            )}
+            <span class="absolute left-3 top-3 inline-flex size-6 items-center justify-center rounded-full bg-emerald-500 text-white"><Icon name="check" size={13} /></span>
+          </div>
+          <figcaption class="mt-3 text-[14.5px] leading-[1.5] text-slate-600">{d}</figcaption>
+        </figure>
+      ))}
+      {donts.map((d, i) => (
+        <figure>
+          <div class="relative flex aspect-[4/3] items-center justify-center overflow-hidden rounded-[6px] bg-white ring-1 ring-slate-200">
+            {i === 0 && <span class="inline-flex text-slate-900" style="transform:scaleX(1.7) skewX(-12deg)"><Logo class="w-14 h-14" /></span>}
+            {i === 1 && <span class="inline-flex" style="color:#f97316"><Logo class="w-14 h-14" /></span>}
+            {i === 2 && <span class="inline-flex text-slate-900" style="filter:drop-shadow(0 8px 10px rgba(14,165,233,0.75)) drop-shadow(0 0 14px rgba(14,165,233,0.6))"><Logo class="w-14 h-14" /></span>}
+            {i === 3 && (
+              <span class="inline-flex items-center gap-3 text-slate-900">
+                <Logo class="w-12 h-12" /><span class="text-[22px] font-light text-slate-300">+</span><span class="inline-flex size-12 items-center justify-center rounded-full bg-slate-200 text-[11px] font-semibold text-slate-500">LOGO</span>
+              </span>
+            )}
+            <span class="absolute left-3 top-3 inline-flex size-6 items-center justify-center rounded-full bg-rose-500 text-white"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></span>
+          </div>
+          <figcaption class="mt-3 text-[14.5px] leading-[1.5] text-slate-600">Don’t {d.charAt(0).toLowerCase() + d.slice(1)}</figcaption>
+        </figure>
+      ))}
+    </div>
+  </section>
+
+  <CTA photo="paint-blue" title="Writing about Pegasusbound?" description="If you need something that isn’t here, or want a quote or a product walkthrough, email the team." primaryLabel="Email us" primaryHref="mailto:team@pegasusbound.com" secondaryLabel="Read about us" secondaryHref="/about/" />
+</Layout>

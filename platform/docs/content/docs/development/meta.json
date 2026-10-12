@@ -1,0 +1,32 @@
+{
+  "title": "Development",
+  "description": "Self-host, deploy, and develop Pegasusbound",
+  "root": true,
+  "pages": [
+    "---Self-hosting---",
+    "install",
+    "deployment-guide",
+    "bare-metal",
+    "split-deployment",
+    "first-run",
+    "accounts-and-access",
+    "admin-panel",
+    "pegasusboundctl",
+    "data-control",
+    "configuration",
+    "warmup-generation",
+    "send-safety",
+    "whole-domain-connect",
+    "slack-app",
+    "instance-health",
+    "operator-notifications",
+    "updates",
+    "troubleshooting",
+    "---Development---",
+    "local-development",
+    "sandbox",
+    "---Reference---",
+    "architecture",
+    "events"
+  ]
+}

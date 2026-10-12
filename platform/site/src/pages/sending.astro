@@ -1,0 +1,193 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import PillarPosts from '../components/PillarPosts.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import WorkdayScene from '../components/scenes/sending/WorkdayScene.astro';
+import RangesScene from '../components/scenes/sending/RangesScene.astro';
+import ClocksScene from '../components/scenes/sending/ClocksScene.astro';
+import PathScene from '../components/scenes/sending/PathScene.astro';
+import VolumeScene from '../components/scenes/sending/VolumeScene.astro';
+
+// Behaviour from docs/content/docs/guides/sending-behavior.mdx, campaigns.mdx
+// and the worker topology in CLAUDE.md.
+
+const heroStats = [
+  { v: '28 to 32', k: 'cold emails a day' },
+  { v: '5 to 9', k: 'an hour, at most' },
+  { v: '90 to 420s', k: 'between two emails' },
+];
+
+const ranges = [
+  ['Working days', 'Monday to Friday, for warmup and cold mail alike'],
+  ['Start of the day', 'Somewhere between 09:03 and 09:27'],
+  ['End of the day', 'Somewhere between 17:18 and 17:56'],
+  ['Lunch break', 'Starts between 12:00 and 13:30, lasts 30 to 60 minutes'],
+];
+
+const timezones = [
+  ['1', 'The contact’s own timezone field, when it holds a real zone such as America/Denver'],
+  ['2', 'The country of their email domain: acme.de reads as Berlin, acme.co.uk as London'],
+  ['3', 'The fallback timezone you choose, for everyone else'],
+];
+
+const path = [
+  { t: 'Signed in, not relayed', d: 'Google mailboxes send through the Gmail API, Microsoft mailboxes through Microsoft Graph, and every other host over SMTP.' },
+  { t: 'A familiar address', d: 'Each mailbox stays on the same worker wherever it can, and moves only when that worker goes down, is throttled or runs far over capacity.' },
+  { t: 'An address of your own', d: 'On Business and above, your mailboxes sign in from an address no other customer uses.' },
+];
+
+const limits = [
+  { v: '50', k: 'cold emails a day per mailbox by default, and the dashboard warns past 100' },
+  { v: '10 min', k: 'between two sends from one mailbox on a fixed schedule' },
+  { v: '~30', k: 'a day on a newly connected mailbox’s rolled plan' },
+  { v: '5', k: 'cold emails a day at most while a mailbox is still warming' },
+];
+
+const faq: [string, string][] = [
+  ['Why randomise sending at all?', 'A mailbox that sends exactly 40 emails at exactly 10-minute intervals from 09:00:00 sharp looks like a machine. Varying the workday, the breaks and the spacing makes it look like the person whose mailbox it is.'],
+  ['Can this make a mailbox send more than its cap?', 'No. The workday can only lower volume or delay a send. A mailbox capped at 50 that rolls 31 for the day sends at most 31.'],
+  ['Does warmup follow the same workday?', 'Yes. Warmup keeps the same days, hours and lunch break, so warmup mail never goes out at 3am from a mailbox that keeps office hours. It has its own ramp and doesn’t eat into the cold budget.'],
+  ['Can I send in each recipient’s timezone?', 'Yes. Send-time optimization holds each email until the recipient’s local clock reaches the hours you choose. It reads the contact’s timezone field first, then the country of their email domain, then a fallback you set.'],
+  ['Do my mailboxes send from your servers?', 'Your mailboxes send through their own providers, Google, Microsoft or your SMTP host. Pegasusbound’s workers sign in to those providers for you, and each mailbox is kept on the same worker wherever possible, because a stable sign-in address is what providers trust.'],
+  ['Does the worker’s IP address affect my deliverability?', 'Recipients never see it. Your provider delivers the email from its own servers, so spam filters judge your mailbox and your domain. The worker’s address only matters to your provider when it signs in, which is why mailboxes are not moved between workers without a reason.'],
+];
+---
+<Layout
+  title="Cold Email Sending That Looks Human | Pegasusbound"
+  description="Give every mailbox a human workday: randomised start and finish times, a lunch break, varied spacing and hourly limits in its own timezone, with per-mailbox caps and recipient-timezone sending."
+>
+  <!-- HERO: copy beside the mailbox's Sending tab, today's workday open. -->
+  <section class="container-page pt-14 md:pt-20">
+    <div class="grid items-center gap-12 lg:grid-cols-[0.85fr_1.15fr] lg:gap-14">
+      <div>
+        <div class="text-[14px] text-slate-500">Sending</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[60px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+          Every mailbox keeps a workday, like the person who owns it.
+        </h1>
+        <p class="mt-6 max-w-xl text-[17px] md:text-[18px] leading-[1.55] text-slate-500">
+          Each mailbox starts at a slightly different time every day, takes a lunch break, spaces its emails unevenly and stops before evening, all in its own timezone. Volume comes from more mailboxes, never from pushing one harder.
+        </p>
+        <div class="mt-8 flex flex-wrap items-center gap-3">
+          <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+            Start free <Icon name="arrowRight" size={14} />
+          </a>
+          <a href="https://docs.pegasusbound.com/guides/sending-behavior/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+            Read the guide
+          </a>
+        </div>
+        <div class="mt-12 grid max-w-xl grid-cols-3 border-y border-slate-200">
+          {heroStats.map((s, i) => (
+            <div class={`py-4 ${i ? 'border-l border-slate-200 pl-4 md:pl-5' : 'pr-4'}`}>
+              <p class="text-[19px] sm:text-[22px] md:text-[26px] font-light leading-none tracking-[-0.02em] text-slate-900 tabular-nums">{s.v}</p>
+              <p class="mt-2 text-[12.5px] md:text-[13.5px] leading-snug text-slate-500">{s.k}</p>
+            </div>
+          ))}
+        </div>
+        <p class="mt-3 text-[13px] text-slate-400">The defaults for a newly connected mailbox. Change any of them.</p>
+      </div>
+      <WorkdayScene />
+    </div>
+  </section>
+
+  <!-- RANGES: the form the day is rolled from. -->
+  <Rule class="mt-20" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1.15fr_1fr] lg:gap-16">
+      <div class="order-2 lg:order-1"><RangesScene /></div>
+      <div class="order-1 lg:order-2">
+        <SectionIntro lead="Ranges, not fixed values." title="A new workday is rolled every morning." text="You set ranges once. Each day the mailbox picks its hours, break, target and spacing from them and keeps to that day, so a retry or a busy campaign never re-rolls it. Edits apply from the next local day." />
+        <dl class="mt-8 max-w-xl divide-y divide-slate-200 border-y border-slate-200">
+          {ranges.map(([k, v]) => (
+            <div class="grid gap-1 py-3.5 sm:grid-cols-[150px_1fr] sm:gap-6">
+              <dt class="text-[15px] font-medium text-slate-900">{k}</dt>
+              <dd class="text-[15px] leading-[1.55] text-slate-500">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- THREE CLOCKS: send-time optimization, and where the calendars overlap. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1fr_1.15fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="Three clocks." title="An email goes out only when every clock agrees." text="The campaign has its sending window, the mailbox has its workday, and with send-time optimization on, the recipient has their own local hours. Pegasusbound waits for the moment all of them allow, and never sends outside them to catch up." />
+        <div class="mt-8 max-w-xl">
+          <div class="text-[13px] text-slate-400">How a recipient’s timezone is worked out</div>
+          <ol class="mt-3 divide-y divide-slate-200 border-y border-slate-200">
+            {timezones.map(([n, v]) => (
+              <li class="flex gap-4 py-3.5">
+                <span class="flex size-6 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[12px] font-medium text-slate-600 tabular-nums">{n}</span>
+                <span class="text-[15px] leading-[1.55] text-slate-600">{v}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      </div>
+      <ClocksScene />
+    </div>
+  </section>
+
+  <!-- THE PATH: who actually delivers the email, wide. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-end gap-6 lg:grid-cols-[1.1fr_1fr] lg:gap-16">
+      <SectionIntro lead="The path." title="Your provider delivers your email, not ours." />
+      <p class="text-[16px] md:text-[18px] leading-[1.6] text-slate-500">Pegasusbound’s workers sign in to your mailbox at Google, Microsoft or your SMTP host and hand the email over. Your provider delivers it from its own servers, so recipients judge your mailbox and your domain, not our infrastructure.</p>
+    </div>
+    <div class="mt-12 md:mt-14">
+      <PathScene />
+    </div>
+    <div class="mt-10 grid gap-8 md:grid-cols-3 md:gap-10">
+      {path.map((p) => (
+        <div class="border-t border-slate-200 pt-5">
+          <h3 class="text-[17px] font-medium tracking-[-0.01em] text-slate-900">{p.t}</h3>
+          <p class="mt-2 text-[15px] leading-[1.6] text-slate-500">{p.d}</p>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <!-- VOLUME: a campaign's day is its mailboxes' days added up. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1.15fr_1fr] lg:gap-16">
+      <div class="order-2 lg:order-1"><VolumeScene /></div>
+      <div class="order-1 lg:order-2">
+        <SectionIntro lead="Volume." title="More mailboxes, never one mailbox pushed harder." text="Every mailbox has its own cap and its own workday, and a campaign’s day is the sum of them. A second healthy mailbox roughly doubles how fast a campaign works through its leads, while each one stays inside its own limits." />
+        <a href="/blog/how-many-mailboxes-and-domains-cold-email/" class="group mt-6 inline-flex items-center gap-2 text-[16px] text-[color:var(--brand)] hover:text-[color:var(--brand-strong)]">
+          How many mailboxes you need
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform group-hover:translate-x-0.5"><polyline points="9 18 15 12 9 6"/></svg>
+        </a>
+      </div>
+    </div>
+    <div class="mt-16 grid grid-cols-2 gap-px border-y border-slate-200 bg-slate-200 lg:grid-cols-4">
+      {limits.map((l, i) => (
+        <div class={`bg-white py-6 pr-5 ${i ? "pl-5" : ""}`}>
+          <p class="text-[32px] md:text-[40px] font-light leading-none tracking-[-0.03em] text-slate-900 tabular-nums">{l.v}</p>
+          <p class="mt-3 max-w-[30ch] text-[14px] leading-snug text-slate-500">{l.k}</p>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Sending, answered." />
+
+  <PillarPosts
+    title="Sending, in more depth"
+    items={[
+      { kicker: 'Limits', href: '/blog/how-many-cold-emails-per-day-per-mailbox/', title: 'How many cold emails can you actually send per day?' },
+      { kicker: 'Planning', href: '/blog/how-many-mailboxes-and-domains-cold-email/', title: 'How many mailboxes and domains do you need?' },
+      { kicker: 'Budgets', href: '/blog/mailbox-budgets-not-server-settings/', title: 'Your send limit is a mailbox budget, not a server setting' },
+    ]}
+  />
+
+  <CTA photo="lake-motion" title="Give your mailboxes a human workday." description="Connect a mailbox and it starts with a sensible workday, ready to change whenever you like." />
+</Layout>

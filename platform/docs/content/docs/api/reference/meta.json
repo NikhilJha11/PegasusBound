@@ -1,0 +1,17 @@
+{
+  "title": "Endpoint reference",
+  "pages": [
+    "mailboxes",
+    "campaigns",
+    "contacts",
+    "unibox",
+    "crm",
+    "analytics",
+    "placement",
+    "api-keys",
+    "webhooks",
+    "integrations",
+    "deliverability-ops",
+    "account-org"
+  ]
+}

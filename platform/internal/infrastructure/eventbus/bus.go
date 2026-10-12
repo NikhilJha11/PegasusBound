@@ -1,0 +1,186 @@
+// Package eventbus is the abstraction over a durable message broker.
+//
+// Two implementations:
+//   - KafkaBus  (Confluent / Apache Kafka — historical default, wraps the
+//     existing internal/infrastructure/kafka producer + consumer)
+//   - NATSBus   (NATS JetStream — self-hostable alternative for single-binary
+//     or small-cluster deployments)
+//
+// The interface is intentionally small. It exposes only what the rest of the
+// codebase needs today (publish-by-key, consumer-group subscribe with manual
+// ack-after-success). Schema-registry / Avro framing remains the caller's
+// concern: this package handles transport only.
+//
+// Topic naming:
+//   - Names use "." as the separator (e.g. "w.<uuid>", "jobs.worker-events").
+//     "." is legal in both Kafka topic names and NATS subjects, so the same
+//     name addresses either backend. A ":" is NOT legal in a Kafka topic name,
+//     so it must never appear in these names.
+//
+// The Subject() helper still normalises any stray ":" to "." in a single place
+// (idempotent for the dotted names callers already produce), so callers can
+// keep using the kafka.GetWorkerTopic / kafka.TopicWorkerEvents constants
+// without caring which backend is wired in.
+package eventbus
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"runtime/debug"
+	"strings"
+	"time"
+
+	"github.com/rs/zerolog/log"
+)
+
+// ErrBusClosed is returned by a publish or subscribe on a bus that has been
+// closed, which is what every in-flight caller sees during shutdown. Callers
+// distinguish it from a broker fault so they do not report a clean stop.
+var ErrBusClosed = errors.New("eventbus: bus closed")
+
+var ErrSubscriptionRebalanced = errors.New("eventbus: subscription rebalanced")
+
+// EventBus is the transport-level interface. Implementations must be safe for
+// concurrent use by multiple goroutines.
+type EventBus interface {
+	// Publish writes a single message to the named topic. The key is used by
+	// the underlying broker for partitioning (Kafka) or as a message-level
+	// hint (NATS); it may be empty when partition affinity does not matter.
+	//
+	// Implementations should treat Publish as best-effort at-least-once.
+	// Callers that need stronger guarantees should publish inside a retry
+	// loop and surface failures upstream.
+	Publish(ctx context.Context, topic, key string, payload []byte) error
+
+	// Subscribe registers a Handler against one or more topics under a named
+	// consumer group. The call blocks until the context is cancelled or a
+	// fatal error occurs. The handler is invoked one message at a time per
+	// subscription. A handler that returns nil signals successful processing
+	// and the message is acked; a non-nil error leaves the message for
+	// redelivery according to the backend's retry policy.
+	Subscribe(ctx context.Context, topics []string, group string, handler Handler) error
+
+	// Close releases any underlying connections. Safe to call multiple times.
+	Close() error
+
+	// Name returns a short identifier ("kafka", "nats") used in admin UI,
+	// startup logs, and audit trails.
+	Name() string
+}
+
+// Handler is the per-message callback invoked by Subscribe. Returning nil acks
+// the message; returning an error leaves it for redelivery.
+type Handler func(ctx context.Context, msg Message) error
+
+type KeyResolver func(ctx context.Context, msg Message) (string, error)
+
+func resolveKey(ctx context.Context, key KeyResolver, msg Message) (value string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("eventbus: key resolver panic on topic %s: %v", msg.Topic, r)
+		}
+	}()
+	return key(ctx, msg)
+}
+
+// KeyedSubscriber preserves resolved-key order while handling independent keys concurrently.
+type KeyedSubscriber interface {
+	SubscribeKeyed(context.Context, []string, string, int, KeyResolver, Handler) error
+}
+
+func SubscribeKeyed(ctx context.Context, bus EventBus, topics []string, group string, lanes int, key KeyResolver, handler Handler) error {
+	if keyed, ok := bus.(KeyedSubscriber); ok {
+		return keyed.SubscribeKeyed(ctx, topics, group, lanes, key, handler)
+	}
+	return bus.Subscribe(ctx, topics, group, handler)
+}
+
+func retrySubscription(ctx context.Context, subscribe func(context.Context) error) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := subscribe(ctx)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, ErrBusClosed) {
+			return err
+		}
+		if errors.Is(err, ErrSubscriptionRebalanced) {
+			log.Debug().Msg("eventbus subscription rebalanced; reopening for replay")
+		} else {
+			log.Warn().Err(err).Msg("eventbus subscription interrupted; reopening for replay")
+		}
+		timer := time.NewTimer(time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// Message is the broker-neutral envelope passed to a Handler. Payload bytes
+// are owned by the bus and must not be retained past the handler call.
+//
+// Topic is reported in the backend's native form ("w.<uuid>" on both Kafka
+// and NATS). Handlers that need to compare against a known topic name should
+// normalise both sides with Subject() rather than relying on byte equality.
+type Message struct {
+	Topic   string
+	Key     string
+	Payload []byte
+	// Attempt is the 1-based delivery count of this message (NATS reports it
+	// from redelivery metadata; Kafka counts retries within a subscription). A
+	// handler that retries by returning an error can read it to know when the
+	// broker is about to stop redelivering and give up cleanly instead.
+	Attempt int
+	// Redelivers is true when a handler error leaves the message for retry.
+	Redelivers bool
+}
+
+// Subject normalises a topic name to the dot-separated form by replacing any
+// ":" with ".". Topic names already use ".", so this is a no-op for them; it
+// remains as a guard against any stray legacy colon name. Idempotent.
+//
+// Exposed so callers that need to address a topic directly through the NATS
+// bus (e.g. tests, admin tools) can produce a valid subject without knowing
+// the substitution rule.
+func Subject(topic string) string {
+	return strings.ReplaceAll(topic, ":", ".")
+}
+
+// invokeHandler runs a Handler and converts a panic into an error. Handlers
+// process payloads produced by other services, so one malformed or unexpected
+// message must not take the whole subscriber process down and stop every
+// organization's event processing. The message is nak'd like any other failure.
+func invokeHandler(ctx context.Context, handler Handler, msg Message) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("eventbus: handler panic on topic %s: %v", msg.Topic, r)
+			log.Error().
+				Str("topic", msg.Topic).
+				Str("key", msg.Key).
+				Bytes("stack", debug.Stack()).
+				Msg("eventbus handler panic recovered")
+		}
+	}()
+	return handler(ctx, msg)
+}
+
+// handlerTimeout is the per-message processing budget shared by both bus
+// backends (matches the worker's historical 30s Receive budget). Override with
+// EVENTBUS_HANDLER_TIMEOUT (a Go duration). Lives here (not in the build-tagged
+// kafka.go) so the always-compiled NATS backend can use it too.
+func handlerTimeout() time.Duration {
+	if v := os.Getenv("EVENTBUS_HANDLER_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return 30 * time.Second
+}

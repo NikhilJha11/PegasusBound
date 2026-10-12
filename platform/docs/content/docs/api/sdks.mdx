@@ -1,0 +1,189 @@
+---
+title: SDKs
+description: Official Pegasusbound client libraries for JavaScript, Python, and Go.
+---
+
+Pegasusbound publishes official, fully typed SDKs for JavaScript and TypeScript, Python, and Go. Each one wraps the same surface: the REST API, the OAuth2 authorization flows, and the realtime gateway. You get typed resources, auto-pagination, automatic retries, and a live event stream without hand-rolling HTTP. All three are open source and track the `v1` API.
+
+## Official libraries
+
+<Cards>
+  <Card title="pegasusbound-js (JavaScript and TypeScript)" href="https://github.com/pegasusbound/pegasusbound-js" />
+  <Card title="pegasusbound-py (Python)" href="https://github.com/pegasusbound/pegasusbound-py" />
+  <Card title="pegasusbound-go (Go)" href="https://github.com/pegasusbound/pegasusbound-go" />
+</Cards>
+
+| Language | Package | Runtime | Realtime |
+| --- | --- | --- | --- |
+| JavaScript and TypeScript | `pegasusbound` (npm) | Node 20+, Bun, Deno, browsers, edge | yes |
+| Python | `pegasusbound` (PyPI) | Python 3.10+, sync and async | yes |
+| Go | `github.com/pegasusbound/pegasusbound-go` | Go 1.23+ | yes |
+
+## Install
+
+<Tabs defaultValue="javascript">
+
+<TabsList>
+  <LangTab lang="javascript" />
+  <LangTab lang="python" />
+  <LangTab lang="go" />
+</TabsList>
+
+<Tab value="javascript">
+
+```bash
+npm install pegasusbound
+```
+
+Also available on pnpm, yarn, and bun (`pnpm add pegasusbound`, `yarn add pegasusbound`, `bun add pegasusbound`). On Node older than 22 the gateway needs a WebSocket: install the optional `ws` peer and the SDK picks it up automatically.
+
+</Tab>
+
+<Tab value="python">
+
+```bash
+pip install pegasusbound
+```
+
+Interactive OAuth2 flows and secure token storage are an optional extra: `pip install "pegasusbound[oauth]"`. Requires Python 3.10+.
+
+</Tab>
+
+<Tab value="go">
+
+```bash
+go get github.com/pegasusbound/pegasusbound-go
+```
+
+Requires Go 1.23+ (the auto-paging iterator uses range-over-func).
+
+</Tab>
+
+</Tabs>
+
+## Quickstart
+
+Create an API key in the dashboard under Settings, expose it as `PEGASUSBOUND_API_KEY`, then:
+
+<Tabs defaultValue="javascript">
+
+<TabsList>
+  <LangTab lang="javascript" />
+  <LangTab lang="python" />
+  <LangTab lang="go" />
+</TabsList>
+
+<Tab value="javascript">
+
+```ts
+import { Pegasusbound } from "pegasusbound";
+
+const pegasusbound = new Pegasusbound({ apiKey: process.env.PEGASUSBOUND_API_KEY });
+
+// List campaigns (auto-paginated)
+for await (const campaign of await pegasusbound.campaigns.list()) {
+  console.log(campaign.id, campaign.name);
+}
+```
+
+</Tab>
+
+<Tab value="python">
+
+```python
+import os
+from pegasusbound import Pegasusbound
+
+client = Pegasusbound(api_key=os.environ["PEGASUSBOUND_API_KEY"])
+
+for key in client.api_keys.list():
+    print(key.name, key.status)
+```
+
+`Pegasusbound()` reads `PEGASUSBOUND_API_KEY` from the environment on its own, and every method has an awaitable twin on `AsyncPegasusbound`.
+
+</Tab>
+
+<Tab value="go">
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	"github.com/pegasusbound/pegasusbound-go"
+)
+
+func main() {
+	client, err := pegasusbound.New(pegasusbound.WithAPIKey("pgsbd_..."))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ctx := context.Background()
+	page, err := client.Campaigns.List(ctx, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for campaign, err := range page.All(ctx) {
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println(campaign.Name)
+	}
+}
+```
+
+</Tab>
+
+</Tabs>
+
+## Authentication
+
+Every SDK takes a bearer credential, and both credential types run through the same permission gates:
+
+- an **API key** for your own scripts (prefixed `pgsbd_`)
+- an **OAuth access token** for apps acting on behalf of a workspace (prefixed `wmat_`)
+
+```ts
+// pegasusbound-js
+new Pegasusbound({ apiKey: "pgsbd_..." });       // API key
+new Pegasusbound({ accessToken: "wmat_..." });   // OAuth access token
+```
+
+```python
+# pegasusbound-py (falls back to PEGASUSBOUND_API_KEY when omitted; any bearer token works)
+Pegasusbound(api_key="pgsbd_...")
+```
+
+```go
+// pegasusbound-go
+pegasusbound.New(pegasusbound.WithAPIKey("pgsbd_..."))
+pegasusbound.New(pegasusbound.WithAccessToken("..."))
+```
+
+For the full authorization-code and client-credentials flows (PKCE and automatic token refresh), see [OAuth](/api/oauth/). For key format, scoping, and rotation, see [Authentication](/api/authentication/).
+
+## What every SDK gives you
+
+- Typed REST resources across the whole API: mailboxes, campaigns, contacts, the unibox, analytics, templates, CRM, integrations, and webhooks.
+- OAuth2 flows built in: authorization-code with PKCE and client-credentials, plus programmatic OAuth application management.
+- A realtime gateway on one resilient WebSocket, with heartbeats, automatic reconnect, and session resume, delivering typed events. See [Realtime](/api/realtime/).
+- Resilience by default: automatic retries with exponential backoff and jitter, `Retry-After` support, and idempotency keys for safe mutation retries.
+- Cursor pagination with auto-paging iterators, so you loop over every record without tracking cursors yourself.
+- Typed errors carrying the `request_id` and a machine-readable code, matchable against named sentinels. See [Error codes](/api/error-codes/).
+- A small footprint: pegasusbound-js and pegasusbound-go ship with zero runtime dependencies.
+
+## No-code and automation
+
+Prefer a visual builder? Pegasusbound also ships a community [n8n](https://n8n.io) node, [`n8n-nodes-pegasusbound`](https://github.com/pegasusbound/n8n-nodes-pegasusbound), and has first-class [Zapier](/guides/zapier/) and [Make](/guides/make/) guides.
+
+## See also
+
+- [API overview](/api/) for the base URL, versioning, and conventions
+- [Authentication](/api/authentication/) and [OAuth](/api/oauth/)
+- [Permissions](/api/permissions/) for the scopes each token can carry
+- [Realtime](/api/realtime/) for the event gateway

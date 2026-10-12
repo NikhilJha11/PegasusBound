@@ -1,0 +1,423 @@
+package handler
+
+import (
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/api/middleware"
+	"github.com/pegasusbound/pegasusbound/internal/app/apikey"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/utils/paging"
+)
+
+// CreateAPIKey creates a new API key for the organization
+// POST /api-keys
+func (h *Handler) CreateAPIKey(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	userID, err := middleware.GetUserUUID(c)
+	if err != nil {
+		errx.JSON(c, errx.ErrUnauthorized)
+		return
+	}
+
+	var data models.CreateAPIKey
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.JSON(c, errx.InvalidBody(err))
+		return
+	}
+	if xerr := h.checkKeyWithinCaller(c, data.Permissions, data.AllowedIPs, data.AllowedEmailAccounts); xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	keyWithSecret, xerr := h.APIKeyService.Create(c.Request.Context(), *orgID, userID, &data)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	keyID := keyWithSecret.ID
+	h.auditOrg(c, models.AuditActionCreate, models.AuditEntityAPIKey, &keyID, nil, map[string]string{"name": keyWithSecret.Name})
+
+	c.JSON(http.StatusCreated, keyWithSecret)
+}
+
+// ListAPIKeys lists all API keys for the organization
+// GET /api-keys
+func (h *Handler) ListAPIKeys(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	var cursor *uuid.UUID
+	if cursorStr := c.Query("cursor"); cursorStr != "" {
+		id, err := paging.DecodeUUID(cursorStr)
+		if err != nil {
+			errx.Handle(c, errx.New(errx.BadRequest, "invalid cursor"))
+			return
+		}
+		cursor = &id
+	}
+
+	limit := 50
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	result, xerr := h.APIKeyService.List(c.Request.Context(), *orgID, limit, cursor)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	c.JSON(http.StatusOK, result)
+}
+
+// GetAPIKey gets a specific API key
+// GET /api-keys/:id
+func (h *Handler) GetAPIKey(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	keyIDStr := c.Param("id")
+	keyID, err := uuid.Parse(keyIDStr)
+	if err != nil {
+		errx.JSON(c, errx.ErrNotFound)
+		return
+	}
+
+	key, xerr := h.APIKeyService.Get(c.Request.Context(), *orgID, keyID)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	c.JSON(http.StatusOK, key)
+}
+
+// UpdateAPIKey updates an API key
+// PATCH /api-keys/:id
+func (h *Handler) UpdateAPIKey(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	keyIDStr := c.Param("id")
+	keyID, err := uuid.Parse(keyIDStr)
+	if err != nil {
+		errx.JSON(c, errx.ErrNotFound)
+		return
+	}
+
+	var data models.UpdateAPIKey
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.JSON(c, errx.InvalidBody(err))
+		return
+	}
+	if xerr := h.checkUpdateWithinCaller(c, *orgID, keyID, &data); xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	key, xerr := h.APIKeyService.Update(c.Request.Context(), *orgID, keyID, &data)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityAPIKey, &keyID, nil, nil)
+
+	c.JSON(http.StatusOK, key)
+}
+
+// RevokeAPIKey revokes an API key
+// DELETE /api-keys/:id
+func (h *Handler) RevokeAPIKey(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	keyIDStr := c.Param("id")
+	keyID, err := uuid.Parse(keyIDStr)
+	if err != nil {
+		errx.JSON(c, errx.ErrNotFound)
+		return
+	}
+
+	reason := c.Query("reason")
+	if reason == "" {
+		reason = "Revoked by user"
+	}
+
+	xerr := h.APIKeyService.Revoke(c.Request.Context(), *orgID, keyID, reason)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionRevoke, models.AuditEntityAPIKey, &keyID, nil, nil)
+
+	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
+}
+
+// DeleteAPIKey permanently removes a revoked or expired API key
+// DELETE /api-keys/:id/permanent
+func (h *Handler) DeleteAPIKey(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	keyIDStr := c.Param("id")
+	keyID, err := uuid.Parse(keyIDStr)
+	if err != nil {
+		errx.JSON(c, errx.ErrNotFound)
+		return
+	}
+
+	if xerr := h.APIKeyService.Delete(c.Request.Context(), *orgID, keyID); xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionDelete, models.AuditEntityAPIKey, &keyID, nil, nil)
+
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// RevokeOwnAPIKey revokes the key the request was made with.
+//
+// Deliberately outside the API_KEYS scope gate: a credential must always be
+// able to end itself. Requiring a privilege to sign out means a read-only key
+// on a laptop someone is handing back stays live, which is the opposite of
+// what a `pegasusbound auth logout` promises.
+func (h *Handler) RevokeOwnAPIKey(c *gin.Context) {
+	keyID := middleware.GetAPIKeyID(c)
+	if keyID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "this endpoint revokes the API key it is called with, and this request did not use one"))
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	reason := c.Query("reason")
+	if reason == "" {
+		reason = "Revoked by the credential itself"
+	}
+	if xerr := h.APIKeyService.Revoke(c.Request.Context(), *orgID, *keyID, reason); xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionRevoke, models.AuditEntityAPIKey, keyID, nil, map[string]string{"self": "true"})
+	c.JSON(http.StatusOK, gin.H{"status": "revoked"})
+}
+
+// checkKeyWithinCaller refuses a key shape the caller could not use itself: a session
+// caller is bounded by its role, a key caller by its own permissions, mailboxes and addresses.
+func (h *Handler) checkKeyWithinCaller(c *gin.Context, perms uint64, ips []string, accounts []uuid.UUID) *errx.Error {
+	if middleware.GetAuthType(c) == middleware.AuthTypeAPIKey {
+		caller, xerr := h.callerAPIKey(c)
+		if xerr != nil {
+			return xerr
+		}
+		return apikey.WithinKey(caller, perms, ips, accounts)
+	}
+	member, xerr := h.callerMember(c)
+	if xerr != nil {
+		return xerr
+	}
+	if perms&^models.APIPermissionsFor(member) != 0 {
+		return errx.NewWithIdentifier(errx.Forbidden, apikey.ErrCodeKeyExceedsCaller,
+			"an API key cannot hold permissions your role in this workspace does not include")
+	}
+	return nil
+}
+
+// checkUpdateWithinCaller bounds a key edit: a session caller by the permissions it sets,
+// a key caller by the whole key the edit leaves behind.
+func (h *Handler) checkUpdateWithinCaller(c *gin.Context, orgID, keyID uuid.UUID, data *models.UpdateAPIKey) *errx.Error {
+	if middleware.GetAuthType(c) != middleware.AuthTypeAPIKey {
+		if data.Permissions == nil {
+			return nil
+		}
+		return h.checkKeyWithinCaller(c, *data.Permissions, nil, nil)
+	}
+	target, xerr := h.APIKeyService.Get(c.Request.Context(), orgID, keyID)
+	if xerr != nil {
+		return xerr
+	}
+	perms, ips, accounts := target.Permissions, target.AllowedIPs, target.AllowedEmailAccounts
+	if data.Permissions != nil {
+		perms = *data.Permissions
+	}
+	if data.AllowedIPs != nil {
+		ips = data.AllowedIPs
+	}
+	if data.AllowedEmailAccounts != nil {
+		accounts = data.AllowedEmailAccounts
+	}
+	return h.checkKeyWithinCaller(c, perms, ips, accounts)
+}
+
+// callerAPIKey loads the API key the request authenticated with.
+func (h *Handler) callerAPIKey(c *gin.Context) (*models.APIKey, *errx.Error) {
+	orgID := middleware.GetOrganizationID(c)
+	keyID := middleware.GetAPIKeyID(c)
+	if orgID == nil || keyID == nil {
+		return nil, errx.ErrForbidden
+	}
+	return h.APIKeyService.Get(c.Request.Context(), *orgID, *keyID)
+}
+
+// ListAPIPermissions lists all available API permissions, with the set the caller may
+// put on a key (grantable) and the set an OAuth app may request (app_scopes).
+// GET /api-keys/permissions
+func (h *Handler) ListAPIPermissions(c *gin.Context) {
+	grantable, xerr := h.apiKeyCeiling(c)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"permissions": models.AllAPIPermissions,
+		"presets": gin.H{
+			"read_only":   models.APIPermReadOnly,
+			"full_access": models.APIPermFullAccess,
+		},
+		"grantable":  grantable,
+		"app_scopes": models.AppGrantableScopes,
+	})
+}
+
+// GetAPIKeyUsageSummary returns the org-level usage strip (active key
+// count, 24h request total, last call timestamp, error rate, avg latency).
+// GET /api-keys/usage/summary
+func (h *Handler) GetAPIKeyUsageSummary(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+	summary, xerr := h.APIKeyService.GetUsageSummary(c.Request.Context(), *orgID)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, summary)
+}
+
+// GetAPIKeyAnalytics returns the request timeseries + endpoint breakdown
+// for a single key (when :id is set) or the whole org (when :id is "all").
+// GET /api-keys/:id/analytics?from=...&to=...&interval=hour|day|minute
+func (h *Handler) GetAPIKeyAnalytics(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	var keyID *uuid.UUID
+	if id := c.Param("id"); id != "" && id != "all" {
+		parsed, err := uuid.Parse(id)
+		if err != nil {
+			errx.JSON(c, errx.ErrNotFound)
+			return
+		}
+		keyID = &parsed
+	}
+
+	from, to := parseAnalyticsRange(c)
+	interval := c.Query("interval")
+
+	analytics, xerr := h.APIKeyService.GetAnalytics(c.Request.Context(), *orgID, keyID, from, to, interval)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, analytics)
+}
+
+// ListAPIKeyUsageLogs returns the recent raw request entries for a single key.
+// GET /api-keys/:id/logs?cursor=...&limit=...
+func (h *Handler) ListAPIKeyUsageLogs(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.JSON(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	keyID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		errx.JSON(c, errx.ErrNotFound)
+		return
+	}
+
+	var cursor *uuid.UUID
+	if cursorStr := c.Query("cursor"); cursorStr != "" {
+		id, err := paging.DecodeUUID(cursorStr)
+		if err != nil {
+			errx.Handle(c, errx.New(errx.BadRequest, "invalid cursor"))
+			return
+		}
+		cursor = &id
+	}
+
+	limit := 50
+	if l, err := strconv.Atoi(c.Query("limit")); err == nil && l > 0 && l <= 200 {
+		limit = l
+	}
+
+	result, xerr := h.APIKeyService.ListUsageLogs(c.Request.Context(), *orgID, keyID, limit, cursor)
+	if xerr != nil {
+		errx.JSON(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// parseAnalyticsRange pulls ?from / ?to off the query string, defaulting
+// to "last 24 hours" when either is missing. Accepts RFC3339 timestamps.
+func parseAnalyticsRange(c *gin.Context) (from, to time.Time) {
+	if f := c.Query("from"); f != "" {
+		if parsed, err := time.Parse(time.RFC3339, f); err == nil {
+			from = parsed
+		}
+	}
+	if t := c.Query("to"); t != "" {
+		if parsed, err := time.Parse(time.RFC3339, t); err == nil {
+			to = parsed
+		}
+	}
+	if to.IsZero() {
+		to = time.Now()
+	}
+	if from.IsZero() {
+		from = to.Add(-24 * time.Hour)
+	}
+	return from, to
+}

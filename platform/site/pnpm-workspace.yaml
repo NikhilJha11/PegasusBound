@@ -1,0 +1,20 @@
+# pnpm 11+ settings live here, not in package.json.
+# Allow native build scripts that ship with these packages so
+# `pnpm install` and `pnpm dev` work without manual approval.
+allowBuilds:
+  esbuild: true
+  sharp: true
+
+# The patched http-cache-semantics below, admitted before it is a day old.
+minimumReleaseAgeExclude:
+  - http-cache-semantics@4.3.0
+
+# Patched releases of transitive dependencies, until their parents require them.
+overrides:
+  js-yaml: ^4.3.1
+  svgo: ^4.0.2
+  sharp: ^0.35.5
+  nanoid: ^3.3.17
+  http-cache-semantics: ^4.3.0
+  smol-toml: ^1.9.0
+  source-map-js: ^1.2.2

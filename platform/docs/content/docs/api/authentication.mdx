@@ -1,0 +1,368 @@
+---
+title: Authentication
+description: Learn how to authenticate with the Pegasusbound API using API keys.
+---
+
+The Pegasusbound API uses API keys for authentication. Each API key has specific permissions that control what operations it can perform.
+
+API responses use `Cache-Control: no-store` by default to instruct browsers and intermediaries not to retain private data. Public uploaded assets keep their explicit caching policy.
+
+## API key format
+
+API keys follow this format:
+
+```
+pgsbd_<43-character-random-string>
+```
+
+The `pgsbd_` prefix identifies the key as a Pegasusbound key. The remaining 43 characters are 32 random bytes encoded as base64url (no padding): 256 bits of entropy, so brute-forcing a valid key is computationally infeasible.
+
+Keys are stored as a SHA-256 hash; the plaintext is shown exactly once on creation. To help you spot a key in the dashboard without exposing the secret, we store the first 8 characters (`key_prefix`, e.g. `pgsbd_ab`) and the last 4 characters (`key_suffix`, e.g. `wxyz`). Render them as `pgsbd_ab…wxyz`.
+
+## Three ways to get a key
+
+1. **The dashboard.** Settings > API keys, pick the scopes, copy the secret. This is the right path for a key a server will use.
+2. **The CLI.** [`pegasusbound auth login`](/api/cli/) opens a browser approval and mints a key named for the machine that asked, then stores it at 0600. This is the right path for a key you will use yourself, and it is the only one that does not involve pasting a secret into a shell.
+3. **The API.** `POST /v1/api-keys` with a key that carries `API_KEYS`. The secret is in that response and nowhere else.
+
+All three produce the same thing: a `pgsbd_` key with a scope bitmask, listed under Settings > API keys, revocable there.
+
+### The CLI device flow
+
+`pegasusbound auth login` uses a device-code handshake, so the terminal never handles your password and the browser never handles the key:
+
+1. The CLI calls `POST /v1/auth/cli/code` with the scopes it wants and the machine's hostname. It gets back a `device_code` it keeps, a `user_code` it prints, and a `verification_uri_complete` it opens.
+2. You approve at `app.pegasusbound.com/cli`, choosing which workspace the key belongs to. The approval is what mints the key, so it requires the `MANAGE_API_KEYS` organization permission and a recent sign-in, and the key is capped to the scopes your role in that workspace allows.
+3. The CLI polls `POST /v1/auth/cli/poll` and receives the key exactly once, on the first poll after approval.
+
+Codes expire after ten minutes, both halves are per-IP rate limited, and the `device_code` is stored hashed. Anything else can drive the same flow: it is two public endpoints and a browser.
+
+### Ending a key
+
+`DELETE /v1/api-keys/:id` revokes any key in the workspace and needs the `API_KEYS` scope. `DELETE /v1/api-keys/self` revokes the key the call was made with and needs no scope at all, so a narrowly scoped credential can always end itself. This is what `pegasusbound auth logout` uses.
+
+Revoking leaves the key listed, with the time and reason it ended, and its request history intact. `DELETE /v1/api-keys/:id/permanent` removes the row for good, along with its usage logs, and is how the **Delete key** button under a revoked key in Settings > API keys works. It refuses a key that could still authenticate with a `409`: revoke it first, so what ended the credential is on the record. A key past its `expires_at` can be deleted directly, since it already authenticates nothing.
+
+## Using your API key
+
+Include your API key in the `Authorization` header of every request:
+
+```bash
+curl -X GET "https://api.pegasusbound.com/v1/api-keys" \
+  -H "Authorization: Bearer pgsbd_abc123..." \
+  -H "Content-Type: application/json"
+```
+
+For mutation retries, include an `Idempotency-Key` header with a unique value per logical operation. Pegasusbound stores completed mutation responses for 24 hours per organization and key, then replays matching retries instead of performing the operation again.
+
+## Verifying a credential
+
+To check that a credential is valid and see who it belongs to, call `GET /v1/me`. It works with an API key, an OAuth access token, or a dashboard session, requires no specific permission, and returns the caller's identity:
+
+```bash
+curl -X GET "https://api.pegasusbound.com/v1/me" \
+  -H "Authorization: Bearer pgsbd_abc123..."
+```
+
+```json
+{
+  "user_id": "0b1f...",
+  "email": "jane@acme.com",
+  "name": "Jane Doe",
+  "organization_id": "9a2c...",
+  "organization_name": "Acme Inc",
+  "auth_type": "api_key",
+  "scopes": ["read_contacts", "write_contacts"]
+}
+```
+
+`auth_type` is `api_key`, `oauth`, or `jwt`, and `scopes` lists the granted API scopes for key and OAuth callers (empty for dashboard sessions, which use organization roles instead). This is the right endpoint for an integration to validate a connection and render a label. The separate `GET /v1/auth/me` is session-only and is not reachable with an API key or OAuth token.
+
+For a restricted session, `/auth/me` returns only conversation categories applied to messages in its granted mailboxes. Campaign grants do not grant inbox access. Workspace-wide category registries remain available to unrestricted members. See [member access scope](/guides/team-roles/#access-scope) for the summary, notification and workspace-creation boundaries that also apply to existing members and credentials.
+
+## OAuth access tokens
+
+API keys authenticate your own scripts. If you are building an app that other people connect their Pegasusbound workspace to, use OAuth instead: the user grants your app scoped access and you receive a bearer **access token** (prefix `wmat_`). It goes in the same `Authorization: Bearer` header and is checked against the same permissions, so every endpoint below behaves identically whether you present an API key or an OAuth token, with two differences: an OAuth token also acts within the approving member's current role, and it can never manage API keys or OAuth apps. See [OAuth](/api/oauth/) for the full flow.
+
+## Key security best practices
+
+<Callout type="warn" title="Keep Your Keys Secret">
+  Never expose API keys in client-side code, public repositories, or logs. Treat them like passwords.
+</Callout>
+
+### Do
+
+- Store API keys in environment variables or secure secret managers
+- Use different keys for development and production
+- Restrict keys to only the permissions they need
+- Set expiration dates for keys when possible
+- Use IP allowlists to restrict key usage
+
+### Don't
+
+- Commit API keys to version control
+- Share API keys via email or chat
+- Use production keys in development
+- Give keys more permissions than necessary
+
+## Permissions
+
+Each API key has a permissions bitmask that controls its capabilities. See the [Permissions Reference](/api/permissions/) for a complete list.
+
+A key acts for the member who created it. Every route checks the key's bits and that member's current role in the workspace, so a key never does more than its creator could do in the dashboard today: if the creator's role loses a permission, the key loses it too. When the creator leaves the workspace, the key stops working and answers `401` with code `api_key_holder_left`; create a new key from a current member.
+
+### Permission categories
+
+| Category | Description |
+|----------|-------------|
+| **Read** | View resources (emails, campaigns, contacts, etc.) |
+| **Write** | Create and modify resources |
+| **Bulk** | Perform bulk operations |
+| **Special** | Advanced features (realtime, webhooks, API key management) |
+
+### Example: read-only key
+
+A read-only API key might have these permissions:
+
+```json
+{
+  "permissions": 31
+}
+```
+
+This combines:
+- `READ_EMAILS` (1)
+- `READ_CAMPAIGNS` (2)
+- `READ_CONTACTS` (4)
+- `READ_UNIBOX` (8)
+- `READ_ANALYTICS` (16)
+
+Total: 1 + 2 + 4 + 8 + 16 = 31
+
+## IP restrictions
+
+You can restrict API keys to specific IPs or CIDR ranges. Entries can be bare IPs (v4 or v6) or CIDR blocks; an empty list means "any IP".
+
+```json
+{
+  "name": "Production Server",
+  "permissions": 688159,
+  "allowed_ips": [
+    "203.0.113.10",
+    "203.0.113.11",
+    "10.0.0.0/8",
+    "2001:db8::/32"
+  ]
+}
+```
+
+Requests from outside every listed range are rejected with `403 Forbidden`. There's a soft cap of 64 entries per key.
+
+## Email account restrictions
+
+Limit API keys to specific email accounts:
+
+```json
+{
+  "name": "Marketing Team",
+  "permissions": 127,
+  "allowed_email_accounts": [
+    "550e8400-e29b-41d4-a716-446655440000",
+    "6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+  ]
+}
+```
+
+A restricted key only reaches those mailboxes and their mail, and naming any other mailbox answers `403`:
+
+- **Unibox reads.** `GET /unibox` lists only their conversations, `GET /unibox/thread` returns only their messages, `GET /unibox/count` and `GET /unibox/overview` count only them, and `GET /unibox/:id`, thread labels and agent drafts are refused or left out for mail in any other mailbox.
+- **Unibox writes.** Reply, compose (an automatic pick chooses among the listed mailboxes), drafts, agent-draft approval and discard, `PATCH /unibox/seen`, `PATCH /unibox/folder` and snoozes refuse a message or conversation with mail in another mailbox. Marking a whole folder read (`folder` on `PATCH /unibox/seen`) is refused, since it reaches every mailbox.
+- **Campaigns and analytics.** A sender pool (`senders` on `POST /campaigns`, `PUT /campaigns/:id/senders`) may only name listed mailboxes, `GET /analytics/accounts` lists only them, and `GET /analytics/accounts/:id` refuses any other. The key's campaigns use an explicit sender list (`sender_strategy` `explicit`): a pool resolved from mailbox tags, setting `email_tag_ids` or `email_tags`, or starting a campaign whose pool is not an explicit list of the key's mailboxes answers `403` with code `api_key_mailbox_limited`.
+- **Advisor.** Applying or undoing a fix is refused when the fix changes another mailbox.
+- **AI tools.** `/ai/tools` and `/mcp` act across the whole workspace, so a restricted key is refused there with code `api_key_mailbox_limited`. Use the REST endpoints, which apply the limit.
+
+## Key expiration
+
+Set an expiration date for temporary access:
+
+```json
+{
+  "name": "Contractor Access",
+  "permissions": 31,
+  "expires_at": "2027-12-31T23:59:59Z"
+}
+```
+
+After expiration, the key returns `401 Unauthorized`.
+
+## Using a credential with MCP
+
+An [MCP client](/api/mcp/) (Claude Code, Claude Desktop, Cursor) authenticates to Pegasusbound with either an OAuth sign-in (the one-command path, no key to paste) or a static API key. For a key, send it as a bearer token to `https://api.pegasusbound.com/v1/mcp`; the client then sees exactly the tools the credential's scopes allow. See the [MCP server](/api/mcp/) page for both paths.
+
+## Error responses
+
+### 401 Unauthorized
+
+Returned when:
+- API key is missing
+- API key is invalid
+- API key has expired
+- API key has been revoked
+
+```json
+{
+  "error": "Unauthorized",
+  "message": "Token not found."
+}
+```
+
+### 403 Forbidden
+
+Returned when:
+- API key lacks required permissions
+- Request IP is not in allowlist
+- Email account is not in allowlist
+
+```json
+{
+  "error": "Forbidden",
+  "message": "You don't have access to this feature."
+}
+```
+
+## Platform admin device sessions
+
+This backend flow is separate from workspace API-key authorization. Platform
+admin access uses a normal bearer session, never an organization API key.
+Use [remote `pegasusboundctl` login](/development/pegasusboundctl/#remote-administrator-commands)
+and the administrator website's `/device` consent page. Deploy the backend
+before upgrading the admin UI and CLI. The CLI never listens on an HTTP port
+or receives a browser redirect.
+
+### Endpoint contract
+
+All bodies/responses are JSON; bodies are capped at 4 KiB. Successful responses
+are `Cache-Control: no-store`. Keep device and consent secrets in memory, not
+URLs, stdout, command arguments, diagnostics or browser localStorage.
+
+| Endpoint | Request | Success | Authentication |
+| --- | --- | --- | --- |
+| `POST /v1/auth/cli/admin/code` | `{"client_name":"My diagnostic laptop"}` | 201, start schema below | Public, IP limited |
+| `POST /v1/auth/cli/admin/poll` | `{"device_secret":"<CLI memory secret>"}` | 200, poll schema below | Device secret in body, IP limited |
+| `POST /admin/auth/device/describe` | `{"user_code":"ABCD-EFGH"}` | 200, describe schema below | Normal session, live nonzero admin permissions, session MFA |
+| `POST /admin/auth/device/decide` | `{"user_code":"ABCD-EFGH","consent_token":"<page memory secret>","decision":"approved"}` | 200 `{"status":"approved"}`; `denied` is the other valid decision/status | Same admin gates, plus existing fresh-auth gate |
+
+Start response:
+
+```json
+{
+  "device_secret": "<43-character base64url secret, never display>",
+  "user_code": "ABCD-EFGH",
+  "instance_url": "https://backend.example.test",
+  "verification_path": "/device",
+  "expires_in": 300,
+  "interval": 5
+}
+```
+
+`client_name` uses existing plain workspace-display-name rules (required, max
+64 characters). It is requester-supplied, not verified device identity. The CLI
+must compare `instance_url` to its configured server. It is the existing
+`API_PUBLIC_URL`, or the local listener fallback; remote deployments must
+configure that public URL correctly. Show only the user code and the configured
+admin origin's `/device` page, never an untrusted origin from a requester.
+Instance URLs with credentials, query strings, fragments or non-HTTP schemes
+disable the device service rather than echoing sensitive/ambiguous identity.
+
+Describe response:
+
+```json
+{
+  "request": {
+    "client_name": "My diagnostic laptop",
+    "instance_url": "https://backend.example.test",
+    "expires_at": "2026-10-10T06:05:00Z",
+    "status": "pending",
+    "consent_token": "<43-character page-memory secret>"
+  },
+  "requested_access": "Your live platform administrator permissions through a separate revocable session",
+  "admin_permissions": 16
+}
+```
+
+Show server, client name, expiry and full requested access before explicit
+consent. Warn against approving an unsolicited code. `admin_permissions` is
+the existing numeric platform bitmask, not workspace API scopes. Opening a
+link or describing a code never authorizes it. Sign in normally first: OAuth,
+passkeys and password+MFA retain all existing challenges, Turnstile and rate
+limits. A consent token is hashed and bound to the describing browser session
+and request. A different session cannot spend it. If decide returns
+`reauth_required`, finish existing `POST /v1/auth/reauth`, then explicitly decide
+again; never auto-approve when login/reauth returns.
+
+Poll no faster than every five seconds. Pending/denied responses contain
+`status: "pending"` or `"denied"`, with neither `token` nor `user_id`.
+An approving poll returns:
+
+```json
+{
+  "status": "approved",
+  "user_id": "<approving admin UUID>",
+  "token": {
+    "access_token": "<normal purpose-bound access token>",
+    "refresh_token": "<normal purpose-bound refresh token>",
+    "access_token_expires_at": "2026-10-10T18:01:00Z",
+    "refresh_token_expires_at": "2027-04-08T06:01:00Z"
+  }
+}
+```
+
+### Security and lifecycle
+
+- Five-minute Redis grants contain only the hashed 256-bit device secret and
+  approval metadata; the short user code has 40 bits of randomness and is only
+  a browser lookup. State is namespaced to instance identity/signing secret.
+- Redis decisions and poll claims are atomic and one-use. Approval/denial and
+  successful issuance use the existing admin audit log without secret material.
+  Issuance consumes the grant before creating the session. A lost response or
+  issuance error cannot replay it; start again and inspect/revoke any session
+  whose response was lost. Redis loss cancels handshakes, not issued sessions.
+- Approval requires session MFA and fresh auth. Issuance locks/rechecks the
+  source session and user in Postgres: active/unexpired, not login-banned, live
+  admin access, original proof within five minutes. Later browser reauth cannot
+  rejuvenate an already-approved old proof.
+- The separate CLI session gets new ID/nonces but preserves source
+  `auth_provider`, `mfa_verified` and the original approval-time `reauth_at`.
+  New session creation time is not fresh MFA. The existing model has no separate
+  factor-time column to invent. It starts without a selected workspace; any
+  workspace use requires existing selection and permissions.
+- Access/refresh lifetimes remain 12 hours/180 days, with existing purpose
+  checks, rotation, reuse detection, revocation and MFA lifecycle. Refresh never
+  stamps reauth. Sensitive actions still use existing fresh-auth gates. Revoke
+  the CLI through normal sessions management. Revoking the browser after
+  issuance does not revoke the independent CLI session; revoke-all and security
+  changes keep existing behavior. Store tokens only in a protected CLI store.
+- Additional fail-closed budgets: starts 20/IP/10 minutes; polls 360/IP/10
+  minutes; browser lookups/decisions 12/user/minute; poll interval five seconds.
+  The existing CLI IP limiter also applies (default 500/15 minutes). Redis
+  failure never bypasses these budgets or allows anonymous/single-factor admin.
+
+Errors use the existing `{error,message,code,request_id}` envelope:
+
+| Status | Code | Client action |
+| --- | --- | --- |
+| 400 | `bad_request`, `invalid_name` | Correct JSON/name/decision |
+| 401 | `unauthorized` | Sign in normally or restart if source invalid at issuance |
+| 403 | `admin_mfa_required`, `forbidden` | Require MFA/live platform admin access |
+| 403 | `reauth_required` | Reauthenticate browser, then explicitly decide |
+| 404 | `admin_device_expired` | Invalid/unknown/expired/consumed requests are indistinguishable; restart |
+| 409 | `admin_device_resolved` | Already decided or mismatched/replayed consent; do not auto-retry approval |
+| 429 | `admin_device_slow_down`, `rate_limit_exceeded` | Wait five seconds or the attempt window |
+| 503 | `service_unavailable` | Dependency unavailable; no fail-open issuance |
+| 500 | `internal_error` | Start again; approving poll cannot be replayed |
+
+## Next steps
+
+- [Endpoints](/api/endpoints/)
+- [View all permissions](/api/permissions/)
+- [Handle errors](/api/error-codes/)

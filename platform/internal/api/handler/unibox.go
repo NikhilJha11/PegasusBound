@@ -1,0 +1,914 @@
+package handler
+
+import (
+	"context"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/api/middleware"
+	"github.com/pegasusbound/pegasusbound/internal/app/emailsend"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/mailhdr"
+)
+
+// uniboxReadTimeout bounds an interactive unibox read, connection wait and body load included.
+const uniboxReadTimeout = 30 * time.Second
+
+// boundUniboxRead puts the interactive read deadline on the request context; defer the returned cancel.
+func boundUniboxRead(c *gin.Context) context.CancelFunc {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), uniboxReadTimeout)
+	c.Request = c.Request.WithContext(ctx)
+	return cancel
+}
+
+// gateUnibox enforces feature access for any unibox endpoint that
+// needs an org context. Returns true when the caller is allowed.
+func (h *Handler) gateUnibox(c *gin.Context) bool {
+	if h.FeatureGateService == nil {
+		return true
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		return true
+	}
+	canUse, _ := h.FeatureGateService.CanUseUnibox(c.Request.Context(), *orgID)
+	if !canUse {
+		errx.Handle(c, errx.New(errx.Forbidden, "Unibox requires an active trial or paid subscription"))
+		return false
+	}
+	return true
+}
+
+func (h *Handler) GetUniboxIncoming(c *gin.Context) {
+	defer boundUniboxRead(c)()
+
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	// Check if organization can use unibox (active free trial or paid subscription)
+	if h.FeatureGateService != nil {
+		orgID := middleware.GetOrganizationID(c)
+		if orgID != nil {
+			canUse, _ := h.FeatureGateService.CanUseUnibox(c.Request.Context(), *orgID)
+			if !canUse {
+				errx.Handle(c, errx.New(errx.Forbidden, "Unibox requires an active trial or paid subscription"))
+				return
+			}
+		}
+	}
+
+	// Build search params from query
+	params := &models.MailSearchParams{
+		Cursor: c.Query("cursor"),
+	}
+
+	// Parse limit
+	if limitStr := c.Query("limit"); limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil {
+			params.PageSize = l
+		}
+	}
+
+	// Parse sender filter
+	if from := c.Query("from"); from != "" {
+		params.Sender = &from
+	}
+
+	// Address filter: conversations with this person in either direction
+	// (they sent it or we sent it to them). Powers the compose history panel.
+	if address := c.Query("address"); address != "" {
+		params.Address = &address
+	}
+
+	// Direction: "sent" = messages from the org's own mailboxes,
+	// "received" = everything else. Absent = both.
+	if direction := c.Query("direction"); direction == "sent" || direction == "received" {
+		params.Direction = &direction
+	}
+
+	// Folder scope. Absent = every working folder (spam, trash and archive
+	// stay out); an unknown value is a 400 rather than silently widening the
+	// result.
+	if folder := c.Query("folder"); folder != "" {
+		if !models.ValidFolder(folder) {
+			errx.Handle(c, errx.ErrUniboxFolder)
+			return
+		}
+		params.Folder = &folder
+	}
+
+	// All mail and reference reads ask for filed conversations back.
+	if c.Query("include_archived") == "true" {
+		v := true
+		params.IncludeArchived = &v
+	}
+
+	// Parse subject filter
+	if subject := c.Query("subject"); subject != "" {
+		params.Subject = &subject
+	}
+
+	// Parse unseen filter
+	if unseenStr := c.Query("unseen"); unseenStr == "true" {
+		unseen := true
+		params.Unseen = &unseen
+	}
+
+	// Snoozed scope. snoozed=true → only snoozed; snoozed=any → no
+	// filter; absent → default behaviour (exclude snoozed). The "any"
+	// value is supplied by admin debug tooling, not the dashboard.
+	switch c.Query("snoozed") {
+	case "true":
+		v := true
+		params.Snoozed = &v
+	case "any":
+		v := false
+		params.Snoozed = &v
+	}
+
+	if c.Query("awaiting_reply") == "true" {
+		v := true
+		params.AwaitingReply = &v
+	}
+
+	if c.Query("agent_drafts") == "true" {
+		v := true
+		params.AgentDraft = &v
+	}
+
+	// Parse date filters
+	if sinceStr := c.Query("since"); sinceStr != "" {
+		if since, err := time.Parse("2006-01-02", sinceStr); err == nil {
+			params.Since = &since
+		}
+	}
+	if untilStr := c.Query("until"); untilStr != "" {
+		if until, err := time.Parse("2006-01-02", untilStr); err == nil {
+			params.Until = &until
+		}
+	}
+
+	// Parse email account filter. Accepts either:
+	//   - email_id=<uuid>          single account (legacy)
+	//   - email_ids=<uuid>,<uuid>  comma-separated list (used by the
+	//                              tag/multi-account filter sheet)
+	// Invalid UUIDs are silently dropped; an empty resulting list
+	// behaves the same as "no account filter".
+	collectAccountIDs := func(raw string) {
+		for _, s := range strings.Split(raw, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			if id, err := uuid.Parse(s); err == nil {
+				params.EmailAccountIDs = append(params.EmailAccountIDs, id)
+			}
+		}
+	}
+	if v := c.Query("email_id"); v != "" {
+		collectAccountIDs(v)
+	}
+	if v := c.Query("email_ids"); v != "" {
+		collectAccountIDs(v)
+	}
+
+	// Uncategorized: threads carrying no conversation labels at all.
+	if c.Query("uncategorized") == "true" {
+		v := true
+		params.Uncategorized = &v
+	}
+
+	// automated=true lists only conversations no person wrote in, false leaves
+	// them out; absent is both.
+	switch c.Query("automated") {
+	case "true":
+		v := true
+		params.Automated = &v
+	case "false":
+		v := false
+		params.Automated = &v
+	}
+
+	// Conversation-label filter: category_ids=<uuid>,<uuid>. A thread
+	// matches if it carries any of the listed labels. Invalid UUIDs are
+	// dropped, matching the email_ids behaviour.
+	if v := c.Query("category_ids"); v != "" {
+		for _, s := range strings.Split(v, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			if id, err := uuid.Parse(s); err == nil {
+				params.CategoryIDs = append(params.CategoryIDs, id)
+			}
+		}
+	}
+
+	scoped, xerr := allowedMailboxFilter(c, params.EmailAccountIDs)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	params.EmailAccountIDs = scoped
+
+	resp, xerr := h.UniboxService.Search(c.Request.Context(), *orgID, params)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) GetUniboxEmail(c *gin.Context) {
+	defer boundUniboxRead(c)()
+
+	// Org-scoped: the inbox list is org-wide, so opening a message must be too.
+	// A non-owner member who sees a message in the org-scoped list would
+	// otherwise get "email not found" because the row is keyed to the mailbox
+	// owner's user_id, not theirs.
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	// Check if organization can use unibox
+	if h.FeatureGateService != nil {
+		canUse, _ := h.FeatureGateService.CanUseUnibox(c.Request.Context(), *orgID)
+		if !canUse {
+			errx.Handle(c, errx.New(errx.Forbidden, "Unibox requires an active trial or paid subscription"))
+			return
+		}
+	}
+
+	mailID := c.Param("id")
+	mid, err := uuid.Parse(mailID)
+	if err != nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	if xerr := h.uniboxMessagesAllowed(c, *orgID, []uuid.UUID{mid}, nil); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	// A restricted member reads the inbox without changing its shared read state.
+	get := h.UniboxService.GetByID
+	if middleware.IsScopeRestricted(c) {
+		get = h.UniboxService.Peek
+	}
+	resp, xerr := get(c.Request.Context(), *orgID, mid)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) GetUniboxThread(c *gin.Context) {
+	defer boundUniboxRead(c)()
+
+	// Org-scoped: the inbox list is org-wide, so the thread view must be too.
+	// Otherwise a non-owner member sees the conversation in the list but an
+	// empty thread when they open it — the messages are keyed to the mailbox
+	// owner's user_id, not theirs.
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	// Check if organization can use unibox
+	if h.FeatureGateService != nil {
+		canUse, _ := h.FeatureGateService.CanUseUnibox(c.Request.Context(), *orgID)
+		if !canUse {
+			errx.Handle(c, errx.New(errx.Forbidden, "Unibox requires an active trial or paid subscription"))
+			return
+		}
+	}
+
+	// email_id is optional. When omitted, the thread is read across every
+	// mailbox in the organization — the natural unified-inbox view where the
+	// caller only knows the thread.
+	var eid uuid.UUID
+	emailID := c.Query("email")
+	if emailID == "" {
+		emailID = c.Query("email_id")
+	}
+	if emailID != "" {
+		parsed, err := uuid.Parse(emailID)
+		if err != nil {
+			errx.Handle(c, errx.ErrUuid)
+			return
+		}
+		if xerr := mailboxAllowed(c, parsed); xerr != nil {
+			errx.Handle(c, xerr)
+			return
+		}
+		eid = parsed
+	}
+
+	threadID := c.Query("id")
+	if threadID == "" {
+		threadID = c.Query("thread_id")
+	}
+	if threadID == "" {
+		errx.Handle(c, errx.New(errx.BadRequest, "thread_id is required"))
+		return
+	}
+	cursor := c.Query("cursor")
+	limit := c.Query("limit")
+
+	resp, xerr := h.UniboxService.GetByThreadWithin(
+		c.Request.Context(),
+		*orgID, eid,
+		threadID, limit, cursor, restrictedMailboxes(c),
+	)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	keepAllowedMessages(c, resp)
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetUniboxThreadLabels returns the conversation labels on a thread.
+// GET /unibox/thread/labels?thread_id=<id>
+func (h *Handler) GetUniboxThreadLabels(c *gin.Context) {
+	defer boundUniboxRead(c)()
+
+	if !h.gateUnibox(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
+
+	threadID := c.Query("thread_id")
+	if threadID == "" {
+		threadID = c.Query("id")
+	}
+	if threadID == "" {
+		errx.Handle(c, errx.New(errx.BadRequest, "thread_id is required"))
+		return
+	}
+
+	labels, xerr := h.UniboxService.ListThreadLabelsWithin(c.Request.Context(), *orgID, threadID, restrictedMailboxes(c))
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": labels})
+}
+
+// SetUniboxThreadLabels replaces the full conversation-label set on a
+// thread. Idempotent (PUT semantics): the body's category_ids is the
+// desired set, so retries are naturally safe. Only the workspace's own
+// categories are attached.
+// PUT /unibox/thread/labels
+func (h *Handler) SetUniboxThreadLabels(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
+	// Attribution only; a label an API key applies has no human behind it.
+	uid, _ := middleware.GetUserUUID(c)
+
+	var req models.UniboxThreadLabels
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	if xerr := h.uniboxMessagesAllowed(c, *orgID, nil, []string{req.ThreadID}); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	labels, xerr := h.UniboxService.SetThreadLabels(c.Request.Context(), *orgID, uid, req.ThreadID, req.CategoryIDs)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityUnibox, nil, nil, map[string]string{
+		"action":    "set_labels",
+		"thread_id": req.ThreadID,
+		"labels":    strconv.Itoa(len(labels)),
+	})
+
+	c.JSON(http.StatusOK, gin.H{"data": labels})
+}
+
+func (h *Handler) UniboxMarkSeen(c *gin.Context) {
+	// Org-scoped: the inbox + unread count are org-wide, so marking read must be
+	// too, otherwise a non-owner member can never clear the shared unread badge.
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	var data models.MarkSeen
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	if data.Folder != "" && len(restrictedMailboxes(c)) > 0 {
+		errx.Handle(c, errx.New(errx.Forbidden, "an API key limited to specific mailboxes cannot mark a whole folder; name the messages or threads"))
+		return
+	}
+	if xerr := h.uniboxMessagesAllowed(c, *orgID, data.EmailIDs, data.ThreadIDs); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	resp, xerr := h.UniboxService.MarkSeenBulk(c.Request.Context(), *orgID, &data)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// UniboxMoveFolder re-files messages (Archive = archive, Delete = trash,
+// Move to inbox = inbox). Org-scoped like /seen: the inbox is shared, so any
+// member with unibox access may file it. Naturally idempotent, so no
+// Idempotency-Key: the body names the destination, not a delta.
+// PATCH /unibox/folder
+func (h *Handler) UniboxMoveFolder(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	var data models.MoveFolder
+	if err := c.ShouldBindJSON(&data); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	if xerr := h.uniboxMessagesAllowed(c, *orgID, data.EmailIDs, data.ThreadIDs); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	resp, xerr := h.UniboxService.MoveFolderBulk(c.Request.Context(), *orgID, &data)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	// Audited so the spine broadcasts it: a teammate looking at the same list
+	// has to lose the thread too, and there is no sync event behind this one.
+	h.auditOrg(c, models.AuditActionUpdate, models.AuditEntityUnibox, nil, nil, map[string]string{
+		"action":   "move_folder",
+		"folder":   data.Folder,
+		"messages": strconv.Itoa(len(data.EmailIDs)),
+		"threads":  strconv.Itoa(len(data.ThreadIDs)),
+	})
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// GetUnseenCount gets the count of unseen emails
+// GET /unibox/count
+func (h *Handler) GetUnseenCount(c *gin.Context) {
+	defer boundUniboxRead(c)()
+
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	// Optional email account filter
+	var emailAccountID *uuid.UUID
+	if emailIDStr := c.Query("email_id"); emailIDStr != "" {
+		if id, err := uuid.Parse(emailIDStr); err == nil {
+			if xerr := mailboxAllowed(c, id); xerr != nil {
+				errx.Handle(c, xerr)
+				return
+			}
+			emailAccountID = &id
+		}
+	}
+
+	var count int64
+	var xerr *errx.Error
+	if allowed := restrictedMailboxes(c); emailAccountID == nil && len(allowed) > 0 {
+		count, xerr = h.UniboxService.UnseenCountForMailboxes(c.Request.Context(), *orgID, allowed)
+	} else {
+		count, xerr = h.UniboxService.GetUnseenCount(c.Request.Context(), *orgID, emailAccountID)
+	}
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"count": count})
+}
+
+type UniboxReplyRequest struct {
+	EmailAccountID string     `json:"email_account_id" binding:"required"`
+	To             []string   `json:"to" binding:"required,min=1"`
+	CC             []string   `json:"cc"`
+	BCC            []string   `json:"bcc"`
+	Subject        string     `json:"subject" binding:"required"`
+	BodyHTML       string     `json:"body_html"`
+	BodyPlain      string     `json:"body_plain"`
+	InReplyTo      []string   `json:"in_reply_to"`
+	ThreadID       string     `json:"thread_id"`
+	SendMode       string     `json:"send_mode"`
+	ScheduledAt    *time.Time `json:"scheduled_at,omitempty"`
+	// ForwardMessageID makes the send a forward of that stored message, which
+	// goes out under the body and signature.
+	ForwardMessageID string `json:"forward_message_id"`
+}
+
+// UniboxReply schedules a reply or forward email from Unibox.
+// POST /unibox/reply
+func (h *Handler) UniboxReply(c *gin.Context) {
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	userID, err := middleware.GetUserUUID(c)
+	if err != nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	var req UniboxReplyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	accountID, err := uuid.Parse(req.EmailAccountID)
+	if err != nil {
+		errx.Handle(c, errx.ErrUuid)
+		return
+	}
+	if xerr := mailboxAllowed(c, accountID); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	var forward *models.ForwardedMessage
+	if req.ForwardMessageID != "" {
+		// Forwarding discloses the message, so it needs read access as well as write.
+		if xerr := h.hasAccess(c, models.PermAccessUnibox, models.APIPermReadUnibox); xerr != nil {
+			errx.Handle(c, xerr)
+			return
+		}
+		forwardID, err := uuid.Parse(req.ForwardMessageID)
+		if err != nil {
+			errx.Handle(c, errx.New(errx.BadRequest, "forward_message_id must be a message id"))
+			return
+		}
+		src, xerr := h.UniboxService.ForwardSource(c.Request.Context(), *orgID, forwardID)
+		if xerr != nil {
+			errx.Handle(c, xerr)
+			return
+		}
+		// Its mailbox is checked like the sender's.
+		if xerr := mailboxAllowed(c, src.EmailID); xerr != nil {
+			errx.Handle(c, xerr)
+			return
+		}
+		forward = src
+	}
+
+	// The composer only knows the provider thread id, but a thread id is
+	// meaningless outside the sending mailbox: the recipient's client threads
+	// on In-Reply-To/References. Resolve the parent Message-ID here so a reply
+	// nests for them too, without needing a client change. A forward answers
+	// nobody: it is filed into the forwarded message's conversation instead.
+	inReplyTo := req.InReplyTo
+	if len(inReplyTo) == 0 && req.ThreadID != "" && forward == nil {
+		if parentMessageID, xerr := h.UniboxService.LatestMessageIDInThread(c.Request.Context(), *orgID, req.ThreadID); xerr == nil && mailhdr.ValidMessageID(parentMessageID) {
+			inReplyTo = []string{parentMessageID}
+		}
+	}
+
+	sendReq := &emailsend.SendEmailRequest{
+		To:          req.To,
+		CC:          req.CC,
+		BCC:         req.BCC,
+		Subject:     req.Subject,
+		BodyHTML:    req.BodyHTML,
+		BodyPlain:   req.BodyPlain,
+		InReplyTo:   inReplyTo,
+		ThreadID:    req.ThreadID,
+		SendMode:    req.SendMode,
+		ScheduledAt: req.ScheduledAt,
+		Forward:     forward,
+	}
+	if sendReq.SendMode == "" {
+		sendReq.SendMode = "instant"
+	}
+
+	resp, xerr := h.EmailSendService.SendEmail(c.Request.Context(), userID, *orgID, accountID, sendReq)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	audit := map[string]string{
+		"send_mode":  sendReq.SendMode,
+		"recipients": strconv.Itoa(len(req.To)),
+	}
+	if forward != nil {
+		audit["forwarded_message_id"] = req.ForwardMessageID
+	}
+	h.auditOrg(c, models.AuditActionSend, models.AuditEntityUnibox, &accountID, nil, audit)
+
+	c.JSON(http.StatusOK, resp)
+}
+
+// ForgetUniboxOverviewOnWrite drops the organization's shared unibox overview after any successful write.
+func (h *Handler) ForgetUniboxOverviewOnWrite(c *gin.Context) {
+	c.Next()
+	switch c.Request.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return
+	}
+	if h.UniboxService == nil || c.Writer.Status() >= http.StatusBadRequest {
+		return
+	}
+	if orgID := middleware.GetOrganizationID(c); orgID != nil {
+		h.UniboxService.ForgetOverview(*orgID)
+	}
+}
+
+// GetUniboxOverview rolls up unread/today/week/snoozed/awaiting plus
+// per-mailbox and per-tag counts in one call. The dashboard's scope
+// rail and metric strip share this response.
+// GET /unibox/overview
+func (h *Handler) GetUniboxOverview(c *gin.Context) {
+	defer boundUniboxRead(c)()
+
+	if !h.gateUnibox(c) {
+		return
+	}
+	userID := middleware.GetUserID(c)
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	if allowed := restrictedMailboxes(c); len(allowed) > 0 {
+		resp, xerr := h.UniboxService.OverviewForMailboxes(c.Request.Context(), *orgID, allowed)
+		if xerr != nil {
+			errx.Handle(c, xerr)
+			return
+		}
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
+	resp, xerr := h.UniboxService.Overview(c.Request.Context(), *orgID, uid)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+type UniboxSnoozeRequest struct {
+	ThreadID string `json:"thread_id"`
+	// ThreadIDs snoozes a whole selection in one call. Either field will do;
+	// naming both snoozes the union.
+	ThreadIDs    []string  `json:"thread_ids"`
+	SnoozedUntil time.Time `json:"snoozed_until" binding:"required"`
+}
+
+// threads is every conversation the request names, in either field.
+func (r UniboxSnoozeRequest) threads() []string {
+	out := r.ThreadIDs
+	if r.ThreadID != "" {
+		out = append([]string{r.ThreadID}, out...)
+	}
+	return out
+}
+
+// CreateUniboxSnooze hides conversations until snoozed_until passes.
+// Upsert semantics: a second call on the same thread updates the time.
+// A request naming one thread answers with that row, as it always has; one
+// naming several answers with `data`.
+// POST /unibox/snooze
+func (h *Handler) CreateUniboxSnooze(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	userID := middleware.GetUserID(c)
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	var req UniboxSnoozeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errx.Handle(c, errx.InvalidBody(err))
+		return
+	}
+
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
+	threads := req.threads()
+	if xerr := h.uniboxMessagesAllowed(c, *orgID, nil, threads); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	rows, xerr := h.UniboxService.Snooze(c.Request.Context(), *orgID, uid, threads, req.SnoozedUntil)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionCreate, models.AuditEntityUnibox, nil, nil, map[string]string{
+		"action":  "snooze",
+		"threads": strconv.Itoa(len(threads)),
+	})
+
+	if len(threads) == 1 && len(rows) == 1 {
+		c.JSON(http.StatusOK, rows[0])
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": rows})
+}
+
+// DeleteUniboxSnooze un-snoozes a thread immediately. Idempotent —
+// deleting a snooze that doesn't exist still returns 204.
+// DELETE /unibox/snooze
+func (h *Handler) DeleteUniboxSnooze(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	userID := middleware.GetUserID(c)
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	// One id, or a comma-separated selection. Same shape as email_ids on the
+	// other list endpoints.
+	var threads []string
+	for _, raw := range strings.Split(c.Query("thread_id"), ",") {
+		if id := strings.TrimSpace(raw); id != "" {
+			threads = append(threads, id)
+		}
+	}
+	if len(threads) == 0 {
+		errx.Handle(c, errx.New(errx.BadRequest, "thread_id is required"))
+		return
+	}
+
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
+	if xerr := h.UniboxService.Unsnooze(c.Request.Context(), *orgID, uid, threads); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionDelete, models.AuditEntityUnibox, nil, nil, map[string]string{
+		"action":  "snooze",
+		"threads": strconv.Itoa(len(threads)),
+	})
+
+	c.Status(http.StatusNoContent)
+}
+
+// ListUniboxScheduled returns every pending email task queued from the
+// organization's mailboxes: what the "Scheduled" scope in the dashboard
+// reads from. When `thread_id` is set we scope the response to a single
+// thread, which the ThreadView uses to render queued replies inline. The
+// response shape is identical either way so the same client + hook
+// handle both forms.
+// GET /unibox/scheduled
+// GET /unibox/scheduled?thread_id=<id>
+func (h *Handler) ListUniboxScheduled(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+
+	if threadID := c.Query("thread_id"); threadID != "" {
+		items, xerr := h.UniboxService.ListScheduledByThread(c.Request.Context(), *orgID, threadID, middleware.AllowedEmailAccounts(c))
+		if xerr != nil {
+			errx.Handle(c, xerr)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"data": items})
+		return
+	}
+
+	items, xerr := h.UniboxService.ListScheduled(c.Request.Context(), *orgID, middleware.AllowedEmailAccounts(c))
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items})
+}
+
+// CancelUniboxScheduled cancels a pending scheduled send. DB-only:
+// we mark the task cancelled and let the queued Cloud Task fire as a
+// no-op (the task handler short-circuits on non-pending statuses).
+// DELETE /unibox/scheduled/:task_id
+func (h *Handler) CancelUniboxScheduled(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.New(errx.BadRequest, "no organization selected"))
+		return
+	}
+	taskID, err := uuid.Parse(c.Param("task_id"))
+	if err != nil {
+		errx.Handle(c, errx.ErrUuid)
+		return
+	}
+
+	if xerr := h.UniboxService.CancelScheduled(c.Request.Context(), *orgID, taskID, middleware.AllowedEmailAccounts(c)); xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+
+	h.auditOrg(c, models.AuditActionDelete, models.AuditEntityUnibox, &taskID, nil, map[string]string{
+		"action": "cancel_scheduled",
+	})
+
+	c.Status(http.StatusNoContent)
+}
+
+// ListUniboxSnoozes returns the user's active snoozes (debug + UI).
+// GET /unibox/snoozes
+func (h *Handler) ListUniboxSnoozes(c *gin.Context) {
+	if !h.gateUnibox(c) {
+		return
+	}
+	userID := middleware.GetUserID(c)
+	uid, err := uuid.Parse(userID)
+	if err != nil {
+		errx.Handle(c, errx.ErrUser)
+		return
+	}
+
+	orgID := middleware.GetOrganizationID(c)
+	if orgID == nil {
+		errx.Handle(c, errx.ErrNoOrganization)
+		return
+	}
+	resp, xerr := h.UniboxService.ListSnoozes(c.Request.Context(), *orgID, uid)
+	if xerr != nil {
+		errx.Handle(c, xerr)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": resp})
+}

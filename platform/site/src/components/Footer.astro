@@ -1,0 +1,126 @@
+---
+import Wordmark from './Wordmark.astro';
+import Icon from './Icon.astro';
+
+const groups: { title: string; links: { label: string; href: string }[] }[] = [
+  {
+    title: 'Product',
+    links: [
+      { label: 'Warmup', href: '/warmup/' },
+      { label: 'Sending engine', href: '/sending/' },
+      { label: 'Unified inbox', href: '/inbox/' },
+      { label: 'Campaigns', href: '/campaigns/' },
+      { label: 'Automations', href: '/automations/' },
+      { label: 'Analytics', href: '/analytics/' },
+      { label: 'CRM', href: '/crm/' },
+      { label: 'API & Webhooks', href: '/developers/' },
+      { label: 'Integrations', href: '/integrations/' },
+      { label: 'Referral program', href: '/referral/' },
+      { label: 'Changelog', href: '/changelog/' },
+    ],
+  },
+  {
+    title: 'Use cases',
+    links: [
+      { label: 'Founders', href: '/use-cases/founders/' },
+      { label: 'Agencies', href: '/use-cases/agencies/' },
+      { label: 'Sales teams', href: '/use-cases/sales/' },
+      { label: 'Recruiters', href: '/use-cases/recruiters/' },
+      { label: 'Fundraising', href: '/use-cases/fundraising/' },
+    ],
+  },
+  {
+    title: 'Learn',
+    links: [
+      { label: 'Email warmup guide', href: 'https://docs.pegasusbound.com/learn/email-warmup/' },
+      { label: 'Deliverability handbook', href: 'https://docs.pegasusbound.com/learn/deliverability/' },
+      { label: 'SPF, DKIM, DMARC', href: 'https://docs.pegasusbound.com/learn/spf-dkim-dmarc/' },
+      { label: 'Cold email rules', href: 'https://docs.pegasusbound.com/learn/cold-email-rules/' },
+      { label: 'Inbox placement', href: 'https://docs.pegasusbound.com/learn/inbox-placement/' },
+      { label: 'Warmup pools', href: 'https://docs.pegasusbound.com/learn/warmup-pools/' },
+      { label: 'Reputation recovery', href: 'https://docs.pegasusbound.com/learn/reputation-recovery/' },
+      { label: 'Glossary', href: 'https://docs.pegasusbound.com/learn/glossary/' },
+    ],
+  },
+  {
+    title: 'Company',
+    links: [
+      { label: 'About', href: '/about/' },
+      { label: 'Blog', href: '/blog/' },
+      { label: 'Contact', href: '/contact/' },
+      { label: 'Brand', href: '/brand/' },
+      { label: 'Trust', href: '/trust/' },
+    ],
+  },
+  {
+    title: 'Legal',
+    links: [
+      { label: 'Terms', href: '/terms/' },
+      { label: 'Privacy', href: '/privacy/' },
+    ],
+  },
+];
+
+const year = new Date().getFullYear();
+---
+<footer class="border-t border-border bg-surface mt-24">
+  <div class="container-page py-16">
+    <div class="grid gap-10 md:grid-cols-12">
+      <div class="md:col-span-3">
+        <Wordmark size="md" />
+        <p class="mt-4 text-sm text-muted-foreground max-w-xs leading-relaxed">
+          The deliverability platform for cold email. Warm your inboxes, send at scale, keep your reputation clean.
+        </p>
+        <div class="mt-5 flex items-center gap-2">
+          <span class="inline-flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground bg-surface-2 border border-border rounded-full px-2 py-0.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
+            All systems operational
+          </span>
+        </div>
+      </div>
+
+      <div class="md:col-span-9 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-8">
+        {groups.map((g) => (
+          <div>
+            <h4 class="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-3">{g.title}</h4>
+            <ul class="space-y-2">
+              {g.links.map((l) => (
+                <li>
+                  <a href={l.href} class="text-[13px] text-foreground/80 hover:text-foreground transition-colors">{l.label}</a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </div>
+
+    <!-- Compact UK disclosure: name, company number, registered office on one line.
+         Long-form details live on /terms/ and /privacy/. -->
+    <div class="mt-14 pt-6 border-t border-border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+      <p class="text-xs text-muted-foreground">
+        © {year} Pegasusbound. Mindroot Ltd · company no. 16543299 · 71-75 Shelton Street, London WC2H 9JQ.
+      </p>
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <a href="https://github.com/pegasusbound/pegasusbound" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.8 10.9.6.1.8-.2.8-.5v-2c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1.1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.2-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2 1-.3 2-.4 3-.4s2 .1 3 .4c2.3-1.5 3.3-1.2 3.3-1.2.7 1.6.2 2.9.1 3.1.8.8 1.2 1.9 1.2 3.2 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.5 4.6-1.5 7.8-5.8 7.8-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+          github.com/pegasusbound/pegasusbound
+        </a>
+        <span class="text-xs text-muted-foreground">·</span>
+        <a href="https://dc.pegasusbound.com" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+          <Icon name="discord" size={13} />
+          Discord
+        </a>
+        <span class="text-xs text-muted-foreground">·</span>
+        <a href="/blog/rss.xml" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M4 11a9 9 0 0 1 9 9" /><path d="M4 4a16 16 0 0 1 16 16" /><circle cx="5" cy="19" r="1" />
+          </svg>
+          RSS
+        </a>
+        <span class="text-xs text-muted-foreground">·</span>
+        <p class="text-xs text-muted-foreground">Open source.</p>
+      </div>
+    </div>
+  </div>
+</footer>

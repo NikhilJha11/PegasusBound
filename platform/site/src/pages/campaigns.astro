@@ -1,0 +1,184 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import PillarPosts from '../components/PillarPosts.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import FlowHeroScene from '../components/scenes/campaigns/FlowHeroScene.astro';
+import StepEditorScene from '../components/scenes/campaigns/StepEditorScene.astro';
+import ThreadScene from '../components/scenes/campaigns/ThreadScene.astro';
+import LeadsScene from '../components/scenes/campaigns/LeadsScene.astro';
+import ScheduleScene from '../components/scenes/campaigns/ScheduleScene.astro';
+import GuardrailScene from '../components/scenes/campaigns/GuardrailScene.astro';
+import LimitsScene from '../components/scenes/campaigns/LimitsScene.astro';
+import RotationScene from '../components/scenes/campaigns/RotationScene.astro';
+import EspScene from '../components/scenes/campaigns/EspScene.astro';
+
+// Behaviour from docs/content/docs/guides/campaigns.mdx and sequences.mdx.
+
+const writing = [
+  ['Variables', 'First name, company, any custom field, and the sending mailbox’s own name'],
+  ['Plain text', 'Switch a campaign to plain text, with no HTML part at all'],
+  ['Attachments', 'Upload files to one step and they go out with that step only'],
+];
+const threading = [
+  ['One mailbox', 'Rotation picks the mailbox for the first email, and it sends the rest'],
+  ['Out of office', 'An auto-reply is not a reply. It holds the next step until they are back'],
+  ['New thread', 'Turn off Reply in thread on a step to open a fresh conversation'],
+];
+
+const card = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const cardBody = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+
+const faq: [string, string][] = [
+  ['Do follow-ups come from the same mailbox?', 'Yes. Rotation chooses a mailbox for a contact’s first email, and that mailbox sends the rest of their sequence, as replies in the same thread. Three emails from three addresses is not a conversation.'],
+  ['What happens when someone replies?', 'With stop on reply on, the rest of the cold sequence stops for that contact, while any reply branch on the email they answered still runs. Out-of-office replies don’t count as replies; they hold the next step until the person is back.'],
+  ['What can a branch check?', 'Whether the contact opened or clicked within a window of 1 to 60 days, or didn’t; whether they replied, and whether the reply was positive, negative or neutral; the intent read from their reply, such as wants pricing, not now or wrong person; whether the reply was an out-of-office message; or a random share of contacts. Conditions are checked left to right and the first match wins.'],
+  ['How many A/B variants can a step have?', 'Up to five on top of the original, with any traffic split you like. Each variant reports sends, opens, replies and bounces, and Pegasusbound names a winner once the numbers support one.'],
+  ['How many emails does a campaign send a day?', 'The sum of its mailboxes’ budgets. Each mailbox sends at most 50 cold emails a day by default (a newly connected one plans about 30), and a campaign’s own daily limit can only lower that. A mailbox still warming up sends at most 5 cold emails a day. Today’s sending plan on the campaign shows the number and every limit that set it.'],
+  ['Can a campaign pause itself?', 'Yes. Turn on auto-pause and a campaign stops once its bounce rate reaches 5% or its complaint rate 0.10% (the defaults, and both can be changed), or its reply rate drops below a floor you set, after a minimum number of sends.'],
+  ['Does it send in the recipient’s timezone?', 'Campaigns send inside the weekly windows you set, in the campaign’s timezone. Turn on send-time optimization and each email also waits for the recipient’s own local hours.'],
+  ['Can I send plain text only?', 'Yes. You can write in the rich editor or switch a campaign to plain text, which many cold senders prefer.'],
+];
+---
+<Layout
+  title="Cold Email Campaigns and Sequence Builder | Pegasusbound"
+  description="Build multi-step cold email sequences on a visual canvas: threaded follow-ups, branches on opens, clicks and replies, A/B variants, rotation across mailboxes and auto-pause."
+>
+  <!-- HERO: copy on top, the running campaign's flow canvas underneath. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="grid items-end gap-8 lg:grid-cols-[1.3fr_1fr]">
+      <div>
+        <div class="text-[14px] text-slate-500">Campaigns</div>
+        <h1 class="mt-4 max-w-3xl text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+          Sequences that read like one person writing back.
+        </h1>
+      </div>
+      <div class="lg:pb-2">
+        <p class="text-[17px] md:text-[18px] leading-[1.55] text-slate-500">
+          Draw the sequence on a canvas, branch it on what each contact does, and send it across your mailboxes. Follow-ups land in the same thread, from the same address, and stop the moment someone replies.
+        </p>
+        <div class="mt-7 flex flex-wrap items-center gap-3">
+          <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+            Build a sequence <Icon name="arrowRight" size={14} />
+          </a>
+          <a href="https://docs.pegasusbound.com/guides/sequences/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+            Read the guide
+          </a>
+        </div>
+      </div>
+    </div>
+
+    <div class="mt-14 md:mt-16">
+      <FlowHeroScene />
+    </div>
+    <p class="mt-5 text-[13.5px] text-slate-400">Up to 50 steps per sequence · Branches on opens, clicks and reply intent · Edited together, live</p>
+  </section>
+
+  <!-- WRITING: one step's editor, with an A/B test running. -->
+  <Rule class="mt-20" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1fr_1.15fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="Writing a step." title="Test up to six versions of any email." text="Add up to five variants to the original and drag the split however you like. Each version reports its sends, opens, replies and bounces, and Pegasusbound marks the winner once the numbers support one. A content check scores every draft and never blocks a send." />
+        <dl class="mt-8 max-w-xl divide-y divide-slate-200 border-y border-slate-200">
+          {writing.map(([k, v]) => (
+            <div class="grid gap-1 py-3.5 sm:grid-cols-[130px_1fr] sm:gap-6">
+              <dt class="text-[15px] font-medium text-slate-900">{k}</dt>
+              <dd class="text-[15px] leading-[1.55] text-slate-500">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+      <StepEditorScene />
+    </div>
+  </section>
+
+  <!-- THREADING: the follow-up in the contact's own inbox, and the reply that stops it. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1.15fr_1fr] lg:gap-16">
+      <div class="order-2 lg:order-1"><ThreadScene /></div>
+      <div class="order-1 lg:order-2">
+        <SectionIntro lead="Follow-ups." title="Every follow-up is a reply in the same conversation." text="Each follow-up carries the headers of the email before it, so it sits under your first message in the contact’s inbox and in your Sent folder. On Gmail it is posted into the same thread. When they answer, the rest of the sequence stops for them." />
+        <dl class="mt-8 max-w-xl divide-y divide-slate-200 border-y border-slate-200">
+          {threading.map(([k, v]) => (
+            <div class="grid gap-1 py-3.5 sm:grid-cols-[130px_1fr] sm:gap-6">
+              <dt class="text-[15px] font-medium text-slate-900">{k}</dt>
+              <dd class="text-[15px] leading-[1.55] text-slate-500">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- LEADS: the whole list, wide, under a split heading. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-end gap-6 lg:grid-cols-[1.1fr_1fr] lg:gap-16">
+      <SectionIntro lead="Leads." title="Every lead, where it is, and who is writing to it." />
+      <div>
+        <p class="text-[16px] md:text-[18px] leading-[1.6] text-slate-500">The Leads tab shows each lead’s progress, whether they opened, clicked or replied, the step they are on and the one mailbox their whole sequence comes from. Link a segment and anyone who joins it later is enrolled within minutes.</p>
+        <a href="https://docs.pegasusbound.com/guides/campaigns/#lead-statuses" class="group mt-4 inline-flex items-center gap-2 text-[16px] text-[color:var(--brand)] hover:text-[color:var(--brand-strong)]">
+          What each lead status means
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform group-hover:translate-x-0.5"><polyline points="9 18 15 12 9 6"/></svg>
+        </a>
+      </div>
+    </div>
+    <div class="mt-12 md:mt-14">
+      <LeadsScene />
+    </div>
+    <p class="mt-5 max-w-3xl text-[14px] leading-[1.6] text-slate-400">Pause one lead until a date without unsubscribing them, or let their away message do it: the return date is read from the auto-reply where it can be, and the lead resumes a working day after it.</p>
+  </section>
+
+  <!-- SCHEDULE AND GUARDRAILS: a bento, two wide and three small. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="Sending." title="On your schedule, inside every limit." text="Each campaign keeps its own sending windows and timezone. Its volume is the sum of its mailboxes’ budgets, and the smallest limit always wins." />
+
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-6">
+      <article class="lg:col-span-3">
+        <ScheduleScene />
+        <h3 class={card}>Sending windows for each day</h3>
+        <p class={cardBody}>Draw windows onto the week in the campaign’s timezone, and hold a new contact’s first email for up to 90 days after they join.</p>
+      </article>
+      <article class="lg:col-span-3">
+        <GuardrailScene />
+        <h3 class={card}>A campaign that stops itself</h3>
+        <p class={cardBody}>Set a bounce, complaint or reply band once. Checked every 15 minutes, a crossed band pauses the campaign and logs the reason with its numbers.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <LimitsScene />
+        <h3 class={card}>Today’s plan, worked out</h3>
+        <p class={cardBody}>Every limit that lowered today’s number, and what is still to go.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <RotationScene />
+        <h3 class={card}>Rotation across mailboxes</h3>
+        <p class={cardBody}>The mailbox idle longest starts the next lead, inside its own cap and gap.</p>
+      </article>
+      <article class="md:col-span-2 lg:col-span-2">
+        <EspScene />
+        <h3 class={card}>Provider matching</h3>
+        <p class={cardBody}>Google recipients from Google mailboxes and Microsoft from Microsoft, when you want it.</p>
+      </article>
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Campaigns, answered." />
+
+  <PillarPosts
+    title="Read more about sending"
+    items={[
+      { kicker: 'Volume', href: '/blog/how-many-cold-emails-per-day-per-mailbox/', title: 'How many cold emails per day per mailbox' },
+      { kicker: 'Setup', href: '/blog/how-many-mailboxes-and-domains-cold-email/', title: 'How many mailboxes and domains you need for cold email' },
+      { kicker: 'Limits', href: '/blog/mailbox-budgets-not-server-settings/', title: 'Mailbox budgets, not server settings' },
+    ]}
+  />
+
+  <CTA photo="paint-aqua" title="Build your first sequence in five minutes." description="Connect a mailbox, add your contacts and draw the first step. Warmup keeps running while you write." />
+</Layout>

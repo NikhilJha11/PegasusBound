@@ -1,0 +1,174 @@
+---
+title: Event system
+description: The event bus topics, envelopes, and realtime fanout that connect Pegasusbound's services.
+---
+
+Pegasusbound's services communicate asynchronously through a pluggable event bus. The default self-host build uses NATS JetStream with JSON encoding; Kafka with Avro and Confluent Schema Registry is an opt-in build for cloud deployments. The realtime dashboard fanout is a separate, simpler pub/sub channel described at the end of this page.
+
+## Transport and codec
+
+The bus is an abstraction (`internal/infrastructure/eventbus/`) with two providers, selected by `EVENTBUS_PROVIDER`:
+
+- `nats`: NATS JetStream. One durable stream (default name `pegasusbound`) holds every topic as a subject under a prefix: topic `jobs.worker-events` becomes subject `pegasusbound.jobs.worker-events`. Messages are retained for 7 days, consumer groups map to JetStream durable consumers, and failed handlers are redelivered up to 10 times. This is what `docker-compose.yml` runs.
+- `kafka`: Apache Kafka behind the `kafka` Go build tag. The default binaries do not include it (no librdkafka, no CGO), so `EVENTBUS_PROVIDER=kafka` on a default build fails at boot with a clear error. Every service that reads the bus publishes a second image for it, the same tag with a `-kafka` suffix: `ghcr.io/pegasusbound/pegasusbound/backend:prod-kafka`, and the same for `consumer`, `worker`, and `tracking`. Building your own needs `GO_TAGS=kafka` (Go) or `CARGO_FEATURES=kafka` (tracking).
+
+Message encoding is orthogonal to transport, selected by `CODEC_PROVIDER`:
+
+Shared send reservations and action/diagnostic authority are SQL/control-plane capabilities, not new queue command shapes. Existing JSON and Avro SEND_EMAIL payloads remain readable. Protocol `warmup_send_protocol=2` gates the new executor checks; protocol 1 is only the previous lineage capability. Upgrade all control-plane/result consumers, pause/drain accepted old work, then upgrade workers. Unknown sends retain reservations and do not become blind queue retries. Result reconciliation writes bounce webhooks/notifications to a durable outbox before commit; consumers drain leased rows with stable downstream IDs. External integration/realtime delivery is not exactly once. See [send safety and rollout](/development/send-safety/).
+
+- `json`: plain JSON, no external dependencies, and the default for the self-host stack.
+- `avro`: Avro with Confluent Schema Registry (`SCHEMA_REGISTRY_URL` plus optional key/secret), also behind the `kafka` build tag. The subject is the topic name plus `-value`, Confluent's default naming strategy, so `warmup-events` registers under `warmup-events-value`.
+
+<Callout type="warn" title="Every derived field carries a default">
+Schemas are derived from the Go structs (`internal/models/event_schema.go`), and each field is given the Avro default matching its zero value. This is what makes adding a field safe: a reader on the new schema can still decode data written under the schema registered before it, filling the field it did not carry from the default, so the registry accepts the new version. A newly added field with no default is rejected under `BACKWARD` compatibility, and because the publisher registers before it serializes, the rejection stops every publish on that topic rather than degrading one field.
+
+Two things follow. The registered document is the marshalled schema, not `Schema.String()`, which omits defaults and would throw the guarantee away. And the registry stays on `BACKWARD` rather than `FORWARD`: adding a field is safe under both, but adding a new event type adds a union branch, which `BACKWARD` accepts and `FORWARD` refuses. When a registration is refused and the subject's effective level is `FORWARD` or `FULL` (or their transitive forms), the publisher sets that subject to `BACKWARD` and registers again, so the registry key needs permission to change a subject's compatibility. Any other level, and any other refusal, is left as it is.
+
+Nothing in this reaches production untested. `internal/app/eventschemas` lists every schema a release publishes and keeps the one the registry last accepted under `testdata/`. CI decodes the recorded schema with the new one, which is the registry's own `BACKWARD` check, and fails a change the registry would refuse. It also fails a compatible change that has not been recorded, so a schema change is always in the diff: run `make schemas` and commit the result. On release the backend registers every listed schema when it boots, and the fleet does not move to the release until that has succeeded.
+
+The registry check covers the schema, not the rollout. Readers decode with the schema id each message carries, so a worker still on the previous release reads new fields fine, but a command type it has never heard of is logged and skipped. The backend rolls out before the fleet, so a new worker command type must be safe to lose while the fleet catches up: send it only to a worker whose reported version handles it, or have the backend retry it until one does.
+</Callout>
+
+The Rust tracking service follows both switches. It speaks Kafka only when compiled with its `kafka` cargo feature, which is what the `tracking:*-kafka` image is, and it encodes with `CODEC_PROVIDER` on either transport. So a Kafka deployment on `CODEC_PROVIDER=json` needs no Schema Registry at all, and `avro` there is refused at boot without `SCHEMA_REGISTRY_URL` rather than failing at the first published event.
+
+<Callout type="warn" title="One codec covers both topics">
+The consumer decodes `jobs.worker-events` and `tracking-events` with the same `CODEC_PROVIDER`, which is why the tracking publisher has to read the setting rather than always writing Avro: a JSON consumer handed Avro drops every open and click with nothing but a deserialize warning.
+</Callout>
+
+## Topics
+
+These are the real topic names. On NATS each is prefixed with the subject prefix (default `pegasusbound.`).
+
+| Topic | Producer | Consumer | Purpose |
+|-------|----------|----------|---------|
+| `w.<worker-uuid>` | Backend | The worker with that ID | Commands to one specific worker |
+| `jobs.worker-events` | Workers | Consumer service | Sync and send results, mailbox updates, health |
+| `tracking-events` | Tracking service | Consumer service | Email opens and link clicks |
+| `email-events` | Backend | None (write-only analytics stream) | Campaign send records |
+| `warmup-events` | Backend | None (write-only analytics stream) | Warmup send records |
+
+Each worker subscribes only to its own `w.<worker-uuid>` topic; the UUID is the worker's identity (derived from its public IP at install time). The consumer service reads `jobs.worker-events` with the consumer group `consumer-group` and `tracking-events` with the group `tracking-consumer`.
+
+## Worker commands
+
+The backend drives workers with a `{type, body}` envelope (`internal/models/event.go`):
+
+```json
+{
+  "type": "SEND_EMAIL",
+  "body": { ... }
+}
+```
+
+Types: `SEND_EMAIL`, `ADD_EMAIL`, `REMOVE_EMAIL`, `EMAIL_VALIDATION`, `WARMUP_ACTION`, `MESSAGE_SEEN`, `MESSAGE_FOLDER`, `MAILBOX_IDENTITY`. Each has a typed body struct in `internal/models/` (for example `models.SendEmail` for `SEND_EMAIL`).
+
+A worker reads its topic one command at a time, so nothing slow runs on that loop. `ADD_EMAIL` connects the mailbox in the background (a republish for a mailbox already loading is ignored, and a command for it waits for that load), and a mailbox that cannot be loaded raises the same `EMAIL_AUTH_ERROR` or `EMAIL_SERVER_ERROR` a failed sync would, so it shows the error instead of looking connected. On Kafka, a handled message's offset is stored and committed in the background rather than with a synchronous commit per message.
+
+The backend's worker reconciler ships `ADD_EMAIL` at once for a mailbox with no worker, on a worker that stopped heartbeating, or moved to another worker. Every other active mailbox is re-shipped once every 30 minutes as a safety net, each at its own point in the interval.
+
+`EMAIL_VALIDATION` is normally not sent on the topic at all. The backend publishes the same body to the worker's Redis channel `email_validation_request:<worker uuid>`, which a worker reads alongside its topic, so a check never waits behind queued sends. Redis reports how many subscribers took it; with none, the next healthy worker is tried, and only when no worker listens there does the check go on the topic.
+
+`MESSAGE_SEEN` carries a read or unread change made in the unified inbox out to the mailbox provider, one event per mailbox and at most `models.SeenRelayChunk` messages each. It answers with nothing: the store was written before the event was published, so the provider's copy is the only thing it changes, and a failure is logged rather than retried because the next sync reports whatever the provider actually holds. Each message carries all three providers' handles and the worker takes the ones its client uses: a provider message id for Gmail and Graph, an IMAP folder plus UID, and the immutable RFC Message-ID, which Graph re-resolves the live id from because a Graph id changes whenever a message moves. The state relayed is the one the row holds when the relay reads it back, not the one the request asked for, so a conflicting toggle leaves the provider agreeing with the store rather than with whoever published last.
+
+`MESSAGE_FOLDER` carries an Archive, Delete or Move to inbox made in the unified inbox out to the mailbox provider, for mailboxes with `email_accounts.relay_folder_moves` on: one event per mailbox and destination, at most `models.FolderRelayChunk` messages each, with the same handles as `MESSAGE_SEEN` plus the row id. Gmail files the batch with one `batchModify` of the system labels. Outlook moves each message to its well-known folder and re-keys the message map from the old Graph id to the new one around the move, because the delta reports the old id removed and would otherwise delete the row. IMAP finds each message by Message-ID before moving it, since the UID the store holds is stale while an earlier filing's answer is still in flight (Undo straight after Archive), then moves each folder's share with one `MOVE`. A message is relayed when the filing moved its row, or when `provider_folder` disagrees with its folder; sent copies stay put on Outlook and IMAP, and drafts and warmup receipts never move. Like `MESSAGE_SEEN` it is published after the response and never retried, so a worker still on the previous release drops it and the mailbox simply keeps its copy where it was until the next filing.
+
+`MAILBOX_IDENTITY` asks the worker holding a mailbox to read its send-as addresses, and one signature, from the provider. It answers on a Redis channel named by the request's `process_id` rather than on the worker-events topic, the same round trip `EMAIL_VALIDATION` uses, because the caller is an HTTP request waiting for it. The control plane makes this call itself in exactly one place, the OAuth handshake, where the token came from the consent the customer just completed and the mailbox has no worker yet.
+
+## Worker results
+
+Workers publish the same envelope shape back on `jobs.worker-events`:
+
+```json
+{
+  "type": "NEW_EMAIL",
+  "body": { ... }
+}
+```
+
+Types: `NEW_EMAIL`, `INBOUND_BOUNCE`, `REMOVE_EMAIL`, `FLAGS_ADD`, `FLAGS_REMOVE`, `UPDATE_EMAIL`, `UPDATE_FOLDER`, `UPDATE_MAILBOX`, `DELETE_MAILBOX`, `TOKEN_UPDATE`, `HISTORY_ID_UPDATE`, `GRAPH_DELTA_UPDATE`, `SYNC_STATE`, `EMAIL_SENT`, `EMAIL_FAILED`, `EMAIL_AUTH_ERROR`, `EMAIL_DISABLED`, `EMAIL_RATE_LIMITED`, `EMAIL_SERVER_ERROR`, `WORKER_HEALTH`.
+
+The consumer registers one handler per type (`internal/app/consumer/events.go`); unregistered types are logged and acknowledged rather than redelivered.
+
+Every `SEND_EMAIL` is answered with exactly one per-task result: `EMAIL_SENT` (the provider accepted the message; the consumer records the wire Message-ID on the task) or `EMAIL_FAILED` (a `SendEmailResult` carrying the error code and message). The control plane stamps a campaign step sent when it hands the send to the worker, so `EMAIL_FAILED` is what walks that back: the consumer marks the task failed, clears the step's `sent_at` and counts the attempt on `campaign_contact_progress`, gives the send back to the campaign's daily counters, writes the failure to the campaign activity log, and reopens a campaign that completed while the send was in flight. After `CampaignSendMaxAttempts` (5) the lead is marked failed and routing drops it; a `RECIPIENT_REJECTED` result (refused at RCPT) skips the retries and is ingested as a bounce instead. Account-level conditions (`EMAIL_AUTH_ERROR`, `EMAIL_DISABLED`, `EMAIL_RATE_LIMITED`, `EMAIL_SERVER_ERROR`) are raised in addition to, never instead of, the per-task result; they carry an `EmailErrorEvent` and act on the mailbox. A worker that does not hold the mailbox yet leaves the send for a few redeliveries before reporting it failed, and the backend never publishes a send to a worker that is not heartbeating.
+
+`UPDATE_FOLDER` reports the canonical folder a provider now has a message in, without the rest of the message. Gmail sends it when a history record adds or removes `INBOX`, `TRASH`, `SPAM`, `SENT` or `DRAFT`, with the folder recomputed from the message's labels, and from a reconciliation that runs every six hours and once per mailbox load: the worker lists the Gmail inbox and asks the backend (`GET /api/v1/internal/sync/provider-folder-messages`) which rows it believes are in inbox, archive, spam or trash, then reports the ones Gmail has elsewhere. The consumer resolves it like `UPDATE_EMAIL`: against the folder the provider last reported, so a message filed in Pegasusbound stays filed unless the provider itself moved it. The worker also sends it, with `relayed` set, for every message a `MESSAGE_FOLDER` left in its destination, plus the handles the move changed (the new Graph id in `provider_id`, or the IMAP `folder_path`, `mailbox` and `uid`). A relayed one writes `provider_folder` and those handles and never the folder, so the sync's own report of the same placement afterwards reads as no move, and a filing undone meanwhile stays undone.
+
+`SYNC_STATE` is the worker's relay of a mailbox's sync state (backfill progress and cursor, fair-use throttle, last-synced time). It carries the full state rather than a delta, so a lost event is repaired by the next one; the consumer writes it to `email_sync_state` and the backend hands it back inside `ADD_EMAIL` on the next load, which is what lets a replaced worker resume an import instead of restarting it.
+
+## Tracking events
+
+Produced by the Rust tracking service when a pixel loads or a tracked link is clicked, consumed into campaign stats and deliverability data:
+
+```json
+{
+  "event_type": "EMAIL_OPENED",
+  "task_id": "uuid",
+  "original_url": "https://example.com/page",
+  "link_id": "uuid",
+  "timestamp": "2026-01-29T12:00:00Z",
+  "user_agent": "Mozilla/5.0...",
+  "ip_hash": "sha256...",
+  "client_ip": "203.0.113.0",
+  "scanner": "proofpoint",
+  "scanner_probable": true
+}
+```
+
+`event_type` is `EMAIL_OPENED` or `EMAIL_CLICKED`; `original_url` and `link_id` (the click ticket, which names the link's stored destination and anchor text) are set only for clicks; IPs are stored as hashes, never raw, and `client_ip` carries only the source network. `scanner` names the mail-filtering network the edge recognised, and `scanner_probable` says that network can also carry a person, which is what browser isolation makes true of the mail-security vendors. Both are absent from events written before those fields existed, and an absent `scanner_probable` reads as `false`, the conservative side. The struct is `events.TrackingEvent` in `internal/events/schemas.go`, mirrored in `tracking/src/events.rs`.
+
+The consumer classifies each event before it counts. An open is automated when the user agent is a mail privacy proxy or missing, or when it arrives within `tracking.machine_window_open_seconds` of the step's dispatch; it is recorded with `opened_machine` and upgraded by a later human open. A click is automated for a missing user agent, for arriving inside `tracking.machine_window_click_seconds` of the same dispatch (`30` by default, set independently of the open window and accepting the same 1 to 900 seconds; it ships shorter because a misjudged click costs an automation rather than a metric), or when the same source clicked another link of the same email within `TrackingClickBurstSeconds`; every click is logged per link in `email_link_clicks` with its reason, and only a human click stamps `clicked_at`, fires instant actions, or emits a webhook. A burst is only recognisable from its second click, so a human click's stamp and log row are written at once but its effects (evidence, instant actions, webhook, realtime event) run after the burst window plus a second, on the classification the click has by then; a burst recognised meanwhile relabels the earlier click and withdraws the stamp when no human click remains. A consumer restart inside the window loses only those deferred effects, and routing still follows the clicked branch at the next step boundary.
+
+`scanner` overrides all of that: a request from a recognised mail-filtering network is automated whatever its user agent claims and however late it arrives, because a security gateway walks a message with an ordinary browser. `scanner_probable` qualifies it. A probable source is measured against `tracking.machine_window_probable_seconds` instead of the window for its event kind (whichever is wider), and outside that window it is judged exactly as an unrecognised source would be. That is what lets the vendor ASNs ship enabled: the delivery-time scan is classified automated, and the recipient who clicks through browser isolation an hour later still counts. A recipient who genuinely clicks inside the window is classified automated too, which is the cost of the widening.
+
+The label carries one effect the consumer does not decide. The tracking service withholds the click's identification ticket from **any** recognised network, probable included, because the edge has no dispatch time and so cannot separate the delivery-time scan from the isolated human click. A probable click the consumer later counts as a person's is therefore still a click with no website-visit attribution behind it.
+
+Website page views do not ride this topic. The tracking service forwards each accepted view to the backend's internal API (`POST /api/v1/internal/page-hits`) instead, because the backend is where the user agent and IP are turned into device and location, and the IP must not sit in a durable stream on the way there.
+
+## Analytics events
+
+The backend records sends on two write-only streams for downstream analytics: `email-events` carries `EMAIL_SENT` records (task, account, campaign, contact, message ID, recipient), and `warmup-events` carries `WARMUP_EMAIL_SENT` records (sender and target accounts, whether it was a reply). Nothing in the repo consumes them today; they exist so an external pipeline can tap the stream.
+
+## Realtime fanout
+
+Dashboard realtime does not ride the event bus. Backend and consumer publish JSON events on a dedicated pub/sub transport (`internal/infrastructure/pubsub/`), and the Elixir realtime service subscribes and pushes to WebSocket clients:
+
+- Default: Redis pub/sub on the channel `realtime:events`. No configuration beyond a shared Redis.
+- `PUBSUB_ENABLED=true`: Google Cloud Pub/Sub instead (requires `GCP_PROJECT_ID`); the backend creates a fixed set of topics and matching `-sub` subscriptions on boot.
+
+Events embed a `BaseEvent` (`event_type`, `user_id`, `timestamp`) plus routing fields on the concrete payload (`org_id`, `campaign_id`, `email_account_id`, `operation_id`). The Elixir broadcaster routes purely on those body fields to the `user:`, `org:`, `campaign:`, `account:`, and `bulk:` channel topics. The event type list and permission gating are documented in the [realtime API reference](/api/realtime/).
+
+## Configuration
+
+```bash
+# Transport
+EVENTBUS_PROVIDER=nats            # nats | kafka (kafka needs the kafka build tag)
+NATS_URL=nats://nats:4222
+NATS_STREAM_NAME=pegasusbound          # optional, default pegasusbound
+NATS_SUBJECT_PREFIX=pegasusbound       # optional, default pegasusbound
+EVENTBUS_HANDLER_TIMEOUT=30s      # optional, per-message handler timeout
+
+# Codec
+CODEC_PROVIDER=json               # json | avro (avro needs the kafka build tag)
+
+# Kafka path only
+KAFKA_BOOTSTRAP_SERVERS=broker1:9092,broker2:9092
+KAFKA_SASL_USERNAME=...
+KAFKA_SASL_PASSWORD=...
+SCHEMA_REGISTRY_URL=https://schema.example.com
+SCHEMA_REGISTRY_KEY=...
+SCHEMA_REGISTRY_SECRET=...
+KAFKA_TRACKING_TOPIC=tracking-events   # optional, default tracking-events
+
+# Realtime fanout
+PUBSUB_ENABLED=false              # true switches Redis pub/sub to Google Cloud Pub/Sub
+```
+
+## Code references
+
+- Bus abstraction and providers: `internal/infrastructure/eventbus/`
+- Codec selection: `internal/infrastructure/codec/`
+- Topic names: `internal/infrastructure/kafka/topics.go`, `internal/events/schemas.go`
+- Envelopes: `internal/models/event.go`
+- Consumer dispatch: `internal/app/consumer/events.go`
+- Tracking producer: `tracking/src/nats.rs`, `tracking/src/kafka.rs`
+- Realtime fanout: `internal/infrastructure/pubsub/`, `realtime/lib/realtime/redis/event_subscriber.ex`

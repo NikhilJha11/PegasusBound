@@ -1,0 +1,66 @@
+// Mirror of internal/models.UniboxOverview. One request fills both
+// the scope rail and the top metric strip.
+
+export interface UniboxMailboxOverview {
+  id: string;
+  email: string;
+  name: string;
+  unread: number;
+  total: number;
+}
+
+export interface UniboxTagOverview {
+  id: string;
+  title: string;
+  color: string;
+  unread: number;
+  total: number;
+}
+
+// Per-conversation-label counts (unread/total counted as threads).
+export interface UniboxCategoryOverview {
+  id: string;
+  title: string;
+  color: string;
+  unread: number;
+  total: number;
+}
+
+// Per-folder thread counts, always emitted for all six canonical
+// folders in sidebar order.
+export interface UniboxFolderOverview {
+  folder: "inbox" | "sent" | "drafts" | "archive" | "spam" | "trash";
+  unread: number;
+  total: number;
+}
+
+export default interface UniboxOverview {
+  total: number;
+  unread: number;
+  today: number;
+  week: number;
+  snoozed: number;
+  awaiting_reply: number;
+  /** Conversations no person wrote in; left out of unread, today, week, Inbox, mailbox and tag counts. */
+  automated: number;
+  automated_unread: number;
+  /** Threads with a pending inbox-agent draft awaiting human review. */
+  awaiting_agent_draft: number;
+  /** Pending outbound email tasks queued from the workspace's mailboxes. */
+  scheduled_pending: number;
+  /**
+   * Hard cap on how many pending scheduled sends one workspace can queue
+   * at once. Each pending send occupies a Cloud Tasks queue slot the
+   * platform pays for, so the cap protects against runaway abuse.
+   * Dashboard renders `scheduled_pending / scheduled_pending_max` so
+   * the user sees their position before hitting the wall.
+   */
+  scheduled_pending_max: number;
+  folders: UniboxFolderOverview[];
+  mailboxes: UniboxMailboxOverview[];
+  tags: UniboxTagOverview[];
+  categories: UniboxCategoryOverview[];
+  generated_at: Date;
+  window_today_start: Date;
+  window_week_start: Date;
+}

@@ -1,0 +1,468 @@
+---
+title: Data control
+description: Where every store lives on disk, what each retention window governs, how backups work, and how to move an instance to another host.
+---
+
+Self-hosting Pegasusbound means holding mailbox credentials, message bodies and contact records on your own disk. This page is the whole answer to where that data is, how long it stays, and how you get it off this machine.
+
+Three questions, and they have different answers:
+
+| Question | Answer |
+|---|---|
+| Where is it? | [Six stores](#where-the-data-sits), each pointed at by one variable |
+| How long does it stay? | [Retention windows](#what-is-kept-and-for-how-long), all editable in the admin panel |
+| How do I move it? | [`pegasusboundctl backup`](#backups) for the instance, [workspace export](/guides/workspace-export-import/) for one workspace |
+
+## Where the data sits
+
+Every store's location is one variable in `.env`. Compose reads a source starting with `/` as a bind mount and anything else as a named volume, so the same variable covers both and there is no second compose file.
+
+| Variable | Holds | Default |
+|---|---|---|
+| `PEGASUSBOUND_PG_DATA` | Postgres: organizations, users, mailboxes (credentials sealed), contacts, campaigns, the audit trail | `<data root>/postgres` |
+| `PEGASUSBOUND_BLOBS` | Message bodies, attachments, avatars, logos and email body images | `<data root>/blobs` |
+| `PEGASUSBOUND_NATS_DATA` | The event bus's JetStream state | `<data root>/nats` |
+| `PEGASUSBOUND_REDIS_DATA` | Cache and rate-limit counters. Disposable | `<data root>/redis` |
+| `PEGASUSBOUND_WORKER_STATE` | A worker's own id and sync cursors. Disposable | `<data root>/worker` |
+| `PEGASUSBOUND_UPDATER_STATE` | The last update job's log. Disposable | `<data root>/updater` |
+
+An [install from `install.sh`](/development/install/) points all six under one data root, so `/opt/pegasusbound/data` is the whole of it and you can `rsync` that path. A clone-and-build install keeps Docker named volumes unless you set the same variables.
+
+Only the first two carry anything you cannot rebuild. The other four are state a fresh container reconstructs, which is why a backup does not include them.
+
+### Encryption
+
+Two keys, and they are not interchangeable.
+
+| Key | Opens | Read by |
+|---|---|---|
+| `CREDENTIALS_ENCRYPTION_KEY` | Mailbox SMTP and IMAP credentials, and OAuth tokens | Backend and workers, without an organization context |
+| `KMS_LOCAL_MASTER_KEY` | The per-organization data keys, which in turn open everything else | Backend and consumer |
+
+Both are unrecoverable. A database backup without them restores an instance whose mailboxes authenticate against nothing, and there is no way back from that. They are in `.env`, and `install.sh` also writes them to `keys-backup.txt` next to the install, which is on the same disk as the database and therefore not a backup either. Copy them somewhere else.
+
+### External stores
+
+Postgres, Redis and blob storage each accept an external target, set at install time or by editing `.env`:
+
+```bash
+PRIMARY_DB=postgres://user:pass@db.internal:5432/pegasusbound?sslmode=require
+REDIS=redis://cache.internal:6379
+BLOB_PROVIDER=s3
+BLOB_BUCKET=pegasusbound
+AWS_ENDPOINT_URL_S3=https://<account>.r2.cloudflarestorage.com
+```
+
+<Callout type="warn" title="Filesystem blobs stop working when workers run off-host">
+A remote worker writes bodies to its own disk, so the dashboard on the control-plane host finds nothing. Any deployment with workers on more than one machine needs S3-compatible blob storage. This is the one storage choice that is not just a preference.
+</Callout>
+
+## What is kept, and for how long
+
+Every window below lives in the database, not the environment, and is edited under **Instance > Configuration > Settings** in the admin panel. A sweep runs a few times a day and reads the current value on every pass, so a change takes effect without a restart.
+
+### Mailbox import and sync
+
+| Setting | Default | Range | What it governs |
+|---|---|---|---|
+| `sync.backfill_days` | 90 | 1 to 730 | How far back the initial import reaches when a mailbox is connected, newest first |
+| `sync.backfill_messages` | 5,000 | 1 to 100,000 | The most messages that import stores per mailbox |
+| `sync.daily_messages_per_mailbox` | 2,000 | 1 to 100,000 | New mail one mailbox may store per UTC day |
+| `sync.daily_messages_per_org` | 25,000 | 1 to 2,000,000 | New plus imported mail across one workspace per UTC day |
+
+Mail over a daily budget is deferred, never dropped: the provider cursor is held and the mail is re-offered on the next pass. Replies to the mailbox's own outreach ride a separate budget of the same size and keep landing regardless.
+
+### TypeSafe judgments
+
+`TYPESAFE_API_KEY` turns on a family of typed judgments, each of which sends a bounded piece of text to TypeSafe and stores a verdict. Without the key none of them runs and no content leaves the instance. What each one sends:
+
+| Judgment | On by | What is sent | Where the verdict lives |
+|---|---|---|---|
+| Automatic inbox tagging | `INBOX_TAGGING_ENABLED=true` | The inbound subject and bounded plain-text body (for a notification recognised offline by its sender, only while the workspace asks notifications whether they need action, or asks one of its own questions of them), plus the previous outbound message in the thread and the name of the campaign it belongs to when one exists, the workspace's own tagging questions, and the names of its tagging languages when any are chosen | `inbox_tag_results`, with the raw probabilities and the actions taken. Completed results travel with the Inbox group in a workspace export; processing claims do not |
+| Reply classification | The key alone | The subject and body of a reply to a campaign, only when no tagging verdict exists for it and the offline layers could not decide | `campaign_contact_progress.reply_class` and `reply_intent` |
+| Copy judgment | The key alone | The subject and body of a campaign step, at Advisor evaluation and on the editor's re-check | `copy_judgments`, keyed by a hash of the copy and never exported |
+| Warmup content lint | The key alone | A generated warmup thread before it enters the bank | Rejected threads are counted on the generation job; nothing else is kept |
+| Bounce classification | The key alone | The bounce reason text, only when it does not name the recipient | `deliverability_events.metadata` |
+| Import column mapping | The key alone | For an import or Google Sheets preview with columns no header matched: every column header, the kind of value each column holds (email addresses, dates, short text and so on, worked out on the instance), and the workspace's custom field names. Never a cell value, and nothing at all unless the first row is clearly headers: none of its cells may be an address, a date or a number, and the Email column must have a header of its own. A contact's row fails that, since its Email cell is the address or blank | Nothing is stored; the answer only fills in the suggested mapping |
+| Form triage | A per-form switch | The submitted answers, labelled by field; never the visitor's address, agent or URL | `form_submissions.triage`, which travels with the Contacts group |
+| Mailbox import columns | The key alone | For a column of an import file that no header name or value pattern placed: the column's header text and a description of its values (such as "16 lowercase letters" or "hostnames"), never a value | Nowhere; the answer only sets that column's suggested field, which can be changed before importing |
+| Mailbox import failures | The key alone | For a connect refusal the import does not recognise: the server's reply with addresses, IP addresses, usernames and long tokens scrubbed out, and the mail host family (such as `google_workspace` or `other`) | `mailbox_import_rows.cause`, as the cause the row is grouped under |
+
+See [Automatic inbox tagging](/guides/inbox-tagging/), [Advisor](/guides/advisor/), [Warmup](/guides/warmup/), [Deliverability](/guides/deliverability/), [Contacts](/guides/contacts-crm/#mapping-into-your-custom-fields), [Forms](/guides/forms/) and [Import mailboxes](/guides/mailbox-import/).
+
+### Event history
+
+| Setting | Default | What it holds |
+|---|---|---|
+| `retention.engagement_event_days` | 365 | Per-event open and click logs: client, device, approximate location |
+| `retention.form_event_days` | 180 | Form funnel events: views, starts, field-level drop-off |
+| `retention.audit_log_days` | 90 | The audit trail: actor, IP address, user agent, change payload |
+| `retention.warmup_mail_days` | 30 | Warmup mail in the mailboxes themselves, and the stored copy of each message's body. Deleted by the platform once older than this, wherever the mailbox files it; a mailbox can set its own window |
+| `retention.warmup_event_days` | 365 | Per-message warmup records: tokens, receipts, tampering events, spam moves and their attribution, spam reports. The daily sent and received counts behind the analytics are kept. When each mailbox's owner last acted in it (five-minute marks, no message content) is kept 30 days whatever this is set to |
+
+The first three are between 1 and 3,650 days, and they are the settings a retention or privacy policy applies to, because each window is also how long the personal data in that log is held. The warmup mail window starts at 3 days and the warmup records window at 30, the least the engagement legs and the pool health bands need.
+
+None of them change a number anyone reads. Campaign progress keeps its own summary of opens and clicks that outlives the per-event log, so counts, filters and branching are unaffected by shortening any of these. What gets shorter is what a contact's timeline can show, how far a funnel report reaches, and how far back an admin can audit.
+
+<Callout type="warn" title="Shortening a window deletes on the next sweep">
+There is no grace period and no copy. Take a backup first if you are not sure.
+</Callout>
+
+The **minimal retention** preset in the admin panel and in the installer sets the three event logs to 30 days, warmup mail to 7 and warmup records to 30.
+
+### Warmup mail in mailboxes
+
+Warmup mail is real mail in a real mailbox, filed into the warmup folder in both directions, and it is the platform's job to clear it. Once a message is older than the mailbox's window it is deleted where it sits: moved to Trash on Gmail, which Gmail empties after 30 days, and removed outright on Outlook and IMAP. The platform's stored copy of the body goes with it. Nothing about a deletion the platform made is ever held against the mailbox, and a message deleted by its owner after the first day is treated the same way. See [Warmup](/guides/warmup/#retention) for what the mailbox owner sees.
+
+### Warmup standing by address
+
+Warmup keeps the standing of every penalised mailbox (score, state, and any block) against its address as well as its row, so removing the mailbox or dropping out of the pool and coming back does not start it clean. The copy is cleared as soon as the mailbox recovers, and once the mailbox is gone it is kept for 90 days after the block ends or after the removal, whichever is later; a block that requires review is kept until an operator lifts it. A mailbox in good standing has no such copy. The window is fixed rather than a setting, and the rows are purged by the same sweep.
+
+### Pending inbox verification
+
+Mail whose warmup verification is temporarily unavailable waits in the `unibox_pending_emails` Postgres table. It holds the sync event, including message metadata and bounded searchable body text, until verification succeeds or the mailbox is deleted. The consumer retries it automatically after restarts. Full bodies remain in blob storage. This pending queue is included in instance backups but excluded from workspace exports, whose destination re-syncs provider mail.
+
+### Placement comparison copies
+
+A [tracking comparison](/guides/placement-tests/#tracking) renders each seed's copy once and sends it from both halves, so while it runs it keeps that rendered copy, with merge fields and AI blocks filled in for the chosen contact, in the `placement_renders` Postgres table, sealed with the workspace's data key. The placement poller deletes it once neither half of the comparison is running. It is included in instance backups and excluded from workspace exports.
+
+### Warmup reconnect recovery
+
+`warmup_recovery_identifiers` holds SHA-256 fingerprints of a mailbox address and exact warmup message IDs or verification tokens, scoped to a workspace. They survive removing a mailbox so adding the same address again can recognize recent warmup mail without retaining its content or credentials. Each expires 90 days after its source record, expired identifiers are swept every minute in bounded batches, and deleting the workspace removes them immediately. They travel in the Warmup group of a [workspace export](/guides/workspace-export-import/).
+
+`warmup_pending_filings` holds message locators awaiting provider filing and worker acknowledgement. Failed attempts retry after five, fifteen, or thirty minutes according to the row's age. A provider-specified retry time for a failed filing is retained as a separate, monotonic `provider_retry_at` timestamp: it can extend the ordinary retry, but the queue's claim lease alone does not block a valid published action. Duplicate commands recheck that exact filing's persisted provider floor before touching the mailbox. Unassigned mailboxes remain pending until reassignment, without replaying engagement signals. An acknowledgement or mailbox deletion removes the row. This instance-local queue and its provider retry time do not travel in workspace exports; the destination resyncs the mailbox and files recognized warmup messages.
+
+Upgrade the backend and database before workers. Existing pending rows start with no provider retry time; there is no guessed historical success or floor. Workers still on an older version do not record or observe these floors, so the protection covers only upgraded workers. The existing retry policy when a worker talks to an older backend is unchanged; unsupported deferral is not a durable acknowledgement. No new setting or mailbox reconnection is required for an existing installation.
+
+Failed deferral writes remain unacknowledged. The worker retains the scoped deadline in memory while retrying persistence without another provider call; that memory is not durable proof. Restart protection begins only after a provider floor is committed. Downgrading the schema retains known provider times in the ordinary queue retry timestamp, but cannot give older workers the new duplicate-command admission check.
+
+### Mailbox import files
+
+A [mailbox import](/guides/mailbox-import/) keeps each row's credentials in `mailbox_import_rows`, sealed with the workspace's own data key, until the row is connected. The credentials of rows that did not connect are kept for 7 days after the import finishes, so a failed row can be fixed and retried, and are then deleted. A finished import and its rows (address, status, cause, and the uploaded cells that are not passwords, which feed the failed-rows download) are deleted 30 days after it finished. Both windows are fixed rather than settings, and the sweep that applies them runs every minute. A connected mailbox's credentials are stored like any other mailbox's.
+
+The column mappings an import saves (`mailbox_import_mappings`: which field each header of a file means, no values) are kept until the workspace is deleted, and travel in a [workspace export](/guides/workspace-export-import/). Imports themselves do not.
+
+### Contact import files
+
+A [contact import](/guides/contacts-crm/#importing) keeps every row of the uploaded file, as uploaded, in `contact_import_rows`, with what became of it (the address, whether it was imported, updated, skipped or failed, and why). Contact data is stored the same way the contacts themselves are. A file uploaded but never started is deleted 24 hours after the upload, or after it was discarded; a finished or stopped import and its rows, which feed the failed-rows download, are deleted 30 days after it finished. Both windows are fixed rather than settings, and the sweep that applies them runs every hour. The contacts an import created are ordinary contacts and are not affected.
+
+The column mappings contact imports save (`contact_import_mappings`: which field each header of a file means, no values) are kept until the workspace is deleted, and travel in a [workspace export](/guides/workspace-export-import/). Imports themselves do not.
+
+### Mailbox sources and redirects
+
+Three things a workspace can set up alongside its mailboxes, each kept until the workspace deletes it (or the workspace itself is deleted). None has a retention window.
+
+| Table | Holds | Secrets |
+|---|---|---|
+| `mailbox_vendor_connections` | An [inbox vendor](/guides/mailbox-import/#import-from-an-inbox-vendor) account: which vendor, a label, its status and last error | The API key and account IDs, sealed with the workspace's data key. No response returns them |
+| `mailbox_domain_grants` | A [Google Workspace or Microsoft 365 admin grant](/guides/mailbox-import/#connect-a-whole-google-workspace-domain): the provider, the Workspace domain or Microsoft tenant ID, the domains it covers, and for Google the admin address used to read the directory | None. No token is stored for a grant or for any mailbox it connected; the backend mints a short-lived one from the instance's own Google service account or Microsoft app each time a worker needs it |
+| `domain_redirects` | A [root redirect](/guides/sending-domains/#root-redirects): the domain, the website it sends visitors to, the ownership value for its `_pegasusbound` `TXT` record, the result of the last DNS check and of the last visit to the domain (what answered, and the proxy when it named itself), and whether this instance or Pegasusbound Cloud serves it. For one Cloud serves, a copy of the records and the tracking host Cloud listed | None. The ownership value is derived from `AUTH_SECRET`, the workspace and the domain, so it stays the same for that workspace and differs for every other workspace and instance |
+
+A mailbox records which vendor account or grant it came from, and for a grant the address (Google) or Graph user ID (Microsoft) its tokens are minted for. Deleting a vendor connection keeps its mailboxes; deleting a grant stops the mailboxes it connected.
+
+Vendor connections and redirects travel in a [workspace export](/guides/workspace-export-import/); a redirect Pegasusbound Cloud served arrives served by the destination. Grants do not: a grant is recorded only after the workspace proves the domain (Google) or completes the administrator's consent (Microsoft) on the instance that holds it, and a row from an archive proves neither. The mailboxes a grant connected travel without it. On the destination the workspace makes the grant again and connects the same users, which relinks those mailboxes instead of adding new ones.
+
+Forwarding a domain through an inbox vendor, and a tracking `CNAME` written through one, are stored at the vendor, not here. Pegasusbound keeps only the vendor's domain list, in memory for five minutes.
+
+### Disconnecting a mailbox
+
+Disconnecting a mailbox, or deleting the workspace holding it, removes its rows from Postgres straight away through the database's own cascades. Two things cannot be done in that instant and are queued instead, then worked off within about a minute:
+
+| Owed | What happens |
+|---|---|
+| The OAuth grant | A Gmail mailbox's refresh token is sent to Google's revocation endpoint, which invalidates it and removes the instance from the customer's third-party access list. Microsoft publishes no per-application revocation endpoint, so an Outlook mailbox's tokens are destroyed locally and the customer removes the app themselves |
+| The message bodies | Everything the mailbox wrote under `users/<user>/emails/<mailbox>/` in the blob store is deleted, whether that is a filesystem path or an S3 bucket |
+
+While an erasure is outstanding its row holds a copy of the mailbox's OAuth refresh token, still sealed under `CREDENTIALS_ENCRYPTION_KEY`, because the row it was read from goes with the mailbox and the token is what the revocation sends. It is destroyed with the rest of the row when the erasure finishes.
+
+The queue is the `mailbox_erasures` table, and it holds only work still owed: a finished erasure is removed rather than kept, because the row names the address the customer asked to have forgotten. A failure is retried with a widening backoff, capped at six hours, and never abandoned, so an unreachable provider or store delays the erasure instead of losing it. Anything still outstanding after a day is reported by the `mailbox_erasure` job, visible under scheduled jobs in the admin panel.
+
+This runs on the control plane, which is the only place holding both the credential key and a credential for the blob store. A worker cannot do it: it signs one object at a time through the control plane and holds no bucket credential at all.
+
+### Set them at install time
+
+The installer writes the answers into `.env` as one document, applied on the first boot of a fresh database:
+
+```bash
+PEGASUSBOUND_SETTINGS_BOOTSTRAP={"sync":{"backfill_days":30},"retention":{"audit_log_days":30}}
+```
+
+It is read only while the settings row has never been written. From the first save in the admin panel onwards the panel is authoritative, so leaving the line in `.env` never undoes a later edit.
+
+## Backups
+
+`pegasusboundctl backup` writes one bundle holding the three things that only restore together:
+
+- the database, as a `pg_dump`
+- the blob root, when blobs are on the filesystem
+- the encryption keys, unless you pass `--no-keys`
+
+```bash
+docker compose -p pegasusbound exec backend pegasusboundctl backup --out /data/blobs/pegasusbound.tar.gz
+docker compose -p pegasusbound cp backend:/data/blobs/pegasusbound.tar.gz ./pegasusbound.tar.gz \
+  && docker compose -p pegasusbound exec -T backend rm -f /data/blobs/pegasusbound.tar.gz
+```
+
+`/data/blobs` is a hand-off, not a destination: it is the one path the container and the host both see. The `&&` matters twice over. `backup` leaves its own output out of the archive, but a bundle left there is swept into the next run, so it has to be deleted; and a `cp` that failed must not be followed by deleting the only copy that exists.
+
+The bundle is written 0600 and holds every mailbox credential on the instance plus the keys that open them. Treat the file as you would the instance itself.
+
+An install from `install.sh --wizard` can schedule this for you: `backup.sh` next to the install, a systemd timer, a retention count, and an optional `aws s3 cp` to somewhere off the host. A backup that only exists on the machine it backs up is not one.
+
+### Restore
+
+On the destination host, with the same keys in place:
+
+```bash
+docker compose -p pegasusbound exec backend pegasusboundctl restore --file /data/blobs/pegasusbound.tar.gz
+docker compose -p pegasusbound restart
+```
+
+The restore empties the schema and replays the dump, so it replaces everything currently on that instance and asks you to type `restore` first.
+
+Before it does anything it compares the bundle's `CREDENTIALS_ENCRYPTION_KEY` and `KMS_LOCAL_MASTER_KEY` against the destination's and refuses to continue when they differ, printing the two lines to put in `.env`. That check is the point of the command: without it a restore looks like it worked and every mailbox fails to authenticate days later, with no error that names the cause.
+
+## Moving an instance
+
+Two ways, and they answer different questions.
+
+### The whole instance, to a new host
+
+Every workspace, every user, the platform admins, the API keys.
+
+<Steps>
+
+<Step>
+
+### Install Pegasusbound on the new host
+
+```bash
+curl -fsSL https://pegasusbound.com/install.sh | sh -s -- --host <new-hostname>
+```
+
+</Step>
+
+<Step>
+
+### Put the old keys in the new `.env`
+
+Copy `CREDENTIALS_ENCRYPTION_KEY` and `KMS_LOCAL_MASTER_KEY` from the old install, then recreate the containers so they take:
+
+```bash
+docker compose -p pegasusbound up -d
+```
+
+</Step>
+
+<Step>
+
+### Restore the bundle
+
+```bash
+docker compose -p pegasusbound exec backend pegasusboundctl restore --file /data/blobs/pegasusbound.tar.gz
+docker compose -p pegasusbound restart
+```
+
+</Step>
+
+<Step>
+
+### Check it
+
+```bash
+docker compose -p pegasusbound exec backend pegasusboundctl status
+```
+
+Mailboxes should be connected, not needing a reconnect. If they need one, the keys did not match.
+
+</Step>
+
+</Steps>
+
+The `rsync` alternative works too and is sometimes simpler, as long as the stack is **stopped** first: a running Postgres data directory copied file by file is not a consistent snapshot and can restore as a corrupt cluster. Stop it, copy the data root and the `.env` to the new host, start it there. It moves the same bytes; the bundle exists because it is the version that survives a different host layout, a different Postgres, a live instance, and a partial copy.
+
+### One workspace, to another instance
+
+[Workspace export and import](/guides/workspace-export-import/) moves a single organization's data between two running instances, re-sealing its secrets for the destination's keys. That is the per-customer tool; the bundle here is the instance-level one. They are not interchangeable: a bundle cannot be applied to one workspace, and a workspace archive cannot restore an instance.
+
+### Mailbox sync recovery data
+
+New durable admissions retain an organization-encrypted arrival payload in `sync_arrival_outbox` alongside the provider map. The queue tracks delivery stages and retries consumer failures under the original message identity. A delivered arrival is removed; an unresolved arrival is retained for retry until it completes or its owning mailbox or organization is deleted. Deleting the mailbox intentionally removes that mailbox's pending work. This queue does not schedule new sends or authorize repeating a send.
+
+Provider reoffers check the canonical message map before admitting new mail. IMAP copies with the same RFC Message-ID in one fetched batch use that same known-message path after the first admission, preserving the stored body and identity without consuming the message budget twice. Live copies still reconcile their UID and flags. This worker fix needs no schema change or backfill, and does not infer historical delivery success from a legacy map without durable admission proof.
+
+A full-instance backup must preserve the database, wrapped organization keys, the root key needed to unwrap them, and referenced message-body storage together. Restoring a queue without its keys or body objects cannot restore delivery. Use the normal consistent instance backup, not a separate copy of just the queue. A workspace archive excludes the queue and provider mappings whose arrivals are still pending. Drain pending work on the source before moving a workspace; importing an archive does not resume source-instance delivery.
+
+The consumer logs aggregate pending counts and oldest-arrival age. Arrivals older than five minutes, or delivery/inspection failures continuing for one minute, raise a deduplicated operator alert through the existing operator-notification integration when configured. Logs and notifications contain counts and age, not message bodies or addresses. Operator notifications repeat at most once per fifteen minutes; without an operator channel, monitor consumer logs for `sync arrival queue needs attention`. An empty queue is not proof of provider success or historical completeness.
+
+`sync arrival delivery diagnostics` adds count/duration-only summaries roughly every thirty seconds (the first returned pass and a final shutdown summary can log immediately). Fixed stage names distinguish claim, key lookup, existing decrypt/decode work, NEW_EMAIL/bounce/complaint handler attempts, checkpoint/retire/retry writes and backlog observation. NEW_EMAIL also measures existing warmup-verification, filing/defer, inbox-write, realtime/webhook and optional automation helper attempts. No diagnostic query, payload inspection or additional decryption is performed; the summary has no identifiers, addresses, contents, credentials or raw errors. Existing unrelated logs keep their original behavior.
+
+Counts are attempts, including failed calls, empty claims and helper calls that find no work, not row completions or provider successes. A checkpoint or retire attempt does not prove a matching row changed. Nested durations are inclusive and cannot be added together. `pass_duration_ms` sums returned pass work in the reporting window, including backlog checks but excluding the five-second ticker wait; last/max pass duration and actual context cancellation/deadline counts are separate. Reports occur after a pass returns, so a dependency that never returns is not diagnosed as a completed pass. The diagnostics do not change the thirty-second timeouts, thirty-two-row batch limit, stage order, lease/retry policy or acknowledgement guards, and do not establish full inbox freshness.
+
+The backend also logs `sync arrival admission deferred; durability not confirmed` when it cannot acknowledge an arrival. Diagnostics contain a server-controlled failure stage, a validated SQLSTATE when available, valid user, mailbox and arrival UUIDs, and request identifiers accepted by the middleware's bounded tracing policy. They exclude raw error text, database error details, provider message identifiers, message contents and encryption material. The worker still receives only an unacknowledged admission and retains its cursor. These are control-plane observations, not proof of a provider outage.
+
+See [upgrade order and downgrade limits](/development/install/#mailbox-sync-upgrade-order). Legacy maps without stored arrival payloads cannot reconstruct historical lost mail.
+
+## Outbound calls
+
+### Diagnostic and managed-consent portability
+
+Warmup placement aggregates travel in a [workspace archive](/guides/workspace-export-import/). Raw `warmup_received` first-observation, authentication-header and provider-thread provenance is explicitly instance-local and is not exported. Imported task lineage, parent receipt/message handles, queue revisions and worker dispatch nonces/results reset, so historical metadata does not authorize a continuation or replay on another instance.
+
+Managed OAuth consent tables contain operation/reference hashes and restrictive history, not authorization codes, PKCE verifiers, raw session handles or credentials. History remains until organization deletion. Browser/PKCE state in Redis expires after ten minutes; encrypted provider credentials retain their normal Cloud mailbox lifetime. Import keeps restrictive history while clearing source-instance/session/remote/planned-account/activation handles. Disconnect does not erase that history, and downgrade refuses to discard it. Revoking instance access does not delete the independently Cloud-owned provider grant or mailbox; pause or delete that mailbox on Cloud separately. See [managed consent recovery](/guides/pegasusbound-cloud/).
+
+A self-hosted Pegasusbound makes no outbound call of its own except the one below, which is off with a single setting. The mail host lookup and company logos are listed too: both are off on a self-host unless you turn them on.
+
+| Call | When | Turn it off |
+|---|---|---|
+| GitHub releases API | Every 30 minutes, to tell the admin panel a newer version exists | `UPDATE_CHECK_ENABLED=false` |
+| Company logos | While the contact list is on screen, the browser (not the server) asks DuckDuckGo's favicon service (`icons.duckduckgo.com`) for the logo of each contact's company domain, once per domain. Only the domain is sent, never the address or anything else about the contact, and personal inboxes (Gmail, Outlook.com and the like) are never looked up. Without it, contacts show their initials | Off by default on a self-host; `PEGASUSBOUND_COMPANY_LOGOS=on` on the web container turns it on (it is on for Pegasusbound Cloud) |
+| Mail host lookup | When a [mailbox import](/guides/mailbox-import/) meets a domain whose MX records do not name a known provider, and once for each domain of a mailbox whose host is not recorded yet (one connected before hosts were recorded, or one connected by hand over SMTP and IMAP). Mozilla's Thunderbird ISPDB (`autoconfig.thunderbird.net`) is asked for the settings of that domain (or of its MX host's domain), after the domain's own autoconfig file. Only the domain name is sent, and the answer is cached for 6 hours. Without it, detection uses the domain's DNS and its own autoconfig file only | Off by default on a self-host; `MAILHOST_ISPDB=true` turns it on (it is on for Pegasusbound Cloud) |
+
+These are made only when a workspace uses the feature behind them, so an instance where nobody does makes none of them:
+
+| Call | When |
+|---|---|
+| Inbox vendor APIs (`api.inboxkit.com`, `api.zapmail.ai`, `api.mailforge.ai`, `api.infraforge.ai`, `api.maildoso.com`, `api.cheapinboxes.com`, `server.scaledmail.com`) | A workspace connects a vendor account, lists its mailboxes, imports them (each row's credentials are read as it connects), or has a vendor mailbox stopped on a connection error (checked every 15 minutes, at most once every 6 hours per mailbox). Also when the workspace opens its sending domains (the domain list of each active vendor account, at most once every five minutes per account), forwards a domain through its vendor, or has a tracking `CNAME` written there. Only that workspace's key is sent, to that vendor |
+| Google (`accounts.google.com`, `oauth2.googleapis.com`, `admin.googleapis.com`, `gmail.googleapis.com`) | A workspace creates, checks or uses a Google Workspace grant: the administrator's sign-in when that is how the domain is proved, token minting for the grant's addresses, the admin's directory entry and the domain's directory when picking mailboxes, and a Gmail profile read when a grant or mailbox is verified. Grants are re-checked hourly |
+| Microsoft (`login.microsoftonline.com`, `graph.microsoft.com`) | A workspace creates, checks or uses a Microsoft 365 grant: the administrator's consent sign-in, application token minting for the tenant, the organization's users, and a mailbox read when one connects. Grants are re-checked hourly |
+| DNS lookups | A workspace sets up a root redirect or a domain-wide tracking host, or proves a Google Workspace domain by DNS: `TXT`, address and `CNAME` lookups for that domain, through the host's resolver. Pending redirects are re-checked every 10 minutes, verified ones every 6 hours. The sending-domain authentication check (about once a day per domain, and on demand) reads SPF, DKIM and DMARC the same way, and when the host's resolver does not return a record it asks that domain's own nameservers directly on port 53 (never one on a private or loopback address) |
+| The redirect's own domain | Once a root redirect's DNS verifies, the backend opens `http://<domain>/` and `https://<domain>/` like a visitor, without following it off the domain, to see whether the redirect answers. Only public addresses on ports 80 and 443 are opened. Repeated with the DNS check: every 10 minutes while visitors do not get the redirect (for two weeks after it verified), every 6 hours otherwise |
+| Pegasusbound Cloud (`api.pegasusbound.com`, or `PEGASUSBOUND_CLOUD_URL`) | A linked instance has a root redirect [served from Pegasusbound Cloud](/guides/sending-domains/#serve-it-from-pegasusbound-cloud): the domain, the website and the `www` setting, with the instance's link token, when it is saved, moved, checked or removed, and whenever the instance re-reads Cloud's verdict (on the same schedule as its own redirects) |
+
+Everything else is you: mail through the mailboxes you connect, DNS lookups for the domains you check, and whatever integrations you configure. There is no telemetry, no phone-home, and no license check.
+
+### Error reporting
+
+An instance reports errors nowhere unless you point it somewhere. Every service reads its own credentials and none of them ship with any, so a default install sends no crash, no stack trace and no browser error to anybody, including us.
+
+Two backends are supported and you choose either, both, or neither. PostHog is the default one; Sentry works exactly as it always has.
+
+| Service | PostHog | Sentry |
+|---|---|---|
+| Backend, consumer, worker | `POSTHOG_KEY` | `SENTRY_DSN` |
+| Forms service | `POSTHOG_KEY` | `SENTRY_DSN` |
+| Tracking service | `POSTHOG_KEY` | `SENTRY_DSN` |
+| Realtime service | `POSTHOG_KEY` | `SENTRY_DSN` |
+| Dashboard and admin containers | `PEGASUSBOUND_POSTHOG_KEY` | `PEGASUSBOUND_SENTRY_DSN` |
+| Public form pages | `PEGASUSBOUND_POSTHOG_KEY` on the forms service | `PEGASUSBOUND_SENTRY_DSN` on the forms service |
+
+`POSTHOG_HOST` decides which PostHog receives them, including one you run yourself, and `POSTHOG_ERROR_TRACKING=false` turns error reporting off while leaving the key configured for the product analytics below. A Sentry DSN names whatever Sentry Cloud project, self-hosted Sentry or Sentry-compatible server you like.
+
+Leave them unset, which is the default the installer writes, and nothing leaves the process: there is no host to contact and nothing to opt out of. Errors still reach that service's own log, as they always did. The dashboard, the admin panel and form pages go further and load no reporting code at all, so there is not even a script to block.
+
+What a reported error carries is the exception, its stack trace, the service, the environment and the build, plus enough context to answer it:
+
+- **Which workspace and user.** A browser exception carries the organization id and user id of whoever hit it, and a server-side one carries them for the request that panicked, along with its route and request id. That is what makes "this customer says campaigns are broken" a search rather than a guess. On the server side that is a property and nothing more: no person is identified. In the dashboard and the admin panel, with a browser key set, the signed-in user is identified to PostHog (a person profile with their email and name, and an identifier in local storage and a cookie), so the exception belongs to that person; see usage analytics below.
+- **What led to it.** The last routes visited and the last API calls that failed, with their method, path, status and request id.
+- **Nothing else about the request.** No headers, no bodies, no query strings. Session replay exists only in the dashboard and the admin panel, only with a browser key set, and `PEGASUSBOUND_POSTHOG_SESSION_REPLAY=false` turns it off; the marketing site and public form pages are never recorded.
+
+Server-side reports that belong to no request, a scheduled job or a worker, are attributed to the process that raised them and to nobody.
+
+The `pegasusbound` CLI runs on your own machine and reports nowhere, ever. It has nothing to set.
+
+### Usage analytics
+
+There are none. A self-hosted instance loads no analytics script and sends no usage data, not aggregated, not anonymised, not "to help us improve the product".
+
+The hosted service at pegasusbound.com does measure its own marketing site, dashboard and admin panel, including session replay in the two apps, and the code for that ships in the same images you run. It is inert without a key: the installer never asks for one, the `.env` template does not mention it, and a build without one contains no analytics script for you to block. If you want to check, `grep posthog` the served assets of your own dashboard.
+
+If you do want product analytics on your own instance, the variables are on [configuration](/development/configuration/#product-analytics-and-session-replay) and they accept a self-hosted PostHog. The server-side `POSTHOG_KEY` carries the backend's error tracking and its product events; the browser-side `PEGASUSBOUND_POSTHOG_KEY` is what turns on the dashboard's and the admin panel's analytics, session replay and browser errors, and `PEGASUSBOUND_POSTHOG_ERROR_TRACKING` and `PEGASUSBOUND_POSTHOG_SESSION_REPLAY` switch those last two off separately. That is your decision to make, and nothing about it points at us.
+
+## Diagnostic evidence and sending restrictions
+
+Diagnostic participation, shared limits, durable recovery evidence and operator repair history are organization data. Raw MIME is never persisted by the bounded Gmail/Graph DKIM verifier. Minimal verifier/version/time results can attach to historical receipt evidence; source-worker/message authorization nonces are excluded from workspace moves. The SQL reconciliation outbox is source-instance-local and retained by full database backups, not organization archives. Drain it before moving a workspace; pending effects survive restart, delivered rows expire after seven days, and organization/task deletion cascades their removal. Repair audit history lasts with the organization. Rollback refuses pending effects, unknown sends and retained restrictive state. See [send safety](/development/send-safety/).
+
+## Retained node evidence and admin device requests
+
+Recent fleet evidence uses existing primary Redis, not a SQL migration or
+external journal reader. Each node retains at most 1,000 allowlisted events for
+one hour, pruned by observation time/count on ingest and time-filtered on reads.
+Capture metadata expires after two hours; retry deduplication after one hour.
+Ingestion is limited to 30/node/minute. Each process has a 256-event memory
+queue, up to 32 events/batch and at most three bounded transport attempts.
+Permanent HTTP failures are not retried; rate limiting pauses capture uploads
+for the server's bounded `Retry-After` interval (60 seconds by default).
+The rejected batch counts as known loss. Known drops
+reset with the process ID; crashes/lost acknowledgements are not fully measured.
+
+Data contains fixed event names, node/mailbox/event/process UUIDs, timestamps,
+canonical severity/category and numeric status/counts. No addresses, subjects,
+message bodies, headers, raw errors, folder names, provider tokens, passwords
+or broker connection strings are forwarded. Allowlists run before transport
+and at ingest/read. This instance-local evidence is not organization mail data
+and is excluded from workspace export/import; it is not a delivery receipt.
+
+Generic runtime error coverage is explicitly unavailable across all logger
+sources. The worker Zap hook emits coarse `worker_error` events, but worker
+Zerolog and consumer standard-log/Zerolog errors are not captured. Existing
+typed provider/sync/control-plane decision hooks remain available separately.
+Neither recent empty capture nor a zero known-drop counter proves zero errors.
+The API, administrator CLI and Fleet detail disclose this source gap instead
+of forwarding arbitrary log text or trying to infer severity from raw strings.
+
+`NODE_LOG_TOKEN` is a separate 256-bit node-enrollment ingestion credential.
+Its hash stays in Redis until rejoin rotates it or node deletion revokes it;
+enrollment identity is not an event and does not expire with history. Protect
+the node environment like other credentials; never publish `env_b64` or include
+raw credentials in support bundles. Node deletion removes its credential,
+events and capture metadata; TTL retry markers age out independently. Redis
+eviction/restore may lose credential hashes: re-enroll, never fall back to shared
+broker authentication for logs.
+
+Admin device grants/indexes/hashed session-bound consent tokens expire within
+five minutes. Device secrets are hashed; access/refresh tokens are not stored
+there for deferred delivery. Rate counters expire after one/ten minutes.
+Successful issuance uses existing SQL sessions and admin audit logs, retaining
+the original MFA flag/provider/proof timestamp. Redis loss cancels pending
+handshakes, not issued sessions. No permanent grant datastore/migration is added.
+
+### Upgrade order and coverage
+
+Deploy the backend first, then upgrade node binaries/images. Existing nodes need
+authenticated re-enrollment to receive `NODE_LOG_TOKEN` in the protected join
+environment. The existing broker key is fleet-wide, not proof of ownership of
+one UUID; this release does not exchange it for per-node evidence authority or
+silently rotate another node's credential. Upgrading alone therefore leaves
+evidence unavailable when the node has no enrollment-issued log credential.
+
+For a node installed with the normal join script, obtain a fresh join token
+through Fleet settings (or the existing administrator CLI) and rerun the
+instance's `/join.sh` with the same URL, role and `--config-dir`, retaining the
+original name, region and image-repository options. The script reads
+`PEGASUSBOUND_NODE_ID` from the existing `node.env` and sends that UUID in the join
+request. Keep that file and configuration directory in place: removing them
+would enroll a different identity. Do not delete/disconnect the fleet node or
+move its mailboxes. A rejoin does not revoke provider credentials or change
+mailbox assignments. The backend regenerates managed `node.env` from its
+current configuration; `node.local.env` is never truncated and is loaded last.
+Keep local overrides there, not in managed `node.env`, and do not override the
+new `NODE_LOG_TOKEN` with a stale local value. The script performs a normal
+service restart, not a zero-downtime refresh. Do not manually copy secrets.
+
+Normal first joins persist a random, nonsecret UUID in `node.pending-id` inside
+the same configuration directory before their first request. Failed enrollment
+or a lost successful response can then be retried with the same identity.
+An existing valid UUID in `node.env` takes precedence. A bounded `flock` lock
+(from Linux util-linux) serializes enrollment through configuration writes;
+the response and returned environment must match the chosen UUID before any
+managed configuration is written. Do not remove pending identity state while
+retrying. Dry-run and print-unit do not initialize pending state or take locks.
+
+Manually provisioned nodes must use the existing authenticated enrollment with
+their original UUID and protected configuration, not a newly generated ID.
+New joins receive the log credential automatically. Redis credential-hash loss
+requires the same authorized re-enrollment; no broker/internal-token fallback
+is accepted by log ingestion. Older binaries do not implement capture, and
+coverage remains unavailable until an upgraded process actually sends evidence.
+There is no import of old journal/container logs. Empty fresh capture is not
+proof of health. See [exact diagnostic contracts](/api/endpoints/#platform-node-diagnostics).
+Admin UI/CLI changes are a separate stage; backend endpoints alone do not
+provide the consent page or CLI command.
+
+## See also
+
+- [Install](/development/install/): the wizard that asks all of this up front
+- [Configuration](/development/configuration/): every variable and every database-backed setting
+- [pegasusboundctl](/development/pegasusboundctl/): `backup`, `restore`, and the operator commands
+- [Workspace export and import](/guides/workspace-export-import/): the per-workspace story

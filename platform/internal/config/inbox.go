@@ -1,0 +1,84 @@
+package config
+
+import (
+	"os"
+	"strconv"
+	"strings"
+
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/gmail/v1"
+)
+
+type Oauth2Inbox struct {
+	Google  *oauth2.Config
+	Outlook *oauth2.Config
+}
+
+// GoogleOAuthConnect reports whether a NEW Gmail mailbox may be connected with
+// Google sign-in. Configured clients default on; an explicit flag overrides it.
+// Existing mailboxes can still be re-authorized regardless of this gate.
+func GoogleOAuthConnect() bool {
+	if strings.TrimSpace(os.Getenv("BOX_GOOGLE_CLIENT_ID")) == "" || strings.TrimSpace(os.Getenv("BOX_GOOGLE_CLIENT_SECRET")) == "" {
+		return false
+	}
+	value := strings.TrimSpace(os.Getenv("BOX_GOOGLE_OAUTH_CONNECT"))
+	if value == "" {
+		return true
+	}
+	b, err := strconv.ParseBool(value)
+	return err == nil && b
+}
+
+func GoogleOauth2Inbox(baseURL string) *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:     os.Getenv("BOX_GOOGLE_CLIENT_ID"),
+		ClientSecret: os.Getenv("BOX_GOOGLE_CLIENT_SECRET"),
+		RedirectURL:  baseURL + "/addresses/google/callback",
+		// The smallest set that does the job. Gmail's scopes nest:
+		// gmail.modify already confers readonly, send, compose and metadata, so
+		// asking for those as well widened the consent screen and the list of
+		// restricted scopes under review without granting anything extra.
+		//
+		// gmail.settings.basic is separate and is not implied: it is what reads
+		// the send-as identities, so a mailbox sending from an alias is set up
+		// correctly rather than rewritten to the primary address.
+		//
+		// Existing grants are unaffected. scopeSatisfiedBy in
+		// internal/app/email/onboarding.go resolves the nesting both ways, so a
+		// mailbox connected under the old six-scope consent still verifies.
+		Scopes: []string{
+			gmail.GmailModifyScope,
+			gmail.GmailSettingsBasicScope,
+		},
+		Endpoint: google.Endpoint,
+	}
+}
+
+// OutlookOauth2Inbox configures delegated Microsoft Graph access for Outlook /
+// Microsoft 365 mailboxes. Graph is the transport now (RAW MIME sendMail + delta
+// sync), so we request Graph scopes rather than the legacy IMAP/SMTP scopes:
+// Mail.Send (send), Mail.ReadWrite (delta sync + warmup move/mark/flag),
+// User.Read (resolve the mailbox owner via /me), and offline_access (refresh
+// token). None require tenant admin consent by default and all work on personal
+// Outlook.com accounts.
+func OutlookOauth2Inbox(baseURL string) *oauth2.Config {
+	return &oauth2.Config{
+		ClientID:     os.Getenv("BOX_OUTLOOK_CLIENT_ID"),
+		ClientSecret: os.Getenv("BOX_OUTLOOK_CLIENT_SECRET"),
+		RedirectURL:  baseURL + "/addresses/outlook/callback",
+		Scopes: []string{
+			"openid",
+			"email",
+			"profile",
+			"offline_access",
+			"https://graph.microsoft.com/User.Read",
+			"https://graph.microsoft.com/Mail.Send",
+			"https://graph.microsoft.com/Mail.ReadWrite",
+		},
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+			TokenURL: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+		},
+	}
+}

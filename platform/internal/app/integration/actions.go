@@ -1,0 +1,514 @@
+package integration
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/pegasusbound/pegasusbound/internal/app/webhook"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/safehttp"
+)
+
+// actionHTTP is the shared client for outbound provider action calls. It is
+// SSRF-hardened (resolves + blocks non-public hosts at dial time) because most of
+// these calls go to user-supplied URLs. Short timeout — a slow third party
+// shouldn't pin a dispatch goroutine for long.
+var actionHTTP = safehttp.Client(15 * time.Second)
+
+// automationEventPayload is the structured, versioned body delivered to generic
+// automation webhooks (Zapier / Make / n8n). The legacy flat fields
+// (content/email/subject/title) are kept so existing Zaps keep working; the
+// `event` discriminator + `data` object are what automations actually branch on.
+type automationEventPayload struct {
+	ID        string         `json:"id"`
+	Event     string         `json:"event"`
+	Version   string         `json:"version"`
+	CreatedAt string         `json:"created_at"`
+	Data      map[string]any `json:"data"`
+	Content   string         `json:"content"`
+	Email     string         `json:"email,omitempty"`
+	Subject   string         `json:"subject,omitempty"`
+	Title     string         `json:"title,omitempty"`
+}
+
+// automationDeliver POSTs a structured event to a generic automation webhook,
+// HMAC-signing it with the connection's signing secret (same scheme as our
+// customer webhooks: `X-Pegasusbound-Signature: t=<unix>,v1=<hmac>` over `t.body`)
+// and retrying transient (5xx / network) failures with linear backoff. 4xx is
+// treated as a permanent misconfiguration and not retried.
+func automationDeliver(ctx context.Context, targetURL, secret, eventType string, payload automationEventPayload) error {
+	body, _ := json.Marshal(payload)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(webhook.EventHeader, eventType)
+		req.Header.Set(webhook.EventIDHeader, payload.ID)
+		if secret != "" {
+			ts := time.Now()
+			sig := webhook.Sign(secret, ts, body)
+			req.Header.Set(webhook.SignatureHeader, webhook.FormatSignatureHeader(ts, sig))
+		}
+		resp, err := actionHTTP.Do(req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		_ = resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("webhook POST: HTTP %d", resp.StatusCode)
+		if resp.StatusCode < 500 {
+			return lastErr // client error: retrying won't help
+		}
+	}
+	return lastErr
+}
+
+// newDeliveryID returns a fresh idempotency / delivery id for a webhook event.
+func newDeliveryID() string { return uuid.New().String() }
+
+// Pegasusbound's sky accent (Tailwind sky-500, #0EA5E9) brands outbound notification
+// cards: an integer for Discord embeds, a hex string for Slack attachments.
+const (
+	notifyAccentInt = 0x0EA5E9
+	notifyAccentHex = "#0EA5E9"
+)
+
+// truncateRunes caps a string at max runes (provider embed/field limits), adding
+// an ellipsis when it trims so a long custom template can't get rejected.
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	if max <= 1 {
+		return string(r[:max])
+	}
+	return string(r[:max-1]) + "…"
+}
+
+// slackEscape escapes the characters Slack reserves for links and mentions, so
+// text from a contact or a reply renders as written.
+func slackEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
+}
+
+// notifyFields turns the message's contact/subject into structured key-value
+// fields shared by the Slack and Discord cards (omitted when empty).
+func (m eventMessage) notifyFields() (contact, subject string) {
+	return m.Email, m.Subject
+}
+
+// slackPostMessage posts to a channel using a bot token from the OAuth connect.
+// It renders a sky-accented attachment card (title + contact/subject fields)
+// rather than a bare line, with a plain-text fallback for the notification
+// preview. Slack returns HTTP 200 with {ok:false,error:...} on failure, so we
+// inspect the body rather than the status code.
+func slackPostMessage(ctx context.Context, token, channel string, msg eventMessage) error {
+	if channel == "" {
+		return fmt.Errorf("no slack channel configured")
+	}
+	attachment := map[string]any{
+		"color":    notifyAccentHex,
+		"fallback": slackEscape(msg.plainText()),
+		"title":    slackEscape(truncateRunes(msg.Title, 256)),
+		"footer":   "Pegasusbound",
+		"ts":       time.Now().Unix(),
+	}
+	if msg.Custom != "" {
+		attachment["text"] = slackEscape(truncateRunes(msg.Custom, 3000))
+	}
+	contact, subject := msg.notifyFields()
+	var fields []map[string]any
+	if contact != "" {
+		fields = append(fields, map[string]any{"title": "Contact", "value": slackEscape(contact), "short": true})
+	}
+	if subject != "" {
+		fields = append(fields, map[string]any{"title": "Subject", "value": slackEscape(subject), "short": true})
+	}
+	if len(fields) > 0 {
+		attachment["fields"] = fields
+	}
+	body, _ := json.Marshal(map[string]any{
+		"channel":     channel,
+		"text":        slackEscape(msg.Title),
+		"attachments": []map[string]any{attachment},
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://slack.com/api/chat.postMessage", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json; charset=utf-8")
+	resp, err := actionHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var out struct {
+		OK    bool   `json:"ok"`
+		Error string `json:"error"`
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	_ = json.Unmarshal(raw, &out)
+	if !out.OK {
+		if out.Error == "" {
+			out.Error = fmt.Sprintf("HTTP %d", resp.StatusCode)
+		}
+		return fmt.Errorf("slack chat.postMessage: %s", out.Error)
+	}
+	return nil
+}
+
+// discordEmbedPayload builds a Discord webhook body as a single rich embed in
+// Pegasusbound's sky theme (title + optional description + contact/subject fields +
+// footer/timestamp) rather than a plain content line, so notifications render as
+// branded cards. Discord ignores unknown top-level keys, so embeds are the body.
+func discordEmbedPayload(msg eventMessage) map[string]any {
+	embed := map[string]any{
+		"title":     truncateRunes(msg.Title, 256),
+		"color":     notifyAccentInt,
+		"footer":    map[string]any{"text": "Pegasusbound"},
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	}
+	if msg.Custom != "" {
+		embed["description"] = truncateRunes(msg.Custom, 4096)
+	}
+	contact, subject := msg.notifyFields()
+	var fields []map[string]any
+	if contact != "" {
+		fields = append(fields, map[string]any{"name": "Contact", "value": truncateRunes(contact, 1024), "inline": true})
+	}
+	if subject != "" {
+		fields = append(fields, map[string]any{"name": "Subject", "value": truncateRunes(subject, 1024), "inline": true})
+	}
+	if len(fields) > 0 {
+		embed["fields"] = fields
+	}
+	return map[string]any{"embeds": []map[string]any{embed}}
+}
+
+// discordNotify delivers a sky-themed embed card to a Discord channel webhook.
+func discordNotify(ctx context.Context, url string, msg eventMessage) error {
+	body, _ := json.Marshal(discordEmbedPayload(msg))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := actionHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("webhook POST: HTTP %d", resp.StatusCode)
+	}
+	return nil
+}
+
+// hubspotUpsertContact creates or updates a HubSpot contact keyed by email using
+// the caller-projected props, and optionally logs a note on the contact timeline.
+// props are already resolved through the connection's field map.
+func hubspotUpsertContact(ctx context.Context, token, email string, props map[string]any, note string) error {
+	if email == "" {
+		// Nothing to key on; treat as a no-op success.
+		return nil
+	}
+	if props == nil {
+		props = map[string]any{}
+	}
+	props["email"] = email // email is the match key; always present
+
+	// Find existing contact by email.
+	searchBody, _ := json.Marshal(map[string]any{
+		"filterGroups": []map[string]any{{
+			"filters": []map[string]any{{
+				"propertyName": "email", "operator": "EQ", "value": email,
+			}},
+		}},
+		"properties": []string{"email"},
+		"limit":      1,
+	})
+	var search struct {
+		Results []struct {
+			ID string `json:"id"`
+		} `json:"results"`
+	}
+	if err := hubspotJSON(ctx, http.MethodPost, "https://api.hubapi.com/crm/v3/objects/contacts/search", token, searchBody, &search); err != nil {
+		return err
+	}
+
+	contactID := ""
+	if len(search.Results) > 0 {
+		contactID = search.Results[0].ID
+		upd, _ := json.Marshal(map[string]any{"properties": props})
+		if err := hubspotJSON(ctx, http.MethodPatch, "https://api.hubapi.com/crm/v3/objects/contacts/"+contactID, token, upd, nil); err != nil {
+			return err
+		}
+	} else {
+		create, _ := json.Marshal(map[string]any{"properties": props})
+		var created struct {
+			ID string `json:"id"`
+		}
+		if err := hubspotJSON(ctx, http.MethodPost, "https://api.hubapi.com/crm/v3/objects/contacts", token, create, &created); err != nil {
+			return err
+		}
+		contactID = created.ID
+	}
+
+	// Best-effort note on the timeline.
+	if contactID != "" && note != "" {
+		noteBody, _ := json.Marshal(map[string]any{
+			"properties": map[string]any{
+				"hs_note_body": note,
+				"hs_timestamp": time.Now().UTC().Format(time.RFC3339),
+			},
+			"associations": []map[string]any{{
+				"to": map[string]any{"id": contactID},
+				"types": []map[string]any{{
+					"associationCategory": "HUBSPOT_DEFINED",
+					"associationTypeId":   202,
+				}},
+			}},
+		})
+		_ = hubspotJSON(ctx, http.MethodPost, "https://api.hubapi.com/crm/v3/objects/notes", token, noteBody, nil)
+	}
+	return nil
+}
+
+func hubspotJSON(ctx context.Context, method, url, token string, body []byte, dst any) error {
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := actionHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("hubspot %s %s: HTTP %d", method, shortURL(url), resp.StatusCode)
+	}
+	if dst != nil && len(raw) > 0 {
+		return json.Unmarshal(raw, dst)
+	}
+	return nil
+}
+
+// pipedriveUpsertPerson creates a Pipedrive person keyed by email using the
+// caller-projected props, through API v2 on the company's own host. Pipedrive
+// has no upsert, so it searches first and leaves an existing person alone,
+// which keeps the action idempotent. email/phone become Pipedrive's arrays;
+// other keys (name, 40-char custom field hashes) pass through.
+func pipedriveUpsertPerson(ctx context.Context, base, token, email string, props map[string]any) error {
+	if email == "" {
+		return nil
+	}
+	searchURL := base + "/api/v2/persons/search?term=" + url.QueryEscape(email) + "&fields=email&exact_match=true&limit=1"
+	var search struct {
+		Data struct {
+			Items []struct {
+				Item struct {
+					ID int64 `json:"id"`
+				} `json:"item"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := pipedriveJSON(ctx, http.MethodGet, searchURL, token, nil, &search); err != nil {
+		return err
+	}
+	if len(search.Data.Items) > 0 {
+		return nil
+	}
+
+	payload := map[string]any{}
+	custom := map[string]any{}
+	for k, v := range props {
+		switch {
+		case k == "email":
+			payload["emails"] = []map[string]any{{"value": toStr(v), "primary": true, "label": "work"}}
+		case k == "phone":
+			payload["phones"] = []map[string]any{{"value": toStr(v), "primary": true, "label": "work"}}
+		case isPipedriveFieldHash(k):
+			custom[k] = v
+		default:
+			payload[k] = v
+		}
+	}
+	if strProp(payload, "name") == "" {
+		name := strings.TrimSpace(strProp(payload, "first_name") + " " + strProp(payload, "last_name"))
+		if name == "" {
+			name = email
+		}
+		payload["name"] = name
+	}
+	if _, ok := payload["emails"]; !ok {
+		payload["emails"] = []map[string]any{{"value": email, "primary": true, "label": "work"}}
+	}
+	if len(custom) > 0 {
+		payload["custom_fields"] = custom
+	}
+	create, _ := json.Marshal(payload)
+	return pipedriveJSON(ctx, http.MethodPost, base+"/api/v2/persons", token, create, nil)
+}
+
+// isPipedriveFieldHash reports a custom field key (a 40-character hex hash).
+func isPipedriveFieldHash(k string) bool {
+	if len(k) != 40 {
+		return false
+	}
+	for _, r := range k {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// pipedriveBase is the company host a connection's calls go to.
+func pipedriveBase(conn *models.IntegrationConnection) string {
+	if conn != nil {
+		if d, err := PipedriveAPIDomain(configString(conn.DisplayFields, "api_domain")); err == nil {
+			return d
+		}
+	}
+	return "https://api.pipedrive.com"
+}
+
+func pipedriveJSON(ctx context.Context, method, url, token string, body []byte, dst any) error {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := actionHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("pipedrive %s: HTTP %d", method, resp.StatusCode)
+	}
+	if dst != nil && len(raw) > 0 {
+		return json.Unmarshal(raw, dst)
+	}
+	return nil
+}
+
+func shortURL(u string) string {
+	if i := len("https://api.hubapi.com"); len(u) > i {
+		return u[i:]
+	}
+	return u
+}
+
+// closeUpsertLead creates a Close lead (with an embedded contact) keyed by email
+// using the caller-projected props. Close has no native upsert, so we search by
+// email first and skip when a lead already carries the address — keeping the
+// action idempotent so retries / repeated pushes don't fan out duplicate leads.
+// Auth is HTTP Basic with the API key as the username and a blank password.
+func closeUpsertLead(ctx context.Context, apiKey, email string, props map[string]any) error {
+	if email == "" {
+		return nil
+	}
+
+	// Idempotency guard: skip if a lead already has this email address.
+	searchURL := "https://api.close.com/api/v1/lead/?_fields=id&query=" +
+		url.QueryEscape("email_address:\""+strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(email)+"\"")
+	var search struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := closeJSON(ctx, http.MethodGet, searchURL, apiKey, nil, &search); err != nil {
+		return err
+	}
+	if len(search.Data) > 0 {
+		return nil
+	}
+
+	name := strProp(props, "name")
+	if name == "" {
+		name = email
+	}
+	leadName := strProp(props, "company")
+	if leadName == "" {
+		leadName = name
+	}
+
+	contact := map[string]any{
+		"name":   name,
+		"emails": []map[string]any{{"email": email, "type": "office"}},
+	}
+	if phone := strProp(props, "phone"); phone != "" {
+		contact["phones"] = []map[string]any{{"phone": phone, "type": "office"}}
+	}
+	body, _ := json.Marshal(map[string]any{
+		"name":     leadName,
+		"contacts": []map[string]any{contact},
+	})
+	return closeJSON(ctx, http.MethodPost, "https://api.close.com/api/v1/lead/", apiKey, body, nil)
+}
+
+func closeJSON(ctx context.Context, method, reqURL, apiKey string, body []byte, dst any) error {
+	var reader io.Reader
+	if body != nil {
+		reader = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, reader)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(apiKey, "")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := actionHTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("close %s: HTTP %d", method, resp.StatusCode)
+	}
+	if dst != nil && len(raw) > 0 {
+		return json.Unmarshal(raw, dst)
+	}
+	return nil
+}

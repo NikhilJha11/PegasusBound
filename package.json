@@ -1,0 +1,18 @@
+{
+  "name": "pegasusbound",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "intel": "npm run dev -w @iole/intel",
+    "test": "npm test -w @iole/engine && npm test -w @iole/intel",
+    "typecheck": "npm run typecheck -w @iole/engine && npm run typecheck -w @iole/intel",
+    "db:generate": "npm run db:generate -w @iole/engine"
+  },
+  "devDependencies": {
+    "drizzle-orm": "^0.45.4"
+  }
+}

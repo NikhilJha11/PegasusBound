@@ -1,0 +1,634 @@
+package wmail
+
+import (
+	"context"
+	"errors"
+	"net/mail"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/client/goog"
+	"github.com/pegasusbound/pegasusbound/internal/client/msgraph"
+	"github.com/pegasusbound/pegasusbound/internal/client/smtpimap/imap"
+	"github.com/pegasusbound/pegasusbound/internal/client/smtpimap/smtp"
+	"github.com/pegasusbound/pegasusbound/internal/config"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/mailhdr"
+	"github.com/rs/zerolog/log"
+	"google.golang.org/api/gmail/v1"
+)
+
+// parentReference resolves what a reply should be threaded onto, from whichever
+// of the two independent handles the request carries.
+//
+// They are genuinely independent. ThreadID is the provider's own conversation
+// id and is what makes the message appear in the thread in the SENDER's
+// mailbox; it is meaningless to anyone else. MessageID becomes the RFC
+// In-Reply-To/References headers, which is the only thing the RECIPIENT's mail
+// client can thread on. A dashboard reply starts with only a ThreadID and a
+// warmup reply with only a Message-ID, so requiring both threads neither.
+func parentReference(req *SendRequest) *models.EmailMessageData {
+	if req == nil {
+		return nil
+	}
+	var messageID, threadID string
+	if req.Parent != nil {
+		messageID = req.Parent.MessageID
+		threadID = req.Parent.ThreadID
+	}
+	if messageID == "" && req.InReplyTo != "" {
+		messageID = strings.Trim(req.InReplyTo, "<>")
+	}
+	if messageID == "" && threadID == "" {
+		return nil
+	}
+	return &models.EmailMessageData{MessageID: messageID, ThreadID: threadID}
+}
+
+// Attachment is a fully-resolved attachment ready to be MIME-encoded: the
+// worker has already fetched Data from object storage.
+type Attachment struct {
+	Filename string
+	MimeType string
+	Data     []byte
+}
+
+// SendRequest contains all parameters needed to send an email
+type SendRequest struct {
+	TaskID      uuid.UUID
+	To          []string
+	Cc          []string
+	Bcc         []string
+	MessageID   string
+	Subject     string
+	BodyPlain   string
+	BodyHTML    string
+	InReplyTo   string
+	References  string
+	Parent      *models.EmailParent
+	IsWarmup    bool
+	WarmupToken string
+	// UnsubscribeURL, when set (campaign sends with the unsubscribe header
+	// enabled), produces RFC 8058 one-click unsubscribe headers.
+	UnsubscribeURL string
+	// Attachments, when present, are encoded as multipart/mixed parts after the
+	// multipart/alternative text body. Warmup sends never carry attachments.
+	Attachments []Attachment
+	// FromName is the display name the control plane holds for the mailbox at
+	// publish time. Empty falls back to the name cached from ADD_EMAIL.
+	FromName string
+	// FromEmail is the verified provider alias the mailbox was told to send
+	// as. Gmail only, and empty for almost every send, which means the
+	// mailbox's own address. It is never set on a warmup send: warmup pairs
+	// on the mailbox address, so an alias there would break verification.
+	FromEmail string
+	// ReplyTo is the address the Reply-To header names, so a reply lands in
+	// another mailbox. Empty for no header; never set on a warmup send.
+	ReplyTo string
+}
+
+// buildSendHeaders assembles the outbound custom headers: the warmup
+// verification token (warmup sends), Reply-To, and RFC 8058 one-click
+// unsubscribe headers (campaign sends). Returns nil when there are none so callers can branch.
+func buildSendHeaders(req *SendRequest) map[string]string {
+	h := map[string]string{}
+	if req.References != "" && req.InReplyTo != "" {
+		if value, err := mailhdr.References(strings.Fields(req.References)); err == nil {
+			h["References"] = value
+		}
+	}
+	if req.WarmupToken != "" {
+		h[config.WarmupVerifyHeader] = req.WarmupToken
+	}
+	if rt := replyToHeader(req); rt != "" {
+		h["Reply-To"] = rt
+	}
+	if req.UnsubscribeURL != "" {
+		h["List-Unsubscribe"] = "<" + req.UnsubscribeURL + ">"
+		// RFC 8058 one-click requires the URI to be https: a provider that
+		// POSTs an http address either refuses or leaks the token in clear, so
+		// an http link (a LAN or dev install) ships as a plain RFC 2369 header
+		// the recipient clicks instead of a one-click button that will not work.
+		if strings.HasPrefix(strings.ToLower(req.UnsubscribeURL), "https://") {
+			h["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+		}
+	}
+	if len(h) == 0 {
+		return nil
+	}
+	return h
+}
+
+// replyToHeader is the Reply-To value for a send: one bare address, or empty
+// for a warmup send or anything that does not parse as exactly one address.
+func replyToHeader(req *SendRequest) string {
+	if req.IsWarmup {
+		return ""
+	}
+	raw := strings.TrimSpace(req.ReplyTo)
+	if raw == "" || strings.ContainsAny(raw, "\r\n") {
+		return ""
+	}
+	addr, err := mail.ParseAddress(raw)
+	if err != nil {
+		return ""
+	}
+	return addr.Address
+}
+
+// SendResult contains the result of a send operation
+type SendResult struct {
+	Success       bool
+	MessageID     string
+	ProviderMsgID string
+	// ThreadID is the provider-side conversation this message landed in.
+	// Gmail is the only provider that has one and the only one that needs it
+	// back: appending a later message to the same thread requires handing the
+	// id to the API, so the control plane records it against the task and
+	// gives it to the next step (issue #472). Empty everywhere else.
+	ThreadID string
+	SentAt   time.Time
+	Error    *errx.MailError
+}
+
+const maxSendRetries = 3
+
+// permanentSendFailure is a refusal no retry can turn into a delivery: the
+// receiving server rejected the sender, the recipient or the message itself
+// with a 5xx. Named codes rather than the resolve method, because several
+// warnings carry a non-retry method while still being worth another attempt.
+func permanentSendFailure(err *errx.MailError) bool {
+	if err == nil {
+		return false
+	}
+	switch err.Code {
+	case errx.MailErrorCodeSendRejected, errx.MailErrorCodeRecipientRejected:
+		return true
+	}
+	return false
+}
+
+// providerThrottle is a temporary limit imposed by the mailbox provider. It
+// must not be raised as Pegasusbound's anti-abuse RATE_LIMIT_EXCEEDED event, which
+// deactivates the mailbox and removes it from warmup.
+func providerThrottle(err *errx.MailError) bool {
+	if err == nil {
+		return false
+	}
+	return err.Code == errx.MailErrorCodeSendingTooFast || err.Code == errx.MailErrorCodeQuotaExceeded
+}
+
+// Send attempts to send an email with retry for transient failures
+func (w *WMail) Send(ctx context.Context, req *SendRequest) *SendResult {
+	done, ok := w.BeginExecution()
+	if !ok {
+		return &SendResult{Error: errx.ErrMailServerUnreachable}
+	}
+	defer done()
+	ctx, cancel := w.ExecutionContext(ctx)
+	defer cancel()
+	// For warmup emails, ensure HTML is empty
+	bodyHTML := req.BodyHTML
+	if req.IsWarmup {
+		bodyHTML = ""
+	}
+
+	var result *SendResult
+	for attempt := 0; attempt <= maxSendRetries; attempt++ {
+		result = &SendResult{Success: false, SentAt: time.Now()}
+
+		switch w.EmailType {
+		case models.InboxProviderGoogle:
+			result = w.sendViaGmail(ctx, req, bodyHTML)
+		case models.InboxProviderOutlook:
+			result = w.sendViaGraph(ctx, req, bodyHTML)
+		case models.InboxProviderSMTPIMAP:
+			result = w.sendViaSMTP(ctx, req, bodyHTML)
+		default:
+			result.Error = errx.MError(
+				errx.MailErrorCritical,
+				errx.MailErrorCodeUnsupported,
+				"Unsupported email provider",
+				errx.MailErrorResolveMethodNone,
+			)
+			return result
+		}
+
+		if result.Success {
+			return result
+		}
+		if result.Error != nil && result.Error.Failure != nil {
+			return result
+		}
+
+		// Don't retry critical/auth errors - only transient ones.
+		if result.Error != nil && result.Error.Type == errx.MailErrorCritical {
+			return result
+		}
+		// A permanent refusal is not critical but is just as final: the
+		// server answered with a 5xx, so it will answer the same way next
+		// time and another attempt only spends the mailbox's daily budget.
+		if permanentSendFailure(result.Error) {
+			return result
+		}
+		// Retrying a 429 in one, two and four seconds only extends the provider's
+		// throttle. Return it to the scheduler, which already rolls the send back
+		// for a later attempt.
+		if providerThrottle(result.Error) {
+			return result
+		}
+
+		if attempt < maxSendRetries {
+			backoff := time.Duration(1<<uint(attempt)) * time.Second // 1s, 2s, 4s
+			select {
+			case <-ctx.Done():
+				return result
+			case <-time.After(backoff):
+			}
+		}
+	}
+
+	return result
+}
+
+// sendViaGmail sends an email using the Gmail API
+func (w *WMail) sendViaGmail(ctx context.Context, req *SendRequest, bodyHTML string) *SendResult {
+	result := &SendResult{
+		Success: false,
+		SentAt:  time.Now(),
+	}
+
+	if w.GoogleData == nil || w.GoogleData.Client == nil {
+		result.Error = errx.MError(
+			errx.MailErrorCritical,
+			errx.MailErrorCodeAuthenticationFailed,
+			"Gmail client not initialized",
+			errx.MailErrorResolveMethodReload,
+		)
+		return result
+	}
+
+	// Build parent reference for replies. Gating this on InReplyTo dropped a
+	// perfectly good ThreadID whenever the header was absent, which is every
+	// dashboard reply, so the provider started a new conversation instead.
+	// Warmup replies are the mirror case: an RFC Message-ID from the token flow
+	// and no local thread record.
+	parent := parentReference(req)
+
+	// Build custom headers (warmup token + RFC 8058 one-click unsubscribe).
+	customHeaders := buildSendHeaders(req)
+
+	// Convert resolved attachments to the goog transport shape (warmup sends
+	// carry none, but threading req.Attachments is harmless when empty).
+	attachments := toGoogAttachments(req.Attachments)
+
+	// Send via Gmail API
+	send := func(p *models.EmailMessageData) (*gmail.Message, error) {
+		return w.GoogleData.Client.SendMessage(
+			ctx,
+			req.FromName,
+			req.FromEmail,
+			req.To,
+			req.Cc,
+			req.Bcc,
+			req.MessageID,
+			req.Subject,
+			req.BodyPlain,
+			bodyHTML,
+			p,
+			attachments,
+			customHeaders,
+		)
+	}
+	gmailMsg, err := send(parent)
+	if err != nil && parent != nil && parent.ThreadID != "" && goog.IsThreadRefusal(err) {
+		// Gmail would not file the message in that thread. It never left, so
+		// send it again as its own conversation rather than failing the step:
+		// a follow-up outside the thread still reaches the recipient, and the
+		// reference headers still thread it in THEIR client.
+		log.Warn().Str("task_id", req.TaskID.String()).Err(err).
+			Msg("Gmail refused the thread; sending as a new conversation")
+		retry := *parent
+		retry.ThreadID = ""
+		gmailMsg, err = send(&retry)
+	}
+	if err != nil {
+		// Convert to MailError using goog.HandleError
+		if mailErr := goog.HandleError(err); mailErr != nil {
+			if mailErr.Failure == nil && mailErr.Type != errx.MailErrorCritical {
+				mailErr = errx.WithSendFailure(mailErr, errx.SendFailure{Provider: "google", Protocol: "http",
+					Stage: "submit", Scope: "mailbox", Disposition: errx.SendAmbiguous, ObservedAt: time.Now().UTC()})
+			}
+			if mailErr.Failure != nil && mailErr.Failure.Status >= 500 {
+				mailErr.Failure.Disposition = errx.SendAmbiguous
+			}
+			if mailErr.Failure != nil {
+				mailErr.Failure.Stage = "submit"
+			}
+			result.Error = mailErr
+		} else {
+			// Generic error
+			result.Error = errx.MError(
+				errx.MailErrorWarning,
+				errx.MailErrorCodeServerUnreachable,
+				err.Error(),
+				errx.MailErrorResolveMethodRetry,
+			)
+		}
+		return result
+	}
+
+	result.Success = true
+	result.MessageID = gmailSentMessageID(ctx, w.GoogleData.Client, req.TaskID.String(), gmailMsg.Id, req.MessageID)
+	result.ProviderMsgID = gmailMsg.Id
+	result.ThreadID = gmailMsg.ThreadId
+	return result
+}
+
+// gmailStamp reads the Message-ID a sent Gmail message carries.
+type gmailStamp interface {
+	SentMessageID(ctx context.Context, id string) (string, error)
+}
+
+// gmailSentMessageID reports the Message-ID Gmail stamped, as the Graph path
+// does, falling back to the minted one when the read fails. The send already
+// happened, so a failed read must never turn it into a failure.
+func gmailSentMessageID(ctx context.Context, client gmailStamp, taskID, gmailID, minted string) string {
+	if client == nil || gmailID == "" {
+		return minted
+	}
+	stamped, err := client.SentMessageID(ctx, gmailID)
+	if err != nil {
+		log.Warn().Str("task_id", taskID).Err(err).Msg("Gmail sent the message but its Message-ID could not be read; reporting the minted one")
+		return minted
+	}
+	if stamped == "" {
+		return minted
+	}
+	return stamped
+}
+
+// sendViaGraph sends an email through Microsoft Graph. Graph re-stamps the
+// Message-ID we mint, so the client creates the message as a draft, reads the
+// id Exchange assigned, and sends that; the result carries that id rather than
+// ours so warmup verification and campaign reply threading match what the
+// recipient actually received.
+func (w *WMail) sendViaGraph(ctx context.Context, req *SendRequest, bodyHTML string) *SendResult {
+	result := &SendResult{
+		Success: false,
+		SentAt:  time.Now(),
+	}
+
+	if w.GraphData == nil || w.GraphData.Client == nil {
+		result.Error = errx.MError(
+			errx.MailErrorCritical,
+			errx.MailErrorCodeAuthenticationFailed,
+			"Microsoft Graph client not initialized",
+			errx.MailErrorResolveMethodReload,
+		)
+		return result
+	}
+
+	// Build parent reference for replies. Gating this on InReplyTo dropped a
+	// perfectly good ThreadID whenever the header was absent, which is every
+	// dashboard reply, so the provider started a new conversation instead.
+	// Warmup replies are the mirror case: an RFC Message-ID from the token flow
+	// and no local thread record.
+	parent := parentReference(req)
+
+	// Warmup token + RFC 8058 one-click unsubscribe headers. RAW MIME is the
+	// only Graph shape that can carry them, though Exchange still drops
+	// custom headers in transit, which is why warmup verification does not
+	// depend on the token header arriving.
+	customHeaders := buildSendHeaders(req)
+	attachments := toGraphAttachments(req.Attachments)
+
+	sentMessageID, err := w.GraphData.Client.SendMessage(
+		ctx,
+		req.FromName,
+		req.To,
+		req.Cc,
+		req.Bcc,
+		req.MessageID,
+		req.Subject,
+		req.BodyPlain,
+		bodyHTML,
+		parent,
+		attachments,
+		customHeaders,
+	)
+	if err != nil {
+		var mailErr *errx.MailError
+		if errors.As(err, &mailErr) {
+			result.Error = mailErr
+		} else {
+			result.Error = errx.MError(
+				errx.MailErrorWarning,
+				errx.MailErrorCodeServerUnreachable,
+				err.Error(),
+				errx.MailErrorResolveMethodRetry,
+			)
+		}
+		return result
+	}
+
+	// Report the id Exchange stamped, not the one we minted: it is the only
+	// value that matches what the recipient received.
+	if sentMessageID == "" {
+		sentMessageID = req.MessageID
+	}
+	result.Success = true
+	result.MessageID = sentMessageID
+	result.ProviderMsgID = sentMessageID // Graph send returns no separate provider id
+	return result
+}
+
+// sendViaSMTP sends an email using SMTP
+func (w *WMail) sendViaSMTP(ctx context.Context, req *SendRequest, bodyHTML string) *SendResult {
+	result := &SendResult{
+		Success: false,
+		SentAt:  time.Now(),
+	}
+
+	if w.SmtpImapData == nil || w.SmtpImapData.SmtpClient == nil {
+		result.Error = errx.MError(
+			errx.MailErrorCritical,
+			errx.MailErrorCodeAuthenticationFailed,
+			"SMTP client not initialized",
+			errx.MailErrorResolveMethodReload,
+		)
+		return result
+	}
+
+	// Build custom headers (warmup token + RFC 8058 one-click unsubscribe).
+	smtpCustomHeaders := buildSendHeaders(req)
+
+	// Convert resolved attachments to the SMTP transport shape.
+	smtpAttachments := toSMTPAttachments(req.Attachments)
+
+	// Send via SMTP. Attachments are passed explicitly (not variadic) so an
+	// empty list still selects the same code path.
+	raw, merr := w.SmtpImapData.SmtpClient.Send(
+		ctx,
+		req.FromName,
+		req.To,
+		req.Cc,
+		req.Bcc,
+		req.MessageID,
+		req.Subject,
+		req.BodyPlain,
+		bodyHTML,
+		req.InReplyTo,
+		smtpAttachments,
+		smtpCustomHeaders,
+	)
+	if merr != nil {
+		result.Error = merr
+		return result
+	}
+
+	// Warmup traffic is deliberately excluded: it is machine-generated volume,
+	// and filing dozens a day would bury the customer's real sent mail.
+	if !req.IsWarmup {
+		w.saveSentCopy(ctx, raw, result.SentAt)
+	}
+
+	result.Success = true
+	result.MessageID = req.MessageID
+	result.ProviderMsgID = req.MessageID // SMTP uses the same message ID
+	return result
+}
+
+// saveSentCopy files the message in the mailbox's Sent folder. SMTP submission
+// leaves nothing behind in the sender's account, so without this the message
+// is invisible to both the customer's own mail client and the unibox, whose
+// thread reader can only show what the sync found in a folder.
+//
+// Best effort by design: the mail is already delivered, so a failure here is
+// logged and never turns a successful send into a failed one.
+func (w *WMail) saveSentCopy(ctx context.Context, raw []byte, sentAt time.Time) {
+	if !w.SaveToSent || len(raw) == 0 {
+		return
+	}
+	if w.SmtpImapData == nil || w.SmtpImapData.ImapClient == nil {
+		return
+	}
+	err := w.SmtpImapData.ImapClient.AppendToSent(ctx, raw, sentAt)
+	switch {
+	case err == nil:
+	case errors.Is(err, imap.ErrNoSentMailbox):
+		log.Debug().Str("email_id", w.ID.String()).Msg("no sent folder on this account; skipping the sent copy")
+	default:
+		log.Warn().Err(err).Str("email_id", w.ID.String()).Msg("could not file a copy in the sent folder")
+	}
+}
+
+// toGoogAttachments maps wmail attachments to the Gmail transport shape.
+func toGoogAttachments(in []Attachment) []goog.Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]goog.Attachment, 0, len(in))
+	for _, a := range in {
+		out = append(out, goog.Attachment{
+			Filename: a.Filename,
+			MimeType: a.MimeType,
+			Data:     a.Data,
+		})
+	}
+	return out
+}
+
+// toGraphAttachments maps wmail attachments to the Graph transport shape.
+func toGraphAttachments(in []Attachment) []msgraph.Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]msgraph.Attachment, 0, len(in))
+	for _, a := range in {
+		out = append(out, msgraph.Attachment{
+			Filename: a.Filename,
+			MimeType: a.MimeType,
+			Data:     a.Data,
+		})
+	}
+	return out
+}
+
+// toSMTPAttachments maps wmail attachments to the SMTP transport shape.
+func toSMTPAttachments(in []Attachment) []smtp.Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]smtp.Attachment, 0, len(in))
+	for _, a := range in {
+		out = append(out, smtp.Attachment{
+			Filename: a.Filename,
+			MimeType: a.MimeType,
+			Data:     a.Data,
+		})
+	}
+	return out
+}
+
+// DetermineErrorEventType maps a MailError to the appropriate JobEventType
+func DetermineErrorEventType(err *errx.MailError) models.JobEventType {
+	if err == nil {
+		return models.JobEventTypeEmailFailed
+	}
+	if err.Failure != nil {
+		switch err.Failure.Disposition {
+		case errx.SendRetry, errx.SendAmbiguous:
+			return models.JobEventTypeEmailServerError
+		case errx.SendThrottle:
+			return models.JobEventTypeEmailRateLimited
+		}
+	}
+
+	switch err.Code {
+	case errx.MailErrorCodeGoogleAuth, errx.MailErrorCodeAuthenticationFailed, errx.MailErrorCodeInvalidCredentials:
+		return models.JobEventTypeEmailAuthError
+
+	case errx.MailErrorCodeAccountSuspended, errx.MailErrorCodeAuthorizationFailed:
+		return models.JobEventTypeEmailDisabled
+
+	case errx.MailErrorCodeRateLimitExceeded:
+		return models.JobEventTypeEmailRateLimited
+
+	case errx.MailErrorCodeServerUnreachable, errx.MailErrorCodeConnectionLost, errx.MailErrorCodeNotFound:
+		return models.JobEventTypeEmailServerError
+
+	default:
+		return models.JobEventTypeEmailFailed
+	}
+}
+
+// MailErrorToSendError converts a MailError to an EmailSendError for transport
+func MailErrorToSendError(err *errx.MailError) *models.EmailSendError {
+	if err == nil {
+		return nil
+	}
+
+	userInfo := err.GetUserErrorInfo()
+	failure := err.Failure
+	if failure == nil && err.RetryAfter > 0 && (err.Code == errx.MailErrorCodeSendingTooFast || err.Code == errx.MailErrorCodeQuotaExceeded) {
+		now := time.Now().UTC()
+		at := now.Add(err.RetryAfter)
+		failure = &errx.SendFailure{Disposition: errx.SendThrottle, Scope: "mailbox", ObservedAt: now, RetryAt: &at}
+	}
+
+	return &models.EmailSendError{
+		Failure:        failure,
+		Code:           string(err.Code),
+		Type:           string(err.Type),
+		Message:        err.Message,
+		ResolveMethod:  string(err.ResolveMethod),
+		UserVisible:    err.IsUserVisible(),
+		UserTitle:      userInfo.Title,
+		UserMessage:    userInfo.Message,
+		ActionRequired: userInfo.ActionRequired,
+		Recipient:      err.Recipient,
+	}
+}

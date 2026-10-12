@@ -1,0 +1,182 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import BrandMark from '../components/page/BrandMark.astro';
+import IntegrationsHero from '../components/scenes/integrations/IntegrationsHero.astro';
+import HubSpotScene from '../components/scenes/integrations/HubSpotScene.astro';
+import SlackScene from '../components/scenes/integrations/SlackScene.astro';
+import WebhooksScene from '../components/scenes/integrations/WebhooksScene.astro';
+import MeetingsScene from '../components/scenes/integrations/MeetingsScene.astro';
+
+// Providers, connection methods and behaviour from
+// docs/content/docs/guides/integrations.mdx.
+
+const groups = [
+  {
+    name: 'CRM',
+    items: [
+      { mark: 'hubspot', name: 'HubSpot', how: 'One-click sign-in', what: 'Update contacts and log replies, or run your whole CRM on HubSpot.', href: 'https://docs.pegasusbound.com/guides/hubspot/' },
+      { mark: 'salesforce', name: 'Salesforce', how: 'One-click sign-in', what: 'Two-way sync: activity on the timeline, lead status written back, opt-outs both ways.', href: 'https://docs.pegasusbound.com/guides/salesforce/' },
+      { mark: 'pipedrive', name: 'Pipedrive', how: 'One-click sign-in', what: 'Create people on reply, or run your whole CRM on Pipedrive.', href: 'https://docs.pegasusbound.com/guides/pipedrive/' },
+      { mark: 'close', name: 'Close', how: 'API key', what: 'Create or update a lead when someone replies.', href: 'https://docs.pegasusbound.com/guides/integrations/' },
+    ],
+  },
+  {
+    name: 'Messaging',
+    items: [
+      { mark: 'slack', name: 'Slack', how: 'One-click sign-in', what: 'Send alerts to channels or DMs, work replies from a channel, and ask the assistant.', href: 'https://docs.pegasusbound.com/guides/slack/' },
+      { mark: 'discord', name: 'Discord', how: 'Webhook URL', what: 'Post to a channel on replies, bounces or warmup health changes.', href: 'https://docs.pegasusbound.com/guides/integrations/' },
+    ],
+  },
+  {
+    name: 'Automation',
+    items: [
+      { mark: 'zapier', name: 'Zapier', how: 'API key', what: 'Send Pegasusbound events into any Zap.', href: 'https://docs.pegasusbound.com/guides/zapier/' },
+      { mark: 'make', name: 'Make', how: 'API key', what: 'Start Make scenarios from Pegasusbound events.', href: 'https://docs.pegasusbound.com/guides/make/' },
+      { mark: 'n8n', name: 'n8n', how: 'API key', what: 'Trigger n8n workflows, hosted or self-hosted.', href: 'https://docs.pegasusbound.com/guides/n8n/' },
+    ],
+  },
+  {
+    name: 'Meetings and data',
+    items: [
+      { mark: 'calendly', name: 'Calendly', how: 'Inbound URL', what: 'Booked, rescheduled and canceled calls, linked to the contact.', href: 'https://docs.pegasusbound.com/guides/meetings/' },
+      { mark: 'cal_com', name: 'Cal.com', how: 'Inbound URL', what: 'The same, for Cal.com bookings.', href: 'https://docs.pegasusbound.com/guides/meetings/' },
+      { mark: 'millionverifier', name: 'MillionVerifier', how: 'API key', what: 'Verify every address with your own credits.', href: 'https://docs.pegasusbound.com/guides/integrations/' },
+    ],
+  },
+];
+
+
+const rowLabel = 'text-[14px] text-slate-500';
+const rowTitle = 'mt-4 text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.05] text-slate-900';
+const rowText = 'mt-4 max-w-xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500';
+const bentoTitle = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const bentoText = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+
+const faq: [string, string][] = [
+  ['How long does it take to connect a CRM?', 'HubSpot, Salesforce and Pipedrive connect with one sign-in, no keys to copy. Close and the verification services take an API key from that service.'],
+  ['What is HubSpot or Pipedrive mode?', 'Instead of keeping its own deals and pipelines, Pegasusbound works directly on your CRM’s records: every change is written to your CRM first, and anything your CRM refuses is not saved.'],
+  ['Can I connect a tool that isn’t listed?', 'Yes. Point a webhook at it, or use Zapier, Make or n8n. Every Pegasusbound event can be sent to any HTTPS address, signed so the receiver can check it came from you.'],
+  ['Where are my integration credentials kept?', 'Tokens and keys are encrypted with your workspace’s own encryption key before they are stored, and you can disconnect any integration at any time.'],
+];
+---
+<Layout
+  title="Cold Email Integrations: HubSpot, Salesforce, Slack | Pegasusbound"
+  description="Connect Pegasusbound to HubSpot, Salesforce, Pipedrive, Close, Slack, Discord, Zapier, Make, n8n, Calendly and Cal.com, or send signed webhooks for every event to any tool you use."
+>
+  <!-- HERO: the claim on the left, how it connects on the right, then the directory itself. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="grid gap-8 lg:grid-cols-[1.15fr_1fr] lg:items-end lg:gap-16">
+      <div>
+        <div class="text-[14px] text-slate-500">Integrations</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+          Works with the tools you already use.
+        </h1>
+      </div>
+      <div class="lg:pb-2">
+        <p class="max-w-xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+          Send replies to your CRM, alerts to Slack and bookings back from your calendar. Most connections take one sign-in, and anything else can listen to signed webhooks.
+        </p>
+        <div class="mt-7 flex flex-wrap items-center gap-3">
+          <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+            Start free <Icon name="arrowRight" size={14} />
+          </a>
+          <a href="https://docs.pegasusbound.com/guides/integrations/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+            Read the guide
+          </a>
+        </div>
+      </div>
+    </div>
+    <div class="mt-14 md:mt-20">
+      <IntegrationsHero />
+    </div>
+    <p class="mt-4 text-[13.5px] text-slate-400">Discover suggests what fills the gaps in your setup: a CRM, a chat alert, a scheduler and an address verifier. Connect starts in place, and a connection that needs attention shows up without a refresh.</p>
+  </section>
+
+  <!-- HUBSPOT: HubSpot mode, sync health and field mapping. -->
+  <Rule class="mt-20 md:mt-28" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div>
+        <div class={rowLabel}>CRM</div>
+        <h2 class={rowTitle}>Run your CRM on HubSpot, or keep it in step.</h2>
+        <p class={rowText}>In HubSpot mode, deals, tasks and notes are HubSpot's own records, written there first. Sends, replies, bounces and meetings land on the contact's timeline, and a deal opened in HubSpot stops the contact's campaigns.</p>
+        <p class="mt-4 max-w-xl text-[15px] leading-[1.6] text-slate-500">Sync health shows what is waiting, what failed and why, and when each kind of record was last pulled. Each mapped field picks a direction: the most recent edit wins, or one side always does. Pipedrive works the same way, and Salesforce syncs both ways with rules of its own.</p>
+        <div class="mt-6 flex items-center gap-2">
+          {['hubspot', 'pipedrive', 'salesforce', 'close'].map((m) => <BrandMark name={m} size={36} />)}
+        </div>
+      </div>
+      <HubSpotScene />
+    </div>
+  </section>
+
+  <!-- SLACK: the inbox channel and replying from it. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div class="lg:order-2">
+        <div class={rowLabel}>Slack</div>
+        <h2 class={rowTitle}>Work replies without leaving Slack.</h2>
+        <p class={rowText}>Pick an inbox channel and every human reply is posted there, one thread per conversation, with the mailbox, the campaign and the intent. Reply, draft with AI, mark it interested or take it, right from the message.</p>
+        <p class="mt-4 max-w-xl text-[15px] leading-[1.6] text-slate-500">Reply opens a form with the recipient and subject fixed, and sends from the conversation's mailbox, as you, with the same checks as the dashboard. Notifications can go to their own channels, and the Pegasusbound assistant answers when you mention it.</p>
+      </div>
+      <div class="lg:order-1"><SlackScene /></div>
+    </div>
+  </section>
+
+  <!-- WEBHOOKS + MEETINGS: two scenes side by side. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="In and out." title="Every event out to your own code, and every booking back in." />
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2">
+      <article>
+        <WebhooksScene />
+        <h3 class={bentoTitle}>Signed webhooks for everything else</h3>
+        <p class={bentoText}>Subscribe any HTTPS address to the events you care about. Each delivery is signed with the endpoint's secret, logged with its response code, and retried with backoff for up to 8 attempts. Private or unsafe addresses are refused.</p>
+        <a href="/developers/" class="mt-4 inline-flex items-center gap-1.5 text-[15px] font-medium text-slate-900 hover:text-slate-600">Build your own with the API <Icon name="arrowRight" size={13} /></a>
+      </article>
+      <article>
+        <MeetingsScene />
+        <h3 class={bentoTitle}>Calendly and Cal.com bookings, on the contact</h3>
+        <p class={bentoText}>Paste the URL Pegasusbound mints into Calendly or Cal.com. Booked, rescheduled and canceled calls appear on the Meetings page and the contact's timeline as they happen, and can start an automation.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- DIRECTORY: grouped, with how each one connects. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="The directory." title="What each integration does, and how it connects." />
+    <div class="mt-12 space-y-14">
+      {groups.map((g) => (
+        <div>
+          <h2 class="text-[13px] text-slate-400">{g.name}</h2>
+          <div class="mt-4 grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+            {g.items.map((it) => (
+              <a href={it.href} class="group flex gap-4 rounded-[6px] bg-white p-5 ring-1 ring-slate-200 transition-colors hover:ring-slate-300">
+                <BrandMark name={it.mark} size={44} />
+                <div class="min-w-0">
+                  <div class="flex items-center gap-2">
+                    <span class="text-[16px] font-medium text-slate-900">{it.name}</span>
+                    <span class="rounded-full bg-slate-50 px-2 py-0.5 text-[11.5px] text-slate-500 ring-1 ring-slate-200">{it.how}</span>
+                  </div>
+                  <p class="mt-1.5 text-[14.5px] leading-[1.55] text-slate-500">{it.what}</p>
+                </div>
+              </a>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Integrations, answered." />
+
+  <CTA photo="frost-blue" title="Connect your stack in a few clicks." description="Start free, connect your CRM and Slack, and replies flow where your team already works." />
+</Layout>
+

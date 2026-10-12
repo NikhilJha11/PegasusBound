@@ -1,0 +1,576 @@
+package advisor
+
+import (
+	"fmt"
+	"math"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/pegasusbound/pegasusbound/internal/app/copyjudge"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+	"github.com/pegasusbound/pegasusbound/internal/tasks"
+)
+
+// copyDetectors read the actual email copy in a campaign's steps. They are
+// deliberately conservative: copy advice that fires on good writing is worse
+// than no copy advice, because it teaches people to dismiss the Advisor
+// wholesale.
+func copyDetectors() []Detector {
+	return []Detector{
+		{
+			Key:      "copy_broken_template",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Copy that the template engine cannot parse. On send it silently degrades to the naive replacement path, so conditionals and merge variables ship to the recipient as literal text. This is the single most visible mistake in cold outreach and instantly marks a message as bulk.",
+			Run:      detectBrokenTemplate,
+		},
+		{
+			Key:      "copy_spam_phrases",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Phrases that both spam filters and human readers treat as bulk-mail markers. The filter cost is real but secondary; the main cost is that these phrases make a message read as something nobody wrote to anyone in particular.",
+			Run:      detectSpamPhrases,
+		},
+		{
+			Key:      "copy_too_long",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Cold emails long enough that a busy recipient will not read them. Length is the most reliable predictor of a cold email being ignored on a phone, which is where most of them are opened.",
+			Run:      detectCopyTooLong,
+		},
+		{
+			Key:      "copy_subject_too_long",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Subject lines long enough to be truncated in the inbox list, especially on mobile clients, so the part that would earn the open is never seen.",
+			Run:      detectSubjectTooLong,
+		},
+		{
+			Key:      "copy_too_many_links",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Link count in a cold email. Multiple links in a first-touch email is a strong bulk-mail signal to filters, and it splits the reader's attention away from the single thing you want them to do.",
+			Run:      detectTooManyLinks,
+		},
+		{
+			Key:      "copy_shouty_subject",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Subject lines in capitals or stacked with exclamation marks. This is a bulk-mail signal for filters and reads as shouting to a person.",
+			Run:      detectShoutySubject,
+		},
+		{
+			Key:      "copy_reads_as_bulk",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Copy that a calibrated reader model places at the bulk-mail end of a personal-to-bulk scale, or that makes a claim a spam filter objects to (guaranteed results, free money, prizes, pressure to act now). Unlike the phrase list this judges the whole email as its recipient would, so it catches copy that avoids every trigger word and still reads as a blast. Only runs when the operator has configured TypeSafe.",
+			Run:      detectReadsAsBulk,
+		},
+		{
+			Key:      "copy_no_clear_ask",
+			Category: models.AdvisorCategoryCopy,
+			About:    "Copy that asks the reader for nothing, or for several things at once. A cold email earns a reply by making one small, specific request; with none there is nothing to answer, and with several the reader answers none. Judged by a calibrated reader model, and only when the operator has configured TypeSafe.",
+			Run:      detectNoClearAsk,
+		},
+	}
+}
+
+var (
+	// linkRe counts hyperlinks in either body form.
+	linkRe = regexp.MustCompile(`(?i)https?://[^\s"'<>)]+|<a\s+[^>]*href=`)
+	// wordRe splits on whitespace for a word count that does not need to be
+	// exact, only stable.
+	wordRe = regexp.MustCompile(`\S+`)
+	// tagRe strips HTML so the length check measures prose, not markup.
+	tagRe = regexp.MustCompile(`(?s)<[^>]*>`)
+	// styleRe removes script/style blocks before stripping tags, so their
+	// contents do not count as words.
+	styleRe = regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)>`)
+)
+
+// stepContext pairs a step with its campaign for labelling.
+type stepContext struct {
+	step     repository.AdvisorStep
+	campaign string
+	status   string
+}
+
+// emailSteps returns every email step in a non-draft campaign, with the
+// campaign name attached. Draft campaigns are excluded: copy advice on a half
+// written draft is noise, and the pre-send preflight covers that moment.
+func emailSteps(s *repository.AdvisorSnapshot) []stepContext {
+	names := map[string]string{}
+	statuses := map[string]string{}
+	for _, c := range s.Campaigns {
+		names[c.ID.String()] = c.Name
+		statuses[c.ID.String()] = c.Status
+	}
+
+	out := []stepContext{}
+	for _, st := range s.Steps {
+		if st.Kind != "email" {
+			continue
+		}
+		status := statuses[st.CampaignID.String()]
+		if status == "draft" || status == "" {
+			continue
+		}
+		out = append(out, stepContext{step: st, campaign: names[st.CampaignID.String()], status: status})
+	}
+	return out
+}
+
+// stepLabel is the human name for a step in a finding.
+func stepLabel(sc stepContext) string {
+	name := sc.step.Name
+	if name == "" {
+		name = fmt.Sprintf("Step %d", sc.step.Position+1)
+	}
+	return name
+}
+
+// bodyText returns the step's prose: the plaintext body when present,
+// otherwise the HTML body with markup stripped.
+func bodyText(st repository.AdvisorStep) string {
+	if strings.TrimSpace(st.BodyPlain) != "" {
+		return st.BodyPlain
+	}
+	stripped := styleRe.ReplaceAllString(st.BodyHTML, " ")
+	return tagRe.ReplaceAllString(stripped, " ")
+}
+
+// detectBrokenTemplate asks the platform's own template validator whether the
+// copy parses, rather than pattern-matching for "suspicious" braces. Pegasusbound
+// bodies are Go templates: `{{if .Company}}`, `{{index . "city"}}`, and
+// `{{.FirstName | title}}` are all correct, and a regex written against a
+// simpler `{{token}}` convention would flag every one of them. Reusing
+// tasks.TemplateError means this fires exactly when a real send would fall back
+// to literal text, and never otherwise.
+func detectBrokenTemplate(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		broken := map[string]string{}
+		for field, text := range map[string]string{
+			"subject": sc.step.Subject,
+			"body":    sc.step.BodyPlain,
+		} {
+			if text == "" {
+				continue
+			}
+			if err := tasks.TemplateError(text); err != nil {
+				broken[field] = templateErrorSummary(err)
+			}
+		}
+		if len(broken) == 0 {
+			continue
+		}
+
+		// A template that cannot parse in a campaign that is already sending is
+		// shipping literal braces to real people right now.
+		severity := models.AdvisorHigh
+		if sc.status != "active" {
+			severity = models.AdvisorMedium
+		}
+
+		fields := make([]string, 0, len(broken))
+		for field := range broken {
+			fields = append(fields, field)
+		}
+		sort.Strings(fields)
+
+		out = append(out, Finding{
+			Key:         "copy_broken_template",
+			GroupTitle:  "{count} steps have copy that will not render",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    severity,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      clampImpact(70 + sc.step.Sent/50),
+			Title:       fmt.Sprintf("%s has copy that will not render", stepLabel(sc)),
+			Detail: fmt.Sprintf(
+				"The %s in %s cannot be parsed as a template (%s). Sending does not fail on this: it falls back to plain replacement, so conditionals and merge variables go out to the recipient as literal text.",
+				joinWords(fields), stepLabel(sc), broken[fields[0]]),
+			Remedy: "Fix the template syntax. Check that every {{if}} has a matching {{end}}, that quotes are balanced, and that field names have no stray characters.",
+			Steps: []string{
+				fmt.Sprintf("Open the campaign and go to %s.", stepLabel(sc)),
+				fmt.Sprintf("The parser stopped here: %s.", broken[fields[0]]),
+				"Every {{if}} and {{range}} needs its own {{end}}. A missing {{end}} is the most common cause and the error usually points past it, not at it.",
+				"Field names are case-sensitive and start with a dot: {{.FirstName}}, not {{firstname}}. For a custom field use {{index . \"city\"}}.",
+				"Save, then use the preview to check it renders against a real contact rather than trusting that it looks right.",
+			},
+			Evidence: map[string]any{
+				"campaign":    sc.campaign,
+				"step":        stepLabel(sc),
+				"fields":      fields,
+				"parse_error": broken[fields[0]],
+				"step_sends":  sc.step.Sent,
+				"status":      sc.status,
+			},
+		})
+	}
+	return out
+}
+
+// templateErrorSummary trims Go's template parse error down to the part that
+// helps, dropping the internal template name prefix the user never chose.
+func templateErrorSummary(err error) string {
+	msg := err.Error()
+	if i := strings.Index(msg, ": "); i >= 0 && strings.HasPrefix(msg, "template: ") {
+		if j := strings.Index(msg[i+2:], ": "); j >= 0 {
+			msg = msg[i+2+j+2:]
+		}
+	}
+	if len(msg) > 160 {
+		msg = msg[:160]
+	}
+	return strings.TrimSpace(msg)
+}
+
+func detectSpamPhrases(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		haystack := strings.ToLower(sc.step.Subject + " " + bodyText(sc.step))
+		hits := []string{}
+		for _, phrase := range spamTriggerPhrases {
+			if strings.Contains(haystack, phrase) {
+				hits = append(hits, phrase)
+			}
+		}
+		// One borderline phrase is not a finding. Two or more is a pattern.
+		if len(hits) < 2 {
+			continue
+		}
+
+		out = append(out, Finding{
+			Key:         "copy_spam_phrases",
+			GroupTitle:  "{count} steps read like bulk mail",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    models.AdvisorMedium,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      clampImpact(30 + len(hits)*5),
+			Title:       fmt.Sprintf("%s reads like bulk mail", stepLabel(sc)),
+			Detail: fmt.Sprintf(
+				"%s uses %s. Filters weight these phrases, but the bigger cost is that they make the message read as something nobody wrote to anyone in particular.",
+				stepLabel(sc), joinQuoted(hits)),
+			Remedy: "Rewrite those lines in the words you would use in a one-to-one email to this person. If a phrase would be strange to say out loud, it is strange to read.",
+			Evidence: map[string]any{
+				"campaign": sc.campaign,
+				"step":     stepLabel(sc),
+				"phrases":  hits,
+				"subject":  sc.step.Subject,
+			},
+		})
+	}
+	return out
+}
+
+func detectCopyTooLong(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		words := len(wordRe.FindAllString(bodyText(sc.step), -1))
+		if words <= bodyTooLongWords {
+			continue
+		}
+
+		out = append(out, Finding{
+			Key:         "copy_too_long",
+			GroupTitle:  "{count} emails are too long to get read",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    models.AdvisorLow,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      clampImpact(15 + (words-bodyTooLongWords)/20),
+			Title:       fmt.Sprintf("%s is %d words long", stepLabel(sc), words),
+			Detail: fmt.Sprintf(
+				"%s runs to %d words. Most cold email is opened on a phone, where anything past a screen and a half is scrolled past rather than read.",
+				stepLabel(sc), words),
+			Remedy: "Cut it to under 120 words: one line on why you are writing to this person specifically, one line on what you do, one question. Everything else belongs in the reply.",
+			Evidence: map[string]any{
+				"campaign":    sc.campaign,
+				"step":        stepLabel(sc),
+				"word_count":  words,
+				"recommended": 120,
+				"step_sends":  sc.step.Sent,
+			},
+		})
+	}
+	return out
+}
+
+func detectSubjectTooLong(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		subject := strings.TrimSpace(sc.step.Subject)
+		if len(subject) <= subjectTooLong {
+			continue
+		}
+
+		out = append(out, Finding{
+			Key:         "copy_subject_too_long",
+			GroupTitle:  "{count} subject lines get cut off in the inbox",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    models.AdvisorLow,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      clampImpact(15 + (len(subject)-subjectTooLong)/5),
+			Title:       fmt.Sprintf("The subject line in %s gets cut off", stepLabel(sc)),
+			Detail: fmt.Sprintf(
+				"The subject is %d characters. Mobile inbox lists show roughly the first %d, so the part that would earn the open is never seen.",
+				len(subject), subjectTooLong-15),
+			Remedy: "Get it under 45 characters. Short, specific, and lowercase reads like a colleague; long and title-cased reads like a newsletter.",
+			Evidence: map[string]any{
+				"campaign":    sc.campaign,
+				"step":        stepLabel(sc),
+				"subject":     subject,
+				"length":      len(subject),
+				"recommended": 45,
+			},
+		})
+	}
+	return out
+}
+
+func detectTooManyLinks(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		// Only the first email matters here: a later step linking to a case
+		// study is normal, a first touch with five links is not.
+		if sc.step.Position != 0 {
+			continue
+		}
+		// One representation only: the plain and HTML bodies carry the same
+		// links, so concatenating them double-counts every one and turns a
+		// two-link limit into a one-link limit.
+		body := sc.step.BodyPlain
+		if strings.TrimSpace(body) == "" {
+			body = sc.step.BodyHTML
+		}
+		links := len(linkRe.FindAllString(body, -1))
+		if links <= maxLinksInBody {
+			continue
+		}
+
+		out = append(out, Finding{
+			Key:         "copy_too_many_links",
+			GroupTitle:  "{count} first emails carry too many links",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    models.AdvisorLow,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      clampImpact(20 + links*3),
+			Title:       fmt.Sprintf("The first email in %s has %d links", sc.campaign, links),
+			Detail: fmt.Sprintf(
+				"%s carries %d links in a first-touch email. Filters treat link-heavy first contact as a bulk signal, and a reader with four things to click does none of them.",
+				stepLabel(sc), links),
+			Remedy: "Keep one link, or none. The goal of a first email is a reply, not a click.",
+			Evidence: map[string]any{
+				"campaign":    sc.campaign,
+				"step":        stepLabel(sc),
+				"link_count":  links,
+				"recommended": 1,
+			},
+		})
+	}
+	return out
+}
+
+func detectShoutySubject(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		subject := strings.TrimSpace(sc.step.Subject)
+		if subject == "" {
+			continue
+		}
+		letters, upper := 0, 0
+		for _, r := range subject {
+			if r >= 'a' && r <= 'z' {
+				letters++
+			}
+			if r >= 'A' && r <= 'Z' {
+				letters++
+				upper++
+			}
+		}
+		shouting := letters >= 8 && float64(upper)/float64(letters) > 0.7
+		bangs := strings.Count(subject, "!") >= 2
+		if !shouting && !bangs {
+			continue
+		}
+
+		reason := "is in capitals"
+		if bangs && !shouting {
+			reason = "is stacked with exclamation marks"
+		} else if bangs {
+			reason = "is in capitals with exclamation marks"
+		}
+
+		out = append(out, Finding{
+			Key:         "copy_shouty_subject",
+			GroupTitle:  "{count} subject lines shout",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    models.AdvisorLow,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      25,
+			Title:       fmt.Sprintf("The subject line in %s %s", stepLabel(sc), reason),
+			Detail: fmt.Sprintf(
+				"The subject %q %s. Filters weight this as a bulk-mail marker, and a person reads it as shouting from a stranger.",
+				subject, reason),
+			Remedy: "Write it the way you would write to one person: sentence case, no exclamation marks.",
+			Evidence: map[string]any{
+				"campaign": sc.campaign,
+				"step":     stepLabel(sc),
+				"subject":  subject,
+			},
+		})
+	}
+	return out
+}
+
+// joinQuoted renders a short list of literals as "a", "b" and "c".
+func joinQuoted(items []string) string {
+	quoted := make([]string, 0, len(items))
+	for _, it := range items {
+		quoted = append(quoted, fmt.Sprintf("%q", it))
+	}
+	return joinWords(quoted)
+}
+
+// judgmentFor returns the step's TypeSafe verdict, when the run judged it.
+func judgmentFor(s *repository.AdvisorSnapshot, sc stepContext) (copyjudge.Verdict, bool) {
+	if s.CopyJudgments == nil {
+		return copyjudge.Verdict{}, false
+	}
+	v, ok := s.CopyJudgments[sc.step.ID]
+	return v, ok
+}
+
+// round2 bands a probability for evidence, so the narrator and the card show
+// "0.82" rather than a float's full tail.
+func round2(v float64) float64 {
+	return math.Round(v*100) / 100
+}
+
+func detectReadsAsBulk(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		v, ok := judgmentFor(s, sc)
+		if !ok || !v.ReadsAsBulk() {
+			continue
+		}
+
+		reason := "reads as a bulk marketing email rather than a note from one person to another"
+		if v.SpamClaim >= copyjudge.SpamClaimAt {
+			reason = "makes the kind of claim a spam filter objects to: guaranteed results, free money, a prize, or pressure to act now"
+			if v.ReadsAs >= copyjudge.BulkAt && v.Confidence >= copyjudge.ConfFloor {
+				reason = "reads as a bulk marketing email and makes the kind of claim a spam filter objects to"
+			}
+		}
+
+		out = append(out, Finding{
+			Key:         "copy_reads_as_bulk",
+			GroupTitle:  "{count} steps read as bulk mail to their reader",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    models.AdvisorMedium,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      clampImpact(35 + int(v.ReadsAs*20) + sc.step.Sent/100),
+			Title:       fmt.Sprintf("%s reads as bulk mail to its reader", stepLabel(sc)),
+			Detail: fmt.Sprintf(
+				"Read as its recipient would read it, %s in %s %s. It passes the phrase list; the problem is the whole email, not a word in it. A person who takes a message for a blast does not reply to it, and a filter that does is right.",
+				stepLabel(sc), sc.campaign, reason),
+			Remedy: "Rewrite it as you would write to this one person: open with the reason you are writing to them specifically, say what you do in a line, and ask one small question. Drop any promise you could not make face to face.",
+			Steps: []string{
+				fmt.Sprintf("Open the campaign and go to %s.", stepLabel(sc)),
+				"Read it aloud as if to the one person it is addressed to. Every line that would be strange to say to them is a line to cut.",
+				"Replace claims (guaranteed, free, act now, limited time) with what is true for this reader: what you noticed, why it is relevant to them.",
+				"Run Analyze under the content check and confirm it now reads as a personal note.",
+			},
+			Evidence: map[string]any{
+				"campaign":        sc.campaign,
+				"step":            stepLabel(sc),
+				"subject":         sc.step.Subject,
+				"reads_as":        round2(v.ReadsAs),
+				"personalization": round2(v.Personalization),
+				"spam_claim":      round2(v.SpamClaim),
+				"confidence":      round2(v.Confidence),
+				"step_sends":      sc.step.Sent,
+			},
+		})
+	}
+	return out
+}
+
+func detectNoClearAsk(s *repository.AdvisorSnapshot) []Finding {
+	out := []Finding{}
+	for _, sc := range emailSteps(s) {
+		v, ok := judgmentFor(s, sc)
+		if !ok || !v.LacksClearAsk() {
+			continue
+		}
+
+		what := "asks the reader for nothing"
+		fix := "End with one small question the reader can answer in a line: whether this is worth a look, or who the right person is."
+		if v.Ask == copyjudge.AskSeveral {
+			what = "asks the reader for several things"
+			fix = "Keep one ask and move the rest to the reply. A reader with three requests answers none of them."
+		}
+
+		out = append(out, Finding{
+			Key:         "copy_no_clear_ask",
+			GroupTitle:  "{count} steps have no clear ask",
+			Category:    models.AdvisorCategoryCopy,
+			Severity:    models.AdvisorLow,
+			Surface:     models.AdvisorSurfaceCampaigns,
+			EntityType:  "step",
+			EntityID:    ref(sc.step.ID),
+			EntityLabel: fmt.Sprintf("%s / %s", sc.campaign, stepLabel(sc)),
+			ParentType:  "campaign",
+			ParentID:    ref(sc.step.CampaignID),
+			Impact:      clampImpact(20 + sc.step.Sent/100),
+			Title:       fmt.Sprintf("%s %s", stepLabel(sc), what),
+			Detail: fmt.Sprintf(
+				"%s in %s %s. A cold email earns a reply by making one small, specific request; anything else leaves the reader nothing to answer.",
+				stepLabel(sc), sc.campaign, what),
+			Remedy: fix,
+			Steps: []string{
+				fmt.Sprintf("Open the campaign and go to %s.", stepLabel(sc)),
+				"Decide the one thing you want back from this email: a yes or no, a name, a time.",
+				fix,
+			},
+			Evidence: map[string]any{
+				"campaign":   sc.campaign,
+				"step":       stepLabel(sc),
+				"subject":    sc.step.Subject,
+				"ask":        v.Ask,
+				"confidence": round2(v.Confidence),
+				"step_sends": sc.step.Sent,
+			},
+		})
+	}
+	return out
+}

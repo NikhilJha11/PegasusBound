@@ -1,0 +1,19 @@
+---
+import Logo from './Logo.astro';
+interface Props {
+  class?: string;
+  size?: 'sm' | 'md' | 'lg';
+  href?: string | null;
+}
+const { class: className = '', size = 'md', href = '/' } = Astro.props;
+const logoSize = size === 'sm' ? 'w-5 h-5' : size === 'lg' ? 'w-8 h-8' : 'w-6 h-6';
+const textSize = size === 'sm' ? 'text-[14px]' : size === 'lg' ? 'text-[20px]' : 'text-[15.5px]';
+const Tag = href ? 'a' : 'div';
+---
+<Tag
+  href={href ?? undefined}
+  class={`inline-flex items-center gap-2.5 text-foreground hover:text-foreground/80 transition-colors ${className}`}
+>
+  <Logo class={`${logoSize} text-foreground`} />
+  <span class={`font-extrabold tracking-tight ${textSize}`}>Pegasusbound</span>
+</Tag>

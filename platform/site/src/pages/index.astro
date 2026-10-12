@@ -1,0 +1,597 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import DashboardMock from '../components/DashboardMock.astro';
+import { GITHUB_PATH } from '../lib/marks';
+import Photo from '../components/Photo.astro';
+import CTA from '../components/CTA.astro';
+import FeatureGrid from '../components/FeatureGrid.astro';
+import OutboundSteps from '../components/OutboundSteps.astro';
+import AutomationsShowcase from '../components/AutomationsShowcase.astro';
+
+
+// Mirrors web/src/lib/plans.ts — single source of truth.
+const plans = [
+  {
+    name: 'Starter',
+    price: '$29',
+    annual: '$23',
+    cadence: '/ month',
+    summary: 'Great for small businesses with a small budget.',
+    cta: 'Start free',
+    href: 'https://app.pegasusbound.com/auth/register?plan=starter',
+    highlight: false,
+    sendsPerDay: 150,
+    // Annual is 20% off, so the yearly saving is (monthly - annual) * 12.
+    save: '$72',
+    // Log-scaled so 150 -> 15,000 stays legible as a bar.
+    meter: 47,
+    // Daily volume is the headline number on the card, so it is deliberately
+    // not repeated as a bullet here.
+    features: [
+      'Unlimited warmup',
+      'Unlimited mailboxes',
+      'Unified inbox with reply detection',
+      'Sequences that stop on reply',
+      'Inbox placement monitoring',
+    ],
+  },
+  {
+    name: 'Grow',
+    price: '$89',
+    annual: '$71',
+    cadence: '/ month',
+    summary: 'Ideal for growing businesses scaling their outreach.',
+    cta: 'Start free',
+    href: 'https://app.pegasusbound.com/auth/register?plan=grow',
+    highlight: false,
+    sendsPerDay: 3000,
+    save: '$216',
+    meter: 76,
+    features: [
+      'Everything in Starter',
+      'CRM with pipelines and deals',
+      'A/B variants per step',
+      'Bulk contact import',
+      'API and signed webhooks',
+    ],
+  },
+  {
+    name: 'Business',
+    price: '$329',
+    annual: '$263',
+    cadence: '/ month',
+    summary: 'For established teams that need higher limits and advanced features.',
+    cta: 'Start free',
+    href: 'https://app.pegasusbound.com/auth/register?plan=business',
+    highlight: true,
+    sendsPerDay: 15000,
+    save: '$792',
+    meter: 91,
+    // "Dedicated IPs" was the old wording, and it was wrong twice over: the
+    // IP recipients see belongs to the mailbox provider, not to us. What the
+    // plan actually reserves is the address the mailboxes sign IN from
+    // (plan.IsolatedEgress()), which is what earns sign-in trust and keeps a
+    // noisy neighbour from triggering a shared per-IP auth throttle.
+    features: [
+      'Everything in Grow',
+      'Your mailboxes sign in from an address no one else uses',
+      'Team roles and permissions',
+      'Full audit log',
+      'Priority support',
+    ],
+  },
+  {
+    name: 'Enterprise',
+    price: 'Custom',
+    annual: 'Custom',
+    cadence: 'volume-based',
+    summary: 'Large orgs with custom volume and dedicated support.',
+    cta: 'Talk to sales',
+    href: '/contact/?topic=sales',
+    highlight: false,
+    sendsPerDay: Infinity,
+    save: '',
+    meter: 100,
+    features: [
+      'Everything in Business',
+      'Custom volume and contract',
+      'BYOK encryption · SSO / SAML',
+      'Custom data residency',
+      'Dedicated CSM',
+    ],
+  },
+];
+
+// SoftwareApplication schema for the product itself — helps Google understand
+// Pegasusbound is a SaaS tool with a free tier, not just a marketing page.
+const softwareJsonLd = {
+  '@context': 'https://schema.org',
+  '@type': 'SoftwareApplication',
+  name: 'Pegasusbound',
+  applicationCategory: 'BusinessApplication',
+  applicationSubCategory: 'Email deliverability and cold outreach',
+  operatingSystem: 'Web',
+  url: 'https://pegasusbound.com',
+  description:
+    'Email warmup and cold email platform. Warm new mailboxes, send cold outreach at scale, and protect sender reputation with per-mailbox safety caps and deliverability tracking.',
+  publisher: { '@id': 'https://pegasusbound.com#org' },
+  offers: {
+    '@type': 'Offer',
+    price: '0',
+    priceCurrency: 'USD',
+    description: 'Free plan available, with paid plans for higher volume.',
+  },
+};
+---
+<Layout
+  title="Open-Source Cold Email & Warmup Platform | Pegasusbound"
+  description="Pegasusbound is the open-source platform for cold email: warm your mailboxes, send campaigns, and triage every reply. Run it on our cloud or self-host the whole thing."
+  jsonLd={softwareJsonLd}
+>
+  <!-- ============================================================
+       HERO: plain copy, then the dashboard in the same photo frame
+       every scene below uses.
+  ============================================================ -->
+  <section class="relative bg-white">
+    <div class="container-page pt-14 md:pt-24">
+      <a href="https://github.com/pegasusbound/pegasusbound" target="_blank" rel="noopener noreferrer" class="group inline-flex max-w-full items-center gap-2 h-8 pl-1 pr-3 rounded-full border border-slate-200 bg-white text-[12.5px] sm:text-[13px] text-slate-600 whitespace-nowrap transition-colors hover:border-slate-300">
+        <span class="inline-flex items-center gap-1.5 h-6 px-2.5 shrink-0 rounded-full bg-slate-900 text-[11.5px] font-medium text-white">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor"><path d={GITHUB_PATH} /></svg>
+          Open source
+        </span>
+        <span class="hidden sm:inline">Self-host the whole platform · Apache 2.0</span>
+        <span class="sm:hidden">Apache 2.0</span>
+        <Icon name="arrowUpRight" size={12} class="shrink-0 text-slate-400 transition-transform group-hover:translate-x-0.5 group-hover:-translate-y-0.5" />
+      </a>
+
+      <h1 class="mt-7 md:mt-8 max-w-5xl text-[44px] sm:text-[60px] md:text-[76px] font-medium tracking-[-0.05em] leading-[0.98] text-slate-900">
+        The largest open-source cold email platform.
+      </h1>
+
+      <p class="mt-6 max-w-2xl text-[17px] md:text-[20px] leading-[1.5] text-slate-500">
+        Pegasusbound warms up your mailboxes, sends your campaigns across them, and brings every reply into one inbox. Use our cloud or host it yourself.
+      </p>
+
+      <div class="mt-9 flex flex-wrap items-center gap-3">
+        <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 px-5 items-center gap-2 rounded-full bg-slate-900 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+          Start free
+          <Icon name="arrowRight" size={14} />
+        </a>
+        <a href="https://github.com/pegasusbound/pegasusbound" target="_blank" rel="noopener noreferrer" class="inline-flex h-11 px-5 items-center gap-2 rounded-full border border-slate-200 bg-white text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d={GITHUB_PATH} /></svg>
+          Star on GitHub
+        </a>
+      </div>
+      <p class="mt-5 text-[13.5px] text-slate-400">Free plan with 10 mailboxes · No credit card · Free to self-host</p>
+    </div>
+
+    <div class="container-page mt-14 md:mt-20">
+      <div class="hero-frame relative w-full overflow-hidden rounded-[6px] bg-slate-100 aspect-[4/3] md:aspect-[16/9]">
+        <Photo name="sheer-sky" priority sizes="(min-width: 1440px) 1360px, 100vw" class="absolute inset-0 h-full w-full object-cover select-none pointer-events-none" />
+        <div class="absolute left-[5%] top-[7%] right-0 bottom-0 overflow-hidden rounded-tl-[14px] ring-1 ring-slate-900/[0.08] shadow-[0_50px_100px_-40px_rgba(15,23,42,0.55)]">
+          <div class="hero-screen w-[1280px] absolute top-0 left-0 origin-top-left">
+            <DashboardMock />
+          </div>
+          <script is:inline>
+            // Scale the 1280px shell before first paint; a bundled module would leave it unscaled until it loads.
+            (function () {
+              var screen = document.currentScript.previousElementSibling;
+              var box = screen.parentElement;
+              var fit = function () {
+                screen.style.transform = 'scale(' + box.clientWidth / (window.innerWidth >= 768 ? 1200 : 760) + ')';
+              };
+              fit();
+              new ResizeObserver(fit).observe(box);
+            })();
+          </script>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <div class="bg-white">
+    <div class="container-page pt-4"><div class="h-px md:-mx-6 bg-slate-900/[0.06]"></div></div>
+
+    <!-- ============================================================
+         BENTO, then the outbound loop in numbered steps
+    ============================================================ -->
+    <FeatureGrid />
+    <div class="container-page"><div class="h-px md:-mx-6 bg-slate-900/[0.06]"></div></div>
+    <OutboundSteps />
+
+    <!-- ============================================================
+         AUTOMATIONS: full-width centerpiece, the live builder demo
+         running a test end to end.
+    ============================================================ -->
+    <AutomationsShowcase />
+
+
+
+
+    <!-- ============================================================
+         PRICING — annual default, premium segmented toggle
+    ============================================================ -->
+    <div class="container-page"><div class="h-px md:-mx-6 bg-slate-900/[0.06]"></div></div>
+    <section class="container-page pt-20 md:pt-28">
+      <div class="flex flex-wrap items-end justify-between gap-6">
+        <div>
+          <h2 class="max-w-3xl text-[36px] md:text-[58px] font-medium tracking-[-0.045em] leading-[1.04]">
+            <span class="text-slate-400">Pricing.</span>
+            <span class="text-slate-900"> Pay for what you send.</span>
+          </h2>
+          <p class="mt-5 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+            The number on each card is daily send volume. Warmup, the unified inbox, analytics, CRM and the API are in every paid plan.
+          </p>
+        </div>
+
+        <div class="inline-flex items-center gap-3" id="billing-toggle">
+          <div class="relative inline-flex items-center p-1 rounded-full bg-slate-100 ring-1 ring-slate-200/70 text-[13px] font-medium">
+            <span id="toggle-thumb" class="absolute top-1 bottom-1 rounded-full bg-white transition-all duration-[350ms] ease-[cubic-bezier(0.22,1,0.36,1)]" style="left: 116px; width: 112px; box-shadow: 0 2px 8px -2px rgba(15,23,42,0.18);"></span>
+            <button data-billing="monthly" class="relative h-9 px-5 rounded-full text-slate-500 transition-colors min-w-[112px]">Monthly</button>
+            <button data-billing="annual"  class="relative h-9 px-5 rounded-full text-slate-900 transition-colors min-w-[112px]">
+              <span class="inline-flex items-center gap-1.5">Annual</span>
+            </button>
+          </div>
+          <span class="inline-flex items-center px-2.5 h-7 rounded-full text-[11.5px] font-semibold bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100">
+            Save 20%
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <section class="relative pb-20 md:pb-28">
+      <div class="container-page">
+
+        <!-- Four plain cards; the featured one carries a dark outline. -->
+        <div class="pricing-grid mt-12 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {plans.map((p) => (
+            <div class={`pricing-card relative flex flex-col rounded-[6px] bg-white p-6 ring-1 ${p.highlight ? 'ring-slate-900' : 'ring-slate-200'}`}>
+              <div class="flex h-6 items-center justify-between gap-2">
+                <h3 class="text-[16px] font-medium text-slate-900">{p.name}</h3>
+                {p.highlight && (
+                  <span class="inline-flex h-6 items-center rounded-full bg-slate-900 px-2.5 text-[11.5px] font-medium text-white">Most popular</span>
+                )}
+              </div>
+              <p class="mt-2 min-h-[40px] text-[13.5px] leading-snug text-slate-500">{p.summary}</p>
+
+              <div class="mt-6 flex items-baseline gap-2">
+                <span class="text-[40px] font-medium tracking-[-0.04em] text-slate-900 leading-none flex items-baseline">
+                  <span class="plan-price relative inline-block overflow-hidden h-[44px] align-baseline" data-monthly={p.price} data-annual={p.annual}>
+                    <span class="plan-price-inner block leading-[44px]" style="transform: translateY(0)">{p.annual}</span>
+                  </span>
+                </span>
+                {p.save && (
+                  <span class="plan-swap text-[14px] text-slate-400 line-through" data-monthly="" data-annual={p.price}>{p.price}</span>
+                )}
+              </div>
+              <p class="mt-1 text-[12.5px] text-slate-400">
+                <span class="cadence" data-monthly="/ month · billed monthly" data-annual="/ month · billed yearly">/ month · billed yearly</span>
+              </p>
+              {/* Kept even when empty so every card's button sits on the same line. */}
+              <p class="mt-1 h-[18px] text-[12.5px] font-medium text-emerald-600">
+                {p.save && (
+                  <span class="plan-swap" data-monthly="" data-annual={`Save ${p.save} a year`}>Save {p.save} a year</span>
+                )}
+              </p>
+
+              <div class="mt-5 flex items-baseline justify-between text-[12.5px]">
+                <span class="font-medium text-slate-900">{p.sendsPerDay === Infinity ? '15,000+' : p.sendsPerDay.toLocaleString()} sends a day</span>
+              </div>
+              <div class="mt-2 h-[3px] rounded-full bg-slate-100">
+                <span class={`block h-full rounded-full ${p.highlight ? 'bg-slate-900' : 'bg-slate-300'}`} style={`width:${p.meter}%`}></span>
+              </div>
+
+              <a
+                href={p.href}
+                class={`mt-6 inline-flex h-10 w-full items-center justify-center rounded-full text-[14px] font-medium transition-colors ${
+                  p.highlight
+                    ? 'bg-slate-900 text-white hover:bg-slate-800'
+                    : 'bg-white text-slate-900 ring-1 ring-slate-200 hover:bg-slate-50 hover:ring-slate-300'
+                }`}
+              >
+                {p.cta}
+              </a>
+
+              <ul class="mt-6 space-y-2.5 border-t border-slate-100 pt-5 text-[13.5px] text-slate-600">
+                {p.features.map((f) => (
+                  <li class="flex items-start gap-2.5">
+                    <Icon name="check" size={14} class="mt-[3px] shrink-0 text-slate-400" />
+                    <span>{f}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+
+        <div class="mt-10 flex flex-wrap items-center gap-x-2 gap-y-1 text-[14px] text-slate-500">
+          <span>All plans include warmup, sending, inbox, analytics and CRM.</span>
+          <a href="/pricing/" class="inline-flex items-center gap-1 font-medium text-slate-900 hover:text-slate-600">
+            See the full comparison <Icon name="arrowRight" size={12} />
+          </a>
+        </div>
+        <p class="mt-2 max-w-2xl text-[13px] leading-relaxed text-slate-400">
+          Self-hosting is free. When Pegasusbound Cloud launches, link your instance and we warm up to 10 of your mailboxes in the shared pool at no cost, unlimited for $15 a month.
+        </p>
+      </div>
+    </section>
+
+    <CTA secondaryLabel="Self-host it" secondaryHref="https://github.com/pegasusbound/pegasusbound" />
+  </div>
+
+  <!-- ============================================================
+       Realtime: ticking counters + bar grow + toast in
+  ============================================================ -->
+  <style is:global>
+    @keyframes bar-grow {
+      from { width: 0%; }
+      to   { width: var(--target, 50%); }
+    }
+    .animate-bar-grow {
+      width: var(--target, 50%);
+      animation: bar-grow 1.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+
+    @keyframes ring-fill {
+      from { stroke-dasharray: 0 100; }
+    }
+    .animate-ring-fill { animation: ring-fill 1.4s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+    @keyframes toast-in {
+      from { opacity: 0; transform: translateY(10px) scale(0.96); }
+      to   { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    .animate-toast-in { animation: toast-in 0.7s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+    /* ── Continuous (never-ending) animations ───────────────────── */
+
+    /* Activity ribbon marquee — scrolls forever */
+    @keyframes marquee-loop {
+      from { transform: translateX(0); }
+      to   { transform: translateX(-50%); }
+    }
+    .marquee-track {
+      animation: marquee-loop 60s linear infinite;
+      width: max-content;
+    }
+    .marquee-mask {
+      mask-image: linear-gradient(to right, transparent 0%, black 6%, black 94%, transparent 100%);
+      -webkit-mask-image: linear-gradient(to right, transparent 0%, black 6%, black 94%, transparent 100%);
+      overflow: hidden;
+    }
+
+    /* Inbox reply stream — scrolls vertically forever */
+    @keyframes reply-scroll {
+      from { transform: translateY(0); }
+      to   { transform: translateY(-50%); }
+    }
+    .reply-track {
+      animation: reply-scroll 50s linear infinite;
+    }
+
+    /* Warmup activity feed — same continuous vertical scroll, slower */
+    @keyframes warmup-feed-scroll {
+      from { transform: translateY(0); }
+      to   { transform: translateY(-50%); }
+    }
+    .warmup-feed-track {
+      animation: warmup-feed-scroll 45s linear infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .warmup-feed-track { animation: none; }
+    }
+
+    /* Slower marquee — used by the campaign step timeline */
+    .marquee-track-slow {
+      animation: marquee-loop 60s linear infinite;
+    }
+
+    /* Worker send spark — slides across bar forever */
+    @keyframes send-spark-anim {
+      0%   { transform: translateX(-100%); }
+      100% { transform: translateX(400%); }
+    }
+    .send-spark {
+      animation: send-spark-anim 3s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+    }
+
+
+    /* Scroll-in fades — only applied once .js-ready is set on <html>,
+       so content stays visible if JS / motion fails to load. */
+    html.js-ready .fade-in {
+      opacity: 0;
+      transform: translateY(18px);
+      will-change: opacity, transform;
+    }
+    html.js-ready .fade-in.is-in {
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+                  transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      html.js-ready .fade-in,
+      html.js-ready .fade-in.is-in {
+        opacity: 1;
+        transform: none;
+        transition: none;
+      }
+    }
+
+  </style>
+  <script is:inline>
+    // Tag the document so the CSS above can hide fade-in targets only when JS is alive.
+    document.documentElement.classList.add('js-ready');
+  </script>
+
+  <script>
+    import { animate, inView, stagger } from 'motion';
+
+    // ── Live ticker counters (sends today etc.) ───────────────────────
+    const nf = new Intl.NumberFormat();
+    document.querySelectorAll('[data-live-counter]').forEach((el) => {
+      let v = parseInt(el.getAttribute('data-from') || '0', 10);
+      const max = parseInt(el.getAttribute('data-to') || '99999', 10);
+      const tMin = parseInt(el.getAttribute('data-tick-min') || '1200', 10);
+      const tMax = parseInt(el.getAttribute('data-tick-max') || '3200', 10);
+      const sMin = parseInt(el.getAttribute('data-step-min') || '1', 10);
+      const sMax = parseInt(el.getAttribute('data-step-max') || '3', 10);
+      const tick = () => {
+        v = Math.min(max, v + Math.floor(Math.random() * (sMax - sMin + 1)) + sMin);
+        el.textContent = nf.format(v);
+        if (v < max) setTimeout(tick, Math.random() * (tMax - tMin) + tMin);
+      };
+      setTimeout(tick, 400);
+    });
+
+    // ── Scroll-in fades ──────────────────────────────────────────────
+    // CSS hides .fade-in elements (with html.js-ready). We tag every
+    // motion-target with .fade-in and stagger their is-in toggles
+    // when they enter the viewport. If JS errors out, CSS keeps them
+    // visible (the .js-ready class would never have been set).
+    const tag = (selector, stag = 0.08) => {
+      const els = Array.from(document.querySelectorAll(selector));
+      els.forEach((el) => el.classList.add('fade-in'));
+      if (!els.length) return;
+      els.forEach((el, idx) => {
+        inView(el, () => {
+          setTimeout(() => el.classList.add('is-in'), idx * stag * 1000);
+        }, { amount: 0.12 });
+      });
+    };
+    // The panel reveals as one surface; staggering the joined columns would
+    // pop them in one by one inside their own shared border.
+    tag('.pricing-grid',    0);
+    tag('.step-card',       0.10);
+    tag('.feature-card',    0.10);
+    tag('.metric-cell',     0.06);
+
+    // ── Bar grow on scroll ──────────────────────────────────────────
+    document.querySelectorAll('.bar-fill').forEach((el) => {
+      el.style.width = '0%';
+      inView(el, () => {
+        const w = el.getAttribute('data-target') || '50%';
+        animate(el, { width: ['0%', w] }, { duration: 1.2, ease: [0.22, 1, 0.36, 1] });
+      }, { amount: 0.4 });
+    });
+
+    // ── Ring fill on scroll ──────────────────────────────────────────
+    document.querySelectorAll('.ring-fill').forEach((el) => {
+      inView(el, () => {
+        animate(el, { strokeDasharray: ['0 100', '96 100'] }, { duration: 1.4, ease: [0.22, 1, 0.36, 1] });
+      }, { amount: 0.4 });
+    });
+
+    // ── Floating toast in the hero mock ──────────────────────────────
+    const toast = document.querySelector('.hero-toast');
+    if (toast) {
+      toast.style.opacity = '0';
+      toast.style.transform = 'translateY(12px) scale(0.96)';
+      setTimeout(() => {
+        animate(
+          toast,
+          { opacity: [0, 1], transform: ['translateY(12px) scale(0.96)', 'translateY(0px) scale(1)'] },
+          { duration: 0.7, ease: [0.22, 1, 0.36, 1] },
+        );
+      }, 1300);
+    }
+
+    // ── Sparkline draw-in (path stroke length) ───────────────────────
+    document.querySelectorAll('.sparkline-path').forEach((el) => {
+      const len = el.getTotalLength?.() ?? 200;
+      el.style.strokeDasharray = `${len}`;
+      el.style.strokeDashoffset = `${len}`;
+      inView(el, () => {
+        animate(el, { strokeDashoffset: [len, 0] }, { duration: 1.6, ease: [0.22, 1, 0.36, 1] });
+      }, { amount: 0.4 });
+    });
+
+    // ── Pricing billing toggle (Monthly ↔ Annual, annual default) ───
+    //    Thumb still slides with motion.dev. Prices swap with the same
+    //    slide-up rebound animation /pricing uses on its plan numbers.
+    const toggle = document.getElementById('billing-toggle');
+    const thumb  = document.getElementById('toggle-thumb');
+    if (toggle && thumb) {
+      const btns = toggle.querySelectorAll('button[data-billing]');
+
+      // Slide-up swap on a single price number. Phase 1 lifts and fades
+      // the old value out; phase 2 drops the new value in from below with
+      // a subtle overshoot.
+      const animatePrice = (el, newValue) => {
+        const inner = el.querySelector('.plan-price-inner');
+        if (!inner) return;
+        if (inner.textContent === newValue) return;
+        inner.style.transition = 'transform 220ms cubic-bezier(0.4,0,0.2,1), opacity 220ms cubic-bezier(0.4,0,0.2,1)';
+        inner.style.transform  = 'translateY(-100%)';
+        inner.style.opacity    = '0';
+        setTimeout(() => {
+          inner.style.transition = 'none';
+          inner.style.transform  = 'translateY(100%)';
+          inner.textContent      = newValue;
+          inner.offsetHeight; // reflow
+          inner.style.transition = 'transform 320ms cubic-bezier(0.34,1.56,0.64,1), opacity 220ms ease-out';
+          inner.style.transform  = 'translateY(0)';
+          inner.style.opacity    = '1';
+        }, 220);
+      };
+
+      const apply = (mode, animated = true) => {
+        const btn = toggle.querySelector(`button[data-billing="${mode}"]`);
+        if (!btn) return;
+        const left  = btn.offsetLeft;
+        const width = btn.offsetWidth;
+        if (animated) {
+          animate(thumb, { left: `${left}px`, width: `${width}px` }, { duration: 0.35, ease: [0.22, 1, 0.36, 1] });
+        } else {
+          thumb.style.left = `${left}px`;
+          thumb.style.width = `${width}px`;
+        }
+        // Active button reads as sky-dark on the white pill thumb;
+        // inactive reads as soft white on the translucent track.
+        btns.forEach((b) => {
+          if (b.getAttribute('data-billing') === mode) {
+            b.classList.remove('text-slate-500');
+            b.classList.add('text-slate-900');
+          } else {
+            b.classList.add('text-slate-500');
+            b.classList.remove('text-slate-900');
+          }
+        });
+        document.querySelectorAll('.plan-price').forEach((el) => {
+          const next = el.getAttribute(`data-${mode}`) || '';
+          if (!next) return;
+          if (!animated) {
+            const inner = el.querySelector('.plan-price-inner');
+            if (inner) inner.textContent = next;
+            return;
+          }
+          animatePrice(el, next);
+        });
+        // Struck monthly price and the yearly-saving badge. Unlike .cadence
+        // these are empty on monthly, so an empty value has to clear them
+        // rather than be treated as "nothing to do".
+        document.querySelectorAll('.plan-swap').forEach((el) => {
+          const next = el.getAttribute(`data-${mode}`) || '';
+          el.textContent = next;
+          el.classList.toggle('hidden', next === '');
+        });
+        // Cadence text gets a soft fade-swap so it never just snaps.
+        document.querySelectorAll('.cadence').forEach((el) => {
+          const next = el.getAttribute(`data-${mode}`) || '';
+          if (!next) return;
+          if (!animated) { el.textContent = next; return; }
+          el.style.transition = 'opacity 180ms ease-out';
+          el.style.opacity    = '0';
+          setTimeout(() => {
+            el.textContent = next;
+            el.style.opacity = '1';
+          }, 180);
+        });
+      };
+      btns.forEach((b) => b.addEventListener('click', () => apply(b.getAttribute('data-billing'))));
+      // Default selection — annual, no animation on initial paint
+      requestAnimationFrame(() => apply('annual', false));
+    }
+  </script>
+</Layout>

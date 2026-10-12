@@ -1,0 +1,765 @@
+package main
+
+import (
+	"context"
+	"github.com/pegasusbound/pegasusbound/internal/app/cloudlink"
+	emailverifyapp "github.com/pegasusbound/pegasusbound/internal/app/emailverify"
+	"github.com/pegasusbound/pegasusbound/internal/app/intelsink"
+	"github.com/pegasusbound/pegasusbound/internal/app/slackapp"
+	"log"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/pegasusbound/pegasusbound/internal/app/correlate"
+	"github.com/pegasusbound/pegasusbound/internal/app/orgrisk"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconf "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/app/advanced"
+	"github.com/pegasusbound/pegasusbound/internal/app/audit"
+	"github.com/pegasusbound/pegasusbound/internal/app/cipher"
+	jobs "github.com/pegasusbound/pegasusbound/internal/app/consumer"
+	"github.com/pegasusbound/pegasusbound/internal/app/contact"
+	"github.com/pegasusbound/pegasusbound/internal/app/credits"
+	"github.com/pegasusbound/pegasusbound/internal/app/creditwatch"
+	"github.com/pegasusbound/pegasusbound/internal/app/crmmode"
+	"github.com/pegasusbound/pegasusbound/internal/app/feature"
+	"github.com/pegasusbound/pegasusbound/internal/app/hubspot"
+	"github.com/pegasusbound/pegasusbound/internal/app/inboxagent"
+	"github.com/pegasusbound/pegasusbound/internal/app/inboxtag"
+	"github.com/pegasusbound/pegasusbound/internal/app/instancesettings"
+	"github.com/pegasusbound/pegasusbound/internal/app/integration"
+	"github.com/pegasusbound/pegasusbound/internal/app/nativeactions"
+	"github.com/pegasusbound/pegasusbound/internal/app/notification"
+	"github.com/pegasusbound/pegasusbound/internal/app/opsnotify"
+	"github.com/pegasusbound/pegasusbound/internal/app/pipedrive"
+	"github.com/pegasusbound/pegasusbound/internal/app/replyclassify"
+	"github.com/pegasusbound/pegasusbound/internal/app/salesforce"
+	warmupapp "github.com/pegasusbound/pegasusbound/internal/app/warmup"
+	"github.com/pegasusbound/pegasusbound/internal/app/webhook"
+	workerapp "github.com/pegasusbound/pegasusbound/internal/app/worker"
+	"github.com/pegasusbound/pegasusbound/internal/config"
+	"github.com/pegasusbound/pegasusbound/internal/events"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/apns"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/cache"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/codec"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/db"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/encryptedkeys"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/eventbus"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/kafka"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/kms"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/pubsub"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/storage"
+	"github.com/pegasusbound/pegasusbound/internal/jobrun"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/notify"
+	"github.com/pegasusbound/pegasusbound/internal/observability"
+	"github.com/pegasusbound/pegasusbound/internal/observability/errs"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/encrypt"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/generation"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/geo"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/nodeagent"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/typesafe"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+)
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Load config with env-first approach
+	cfg, err := config.NewConfig(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Error reporting
+	if err := observability.Init(ctx, cfg, "consumer"); err != nil {
+		log.Fatal(err)
+	}
+
+	// AWS SDK config, loaded only when an AWS-backed provider is selected
+	// (KMS_PROVIDER=aws or BLOB_PROVIDER=s3). A fully-local self-host needs no
+	// AWS_REGION or credentials.
+	var awscfg aws.Config
+	if config.AWSNeeded() {
+		awscfg, err = awsconf.LoadDefaultConfig(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	// PostgreSQL
+	primaryDBEndpoint, err := cfg.LoadPrimaryDBEndpoint(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	primaryDB, err := db.New(ctx, primaryDBEndpoint)
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Waiting for backend database migrations...")
+	if err := db.WaitForSchema(ctx, primaryDB); err != nil {
+		log.Fatal(err)
+	}
+	log.Println("Database schema ready")
+
+	// Redis
+	primaryRedis, err := cfg.LoadPrimaryRedisEndpoint(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+	redisCache, err := cache.New(primaryRedis)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// KMS → CipherService
+	var masterKey string = "alias/master-key"
+	if cfg.Env != "prod" {
+		masterKey += "-dev"
+	}
+
+	kmsClient, err := kms.FromEnv(ctx, awscfg, masterKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	encryptedKeys, err := encryptedkeys.FromEnv(
+		encryptedkeys.Deps{DB: primaryDB},
+		"postgres",
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cipherService := cipher.NewService(kmsClient, redisCache, encryptedKeys)
+
+	// Blob storage (S3 by default, filesystem when BLOB_PROVIDER=filesystem).
+	s3Client, err := storage.NewFromEnv(ctx, awscfg, "main")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Event bus + codec. Kafka bootstrap/SASL is only loaded for
+	// EVENTBUS_PROVIDER=kafka; codec.FromEnv owns serialization (Avro pulls
+	// SCHEMA_REGISTRY_URL from env, JSON needs nothing). The bus drives both the
+	// inbound worker-events subscription and outbound publishing, so a NATS +
+	// JSON self-host needs no Kafka or Schema Registry config.
+	var kafkaBootstrapServers string
+	var kafkaSaslConfig *kafka.SASLConfig
+	if config.EventBusProvider() == "kafka" {
+		kafkaBootstrapServers, err = cfg.LoadKafkaBootstrapServers(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+		kafkaSaslConfig, err = cfg.LoadKafkaConfigSasl(ctx)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+
+	consumerCodec, err := codec.FromEnv()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	consumerBus, err := eventbus.FromEnv(kafkaBootstrapServers, kafkaSaslConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer consumerBus.Close()
+
+	// Realtime event transport, chosen by PUBSUB_ENABLED — the SAME flag the
+	// backend and the Elixir realtime service read, so the three services can
+	// never split-brain. PUBSUB_ENABLED=true => Google Pub/Sub (prod); anything
+	// else => Redis bridge (local dev / non-GCP). Exactly one transport is active.
+	var streamingPublisher *pubsub.StreamingPublisher
+	if os.Getenv("PUBSUB_ENABLED") == "true" {
+		gcpProjectID := os.Getenv("GCP_PROJECT_ID")
+		if gcpProjectID == "" {
+			log.Fatal("PUBSUB_ENABLED=true requires GCP_PROJECT_ID")
+		}
+		pubsubClient, err := pubsub.NewClient(ctx, gcpProjectID)
+		if err != nil {
+			errs.CaptureFatal(err)
+			log.Fatal(err)
+		}
+		defer pubsubClient.Close()
+		// Idempotently ensure the realtime topics + subscriptions exist (safe to
+		// run from both backend and consumer; AlreadyExists is treated as success).
+		if err := pubsubClient.EnsureRealtimeTopology(ctx); err != nil {
+			errs.CaptureFatal(err)
+			log.Fatal("Failed to provision Pub/Sub topics/subscriptions: ", err)
+		}
+		streamingPublisher = pubsub.NewStreamingPublisher(pubsubClient, repository.NewEventAudienceRepository(primaryDB.Pool))
+	}
+	if streamingPublisher == nil {
+		streamingPublisher = pubsub.NewStreamingPublisher(pubsub.NewRedisBus(redisCache.Client, ""), repository.NewEventAudienceRepository(primaryDB.Pool))
+		log.Println("Realtime events bridged over Redis (Pub/Sub disabled)")
+	}
+
+	// Repositories
+	credEncrypter, err := encrypt.FromEnv()
+	if err != nil {
+		errs.CaptureFatal(err)
+		log.Fatal("Invalid CREDENTIALS_ENCRYPTION_KEY: ", err)
+	}
+	emailRepo := repository.NewEmailRepostory(primaryDB, credEncrypter)
+	uniboxRepo := repository.NewUniboxRepository(primaryDB)
+	mailboxRepo := repository.NewMailboxRepository(primaryDB)
+	emailHistoryIDRepo := repository.NewEmailHistoryIDRepository(primaryDB)
+	emailGraphDeltaRepo := repository.NewEmailGraphDeltaRepository(primaryDB)
+	emailAccountErrorRepo := repository.NewEmailAccountErrorRepository(primaryDB)
+	warmupRepo := repository.NewWarmupRepository(primaryDB.Pool)
+	warmupService := warmupapp.NewService(warmupRepo)
+	// Push warmup-health transitions live to the dashboard. The health sweep
+	// runs in this process, so the realtime publisher is wired here.
+	if streamingPublisher != nil {
+		warmupService.WireRealtime(streamingPublisher, emailRepo)
+	}
+	workerRepo := repository.NewWorkerRepository(primaryDB.Pool)
+	subscriptionRepoConsumer := repository.NewSubscriptionRepository(primaryDB.Pool)
+	planRepoConsumer := repository.NewPlanRepository(primaryDB.Pool)
+	workerAssignmentSvc := workerapp.NewAssignmentService(workerRepo, subscriptionRepoConsumer, planRepoConsumer)
+	campaignRepo := repository.NewCampaignRepostory(primaryDB)
+	taskRepo := repository.NewTaskRepository(primaryDB.Pool)
+	contactRepo := repository.NewContactRepostory(primaryDB)
+	campaignProgressRepo := repository.NewCampaignProgressRepository(primaryDB.Pool)
+	crmRepo := repository.NewCRMRepository(primaryDB.Pool)
+	orgRepoConsumer := repository.NewOrganizationRepository(primaryDB.Pool)
+	advancedRepo := repository.NewAdvancedOutreachRepository(primaryDB.Pool)
+
+	// Reply → integration fan-out. The consumer is where inbound replies are
+	// detected, so this is where "prospect replied" turns into a Slack ping /
+	// CRM upsert. webhookService.Dispatch enqueues customer webhook deliveries
+	// (drained by the backend's DeliveryWorker) AND, via the wired sink, runs
+	// integration actions in-process (cipher + Postgres are available here; the
+	// consumer is control-plane, not a worker). Suppression already lives in the
+	// advanced repo, so no separate suppression repo is wired here.
+	webhookRepoC := repository.NewWebhookRepositorySealed(primaryDB.Pool, credEncrypter)
+	webhookService := webhook.NewService(webhookRepoC)
+	// The consumer dispatches lower-volume reply/warmup events (not per-contact
+	// campaign fan-out), so a generous static cap is enough here; the plan-based
+	// resolver lives in the backend where campaign "notify" actions run.
+	webhookService.WireThrottle(redisCache, webhook.StaticLimit(config.WebhookDispatchBasePerMinute))
+	integrationRepoC := repository.NewIntegrationRepository(primaryDB.Pool)
+	integrationServiceC := integration.NewService(integrationRepoC, cipherService, integration.NewOAuthManager())
+	webhookService.WireDispatchSink(integrationServiceC.DispatchAny)
+	// Replies, opens and clicks are raised here, so the Salesforce outbox
+	// records them here too; the backend drains it. Automation upserts take
+	// the native path as well.
+	salesforceC := salesforce.NewService(salesforce.Deps{
+		Repo:         repository.NewSalesforceRepository(primaryDB.Pool),
+		Integrations: integrationServiceC,
+		Cipher:       cipherService,
+		Holds:        campaignProgressRepo,
+		Suppression:  advancedRepo,
+		Subscription: contactRepo,
+	})
+	integrationServiceC.SetSalesforce(salesforceC)
+	webhookService.WireRecordSink(salesforceC.Recorder().Record)
+	if intelsink.Enabled() {
+		webhookService.WireRecordSink(intelsink.New(primaryDB.Pool).Record)
+	}
+	// AI automation nodes + reply-classifier Layer 3 run in THIS process (reply /
+	// warmup / bounce events dispatch here). Build the credit ledger + provider so
+	// the ai_step / ai_switch nodes can charge + call, and so the classifier's
+	// optional model layer rides the same OpenAI-first provider.
+	creditRepoC := repository.NewCreditRepository(primaryDB)
+	aiSettingsRepoC := repository.NewAISettingsRepository(primaryDB)
+	creditServiceC := credits.NewService(creditRepoC, aiSettingsRepoC, redisCache)
+	// Consumer-side debits (automation AI nodes) also feed the low-balance
+	// alert. Auto top-up stays backend-only (no Stripe service here).
+	creditServiceC.SetMonitor(creditwatch.New(aiSettingsRepoC, creditRepoC, redisCache, streamingPublisher, nil).OnBalanceChanged)
+	var aiProviderC generation.Provider
+	// Pluggable web search (Serper/SearXNG) backs the AI switch's optional
+	// company lookup on reply-triggered automations that run in the consumer.
+	aiSearchC := generation.NewSearchClient(
+		cfg.GetStringOptional(ctx, "SEARCH_PROVIDER", "search/provider", ""),
+		cfg.GetStringOptional(ctx, "SEARCH_API_URL", "search/api_url", ""),
+		cfg.GetSecretOptional(ctx, "SEARCH_API_KEY", "search/api_key", ""),
+	)
+	// Provider selection mirrors the backend: AI_PROVIDER preset + AI_* vars.
+	if cfgAI, rerr := generation.Resolve(generation.ProviderSettings{
+		Provider:   cfg.GetStringOptional(ctx, "AI_PROVIDER", "ai_provider", ""),
+		APIKey:     cfg.GetSecretOptional(ctx, "AI_API_KEY", "ai_api_key", ""),
+		BaseURL:    cfg.GetStringOptional(ctx, "AI_BASE_URL", "ai_base_url", ""),
+		Model:      cfg.GetStringOptional(ctx, "AI_MODEL", "ai_model", ""),
+		ModelTrial: cfg.GetStringOptional(ctx, "AI_MODEL_TRIAL", "ai_model_trial", ""),
+		ModelPaid:  cfg.GetStringOptional(ctx, "AI_MODEL_PAID", "ai_model_paid", ""),
+		Free:       cfg.GetBoolPtr(ctx, "AI_FREE", "ai_free"),
+		Search:     aiSearchC,
+	}); rerr != nil {
+		log.Printf("AI provider misconfigured, AI features disabled: %v", rerr)
+	} else if p, perr := generation.NewProvider(cfgAI); perr == nil {
+		aiProviderC = p
+	}
+	integrationServiceC.SetAI(aiProviderC, creditServiceC)
+	integrationServiceC.SetAISearch(aiSearchC)
+	// One TypeSafe client for every typed judgment in this process. Nil when
+	// no key is configured, and every feature that reads it stays off.
+	var typeSafeClient *typesafe.Client
+	if key := config.TypeSafeAPIKey(); key != "" {
+		typeSafeClient = typesafe.NewClient(key, typesafe.WithBillingRedis(redisCache.Client))
+	}
+	if aiProviderC != nil {
+		replyclassify.SetModelClassifier(func(ctx context.Context, system, user string) (string, error) {
+			res, err := aiProviderC.Complete(ctx, generation.CompletionRequest{System: system, Prompt: user, MaxTokens: 16, Temperature: generation.Deterministic()})
+			if err != nil {
+				return "", err
+			}
+			return res.Text, nil
+		})
+	}
+	// Warmup health transitions happen in THIS process (the health sweep + all
+	// event-driven re-evaluations run in the consumer). Without wiring the
+	// webhook dispatcher here, dispatchHealthEvent saw s.webhooks == nil and
+	// every warmup.health_changed / quarantined / blocked event silently fired
+	// no webhook. Dispatch only enqueues delivery rows in Postgres (drained by
+	// the backend's DeliveryWorker), so no worker/PG boundary is crossed.
+	warmupService.WireWebhooks(webhookService, emailRepo)
+
+	advancedService := advanced.NewService(
+		advancedRepo,
+		campaignRepo,
+		emailRepo,
+		taskRepo,
+		contactRepo,
+		campaignProgressRepo,
+		crmRepo,
+		repository.NewGroupRepostory(primaryDB, models.Categories),
+		uniboxRepo,
+		nil, // tasksClient: the consumer does not schedule Cloud Tasks
+		warmupService,
+	)
+	// Instant reply actions can pin a contact into or out of a segment.
+	if aware, ok := advancedService.(advanced.SegmentAware); ok {
+		aware.WireSegments(repository.NewSegmentRepository(primaryDB))
+	}
+	advancedService.WireDispatcher(webhookService)
+
+	// HubSpot as the workspace CRM: replies and bounces dispatched here log to
+	// HubSpot, reply tasks reach it, and this process drains the CRM outbox and
+	// runs the pull that keeps the mirror current.
+	hubspotService := hubspot.New(hubspot.Deps{
+		Repo:         repository.NewCRMProviderRepository(primaryDB.Pool),
+		CRM:          crmRepo,
+		Tokens:       integrationServiceC,
+		Contacts:     contactRepo,
+		Holds:        campaignProgressRepo,
+		Suppress:     advancedRepo,
+		Realtime:     streamingPublisher,
+		Cache:        redisCache,
+		AppURL:       os.Getenv("APP_URL"),
+		ClientSecret: strings.TrimSpace(os.Getenv("HUBSPOT_OAUTH_CLIENT_SECRET")),
+	})
+	// Pipedrive mode: the same in this process, on Pipedrive's records.
+	pipedriveService := pipedrive.New(pipedrive.Deps{
+		Repo:         repository.NewCRMProviderRepository(primaryDB.Pool),
+		CRM:          crmRepo,
+		Tokens:       integrationServiceC,
+		Contacts:     contactRepo,
+		Holds:        campaignProgressRepo,
+		Suppress:     advancedRepo,
+		Realtime:     streamingPublisher,
+		Cache:        redisCache,
+		AppURL:       os.Getenv("APP_URL"),
+		PublicURL:    config.BackendPublicURL(),
+		ClientSecret: strings.TrimSpace(os.Getenv("PIPEDRIVE_OAUTH_CLIENT_SECRET")),
+	})
+	crmModes := crmmode.New(repository.NewCRMProviderRepository(primaryDB.Pool), integrationServiceC, hubspotService, pipedriveService)
+	webhookService.WireRecordSink(hubspotService.OnEvent)
+	webhookService.WireRecordSink(pipedriveService.OnEvent)
+	advancedService.WireCRMOutbox(crmModes)
+	integrationServiceC.SetCRMModeCheck(crmModes.Mode)
+	go hubspotService.RunDrainer(ctx)
+	go hubspotService.RunPuller(ctx)
+	go pipedriveService.RunDrainer(ctx)
+	go pipedriveService.RunPuller(ctx)
+	// Replies, bounces, opens and clicks teach verification what real mail
+	// showed about each address.
+	verificationEvidence := emailverifyapp.NewEvidence(repository.NewVerificationEvidenceRepository(primaryDB))
+	if aware, ok := advancedService.(advanced.EvidenceAware); ok {
+		aware.WireEvidence(verificationEvidence)
+	}
+	// Reply/open/click instant action chains run in THIS process (inbox ingest +
+	// tracking consumer), so a "run_automation" node on an instant branch must be
+	// able to launch the flow here too. Without this it would be stamped sent and
+	// never fire. Mirrors the scheduler's automationRunner wiring.
+	advancedService.WireAutomationRunner(integrationServiceC)
+	// Native (Pegasusbound-internal) automation actions run wherever the event is
+	// dispatched. Reply/bounce/warmup events dispatch in THIS process, so without
+	// wiring native actions here a reply-triggered automation's add_tag /
+	// create_deal / label_email node would fail with "native actions are not
+	// available". Mirrors the backend wiring.
+	// The lead-intake actions (create or update contact, add to campaign) write
+	// through a contact service so a reply-triggered flow in this process gets
+	// the same plan check, campaign wake and contact.created as the backend.
+	contactServiceC := contact.NewService(contactRepo, subscriptionRepoConsumer, planRepoConsumer, streamingPublisher)
+	if aware, ok := contactServiceC.(contact.WebhookAware); ok {
+		aware.WireWebhooks(webhookService)
+	}
+	integrationServiceC.SetNativeActions(nativeactions.Adapter{
+		Adv:        advancedService,
+		Contacts:   contactRepo,
+		Orgs:       orgRepoConsumer,
+		ContactSvc: contactServiceC,
+	})
+	// In-app notifications: the reply/bounce/complaint gate fires in THIS
+	// process (inbox ingest + deliverability ingest run in the consumer), so the
+	// notifier must be wired here. Missing this = notifications silently never
+	// created.
+	notificationService := notification.NewService(repository.NewNotificationRepository(primaryDB.Pool), streamingPublisher)
+	// Email + Slack delivery for notifications. Email is best-effort: the
+	// SES/SMTP service only constructs when email config is present (prod, or
+	// a dev env that sets it), so a bare dev consumer simply skips the email
+	// channel. Slack reuses the integration service (token decryption).
+	var notifEmail notification.EmailSender
+	if emailCfg, ecErr := cfg.LoadEmailConfig(ctx); ecErr == nil {
+		if transport, tErr := notify.NewTransport(ctx, cfg, emailCfg.EmailName, emailCfg.EmailAddress); tErr == nil {
+			notifEmail = transport
+			log.Printf("Notification mail transport: %s", transport.Description)
+		} else {
+			log.Printf("Warning: notification email disabled: %v", tErr)
+		}
+	} else {
+		log.Printf("Warning: notification email disabled, EMAIL_NAME/EMAIL_ADDRESS not set: %v", ecErr)
+	}
+	slackRepoC := repository.NewSlackRepository(primaryDB)
+	notificationService.WireDelivery(notifEmail, slackapp.NewNotifier(integrationServiceC, slackRepoC), repository.NewUserRepostory(primaryDB, kmsClient), orgRepoConsumer)
+
+	// Operator alerts. The dead-worker detector runs in this process, and a
+	// stranded fleet is the operator's problem, not a tenant's. Reads the same
+	// channel list the admin panel writes; a mail transport is optional (the
+	// chat and webhook transports do not need one).
+	var opsMailer opsnotify.Mailer
+	if notifEmail != nil {
+		if m, ok := notifEmail.(opsnotify.Mailer); ok {
+			opsMailer = m
+		}
+	}
+	opsNotifierC := opsnotify.NewService(
+		instancesettings.NewService(instancesettings.NewStore(primaryDB.Pool)),
+		opsMailer,
+		config.AppBaseURL(),
+	)
+	// Mobile push (APNs) fires from THIS process too: reply/bounce/complaint
+	// notifications are created here. Redis backs the immediate-then-digest
+	// window shared with the backend. The sender stays a nil interface (not a
+	// typed-nil *apns.Client) when unconfigured.
+	var pushSender notification.PushSender
+	if apnsClient, aerr := apns.FromEnv(); aerr != nil {
+		log.Printf("Warning: APNs push disabled: %v", aerr)
+	} else if apnsClient != nil {
+		pushSender = apnsClient
+	}
+	notificationService.WirePush(pushSender, repository.NewDeviceTokenRepository(primaryDB.Pool), redisCache.Client)
+	advancedService.WireNotifier(notificationService)
+	// Reply pulses fire in THIS process too (inbox ingest classifies replies).
+	advancedService.WireRealtime(streamingPublisher)
+	// A lifted reply opt-out is recorded like a member lifting one by hand.
+	advancedService.WireAudit(audit.NewService(repository.NewAuditRepository(primaryDB.Pool), streamingPublisher))
+	// Inbox agent (M10): inbound human replies are ingested + classified in THIS
+	// process, so the agent that drafts a suggested reply must be wired here. It
+	// is paid + opt-in (checked inside) and self-detaches, so a slow model never
+	// blocks reply ingest. Nil provider leaves it inert.
+	inboxAgentServiceC := inboxagent.NewService(
+		aiProviderC,
+		creditServiceC,
+		feature.NewService(subscriptionRepoConsumer, planRepoConsumer),
+		orgRepoConsumer,
+		uniboxRepo,
+		nil, // skills preamble optional; not constructed in the consumer
+		contactRepo,
+		repository.NewAIDraftRepository(primaryDB.Pool),
+		streamingPublisher,
+	)
+	advancedService.WireInboxAgent(inboxAgentServiceC)
+	if typeSafeClient != nil {
+		// A bounce whose reason does not name the recipient is classified, so a
+		// reputation or policy block does not suppress a good address.
+		advancedService.WireBounceJudge(typeSafeClient)
+	}
+
+	eventsPublisher := events.NewPublisher(consumerBus, s3Client, consumerCodec, cipherService)
+
+	// Every consumer loop records to scheduled_job_runs, so the admin panel
+	// lists it next to the backend's and can ask it to run now.
+	jobrun.Configure(repository.NewJobRunRepository(primaryDB), "consumer")
+
+	// JobsService
+	// Follow-up labels use stored mailbox facts and run without TypeSafe.
+	// Message classification still requires both the key and opt-in switch.
+	tagCategories := repository.NewTagCategoryStore(primaryDB.Pool)
+	inboxTagRepo := repository.NewInboxTagRepository(primaryDB.Pool)
+	var tagAsker inboxtag.Asker
+	classify := config.InboxTaggingEnabled() && typeSafeClient != nil
+	if classify {
+		tagAsker = inboxtag.NewAsker(typeSafeClient)
+		log.Printf("automatic inbox tagging enabled (model %s)", inboxtag.Model)
+	} else {
+		log.Printf("automatic inbox classification off; timestamp-based follow-up labels still run locally")
+	}
+	inboxTagger := inboxtag.NewService(
+		tagAsker,
+		inboxTagRepo,
+		tagCategories,
+		tagCategories,
+		classify,
+	)
+	inboxTagger.WireSettings(advancedRepo)
+	if typeSafeClient != nil {
+		// The reply classifier's model layer and the inbox agent's gate both
+		// read the verdict the tagger stored moments earlier, so a reply is
+		// paid for once. Without tagging the classifier asks one question.
+		replyclassify.SetTypedClassifier(inboxtag.ReplyClassifier(typeSafeClient, inboxTagRepo))
+		inboxAgentServiceC.WireDraftGate(inboxtag.NewDraftGate(inboxTagRepo))
+	}
+	advancedService.WireInboxTags(inboxTagRepo)
+
+	jobsService := &jobs.JobsService{
+		Bus:                         consumerBus,
+		Codec:                       consumerCodec,
+		UniboxRepository:            uniboxRepo,
+		MailboxRepository:           mailboxRepo,
+		EmailRepository:             emailRepo,
+		EmailHistoryIDRepository:    emailHistoryIDRepo,
+		EmailGraphDeltaRepository:   emailGraphDeltaRepo,
+		EmailSyncStateRepository:    repository.NewEmailSyncStateRepository(primaryDB),
+		ArrivalOutbox:               repository.NewDurableEmailMessageMapRepository(primaryDB, cipherService),
+		EmailAccountErrorRepository: emailAccountErrorRepo,
+		WarmupRepo:                  warmupRepo,
+		PoolLinkRepo:                repository.NewPoolLinkRepository(primaryDB.Pool),
+		CloudLink:                   cloudlink.NewService(repository.NewCloudLinkRepository(primaryDB.Pool, credEncrypter), emailRepo, nil),
+		WarmupContentRepo:           repository.NewWarmupContentRepository(primaryDB.Pool),
+		WarmupEngagementRepo:        repository.NewWarmupEngagementRepository(primaryDB.Pool),
+		WarmupRecoveryRepo:          repository.NewWarmupRecoveryRepository(primaryDB.Pool),
+		WarmupPlacementRepo:         repository.NewWarmupPlacementRepository(primaryDB),
+		PlacementRepo:               repository.NewPlacementRepository(primaryDB),
+		WarmupService:               warmupService,
+		WorkerRepo:                  workerRepo,
+		FleetNodeRepo:               repository.NewFleetNodeRepository(primaryDB),
+		LifecycleRepo:               repository.NewSendLifecycleRepository(primaryDB),
+		Publisher:                   eventsPublisher,
+		StreamingPublisher:          streamingPublisher,
+		AdvancedService:             advancedService,
+		InboxTagger:                 inboxTagger,
+		Cache:                       redisCache,
+		Retention:                   instancesettings.NewService(instancesettings.NewStore(primaryDB.Pool)),
+		AdminRepo:                   repository.NewAdminRepository(primaryDB.Pool),
+		AssignmentService:           workerAssignmentSvc,
+		Notifier:                    notificationService,
+		OpsNotifier:                 opsNotifierC,
+		TaskRepo:                    taskRepo,
+		CampaignRepo:                campaignRepo,
+		CampaignProgressRepo:        campaignProgressRepo,
+		CampaignLogRepo:             repository.NewCampaignLogRepository(primaryDB),
+		ContactRepo:                 contactRepo,
+		Evidence:                    verificationEvidence,
+	}
+
+	// Inbox arrivals are mirrored into the workspace's Slack inbox channel here.
+	jobsService.SlackInbox = slackapp.NewInboxPoster(slackapp.InboxDeps{
+		Integrations: integrationServiceC, Repo: slackRepoC, Redis: redisCache.Client,
+		Threads: uniboxRepo, Tasks: taskRepo, Campaigns: campaignRepo,
+		Users: repository.NewUserRepostory(primaryDB, kmsClient),
+	})
+	jobsService.InitEvents()
+
+	// Graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigCh
+		log.Println("Shutting down consumer...")
+		cancel()
+	}()
+
+	// Start DLQ auto-retry loop in background (every 60 seconds)
+	go jobsService.StartDLQRetryLoop(ctx, 60*time.Second)
+
+	// Start warmup health evaluation sweep (every hour)
+	go jobsService.StartWarmupHealthSweep(ctx, 1*time.Hour)
+
+	// Persist each mailbox's sending-domain SPF/DKIM/DMARC state (observe-only,
+	// not yet a send gate): sweep hourly, rechecking each domain at most daily.
+	go jobsService.StartAuthCheckSweep(ctx, 1*time.Hour, 24*time.Hour)
+
+	// Drains the durable delayed-engagement schedule (read/important/star) so the
+	// recipient-side dwell survives worker restarts. Short interval keeps the
+	// effective dwell close to the requested value.
+	go jobsService.StartWarmupEngagementPoller(ctx, 30*time.Second)
+	go jobsService.StartWarmupInboxCleanup(ctx)
+	go jobsService.StartWarmupFilingRecovery(ctx)
+	// Deletes warmup mail past its retention window from the mailbox itself
+	// and prunes the per-message warmup records after theirs.
+	go jobsService.StartWarmupMailRetention(ctx)
+	// Searches the mailbox for deletion strikes recorded before removals were
+	// checked, withdrawing any whose message is still there.
+	go jobsService.StartWarmupTamperingRecheck(ctx)
+	// Attributes each warmup email moved to spam once the activity around it settles.
+	go jobsService.StartWarmupSpamMoveAttribution(ctx)
+	go jobsService.StartWarmupPlacementSweep(ctx)
+	go jobsService.StartPendingWarmupVerification(ctx)
+	// Re-offers inbound mail that reply processing never claimed, so a
+	// reply refused by a since-fixed check is still attributed to its lead.
+	go jobsService.StartIncomingReplyRepair(ctx)
+	go jobsService.StartReplyOptOutRecheck(ctx)
+
+	// Mirrors Pegasusbound Cloud's warmup verdicts onto the mailboxes it warms, so
+	// a cloud quarantine pauses their campaigns here too. No-op when unlinked.
+	go jobsService.StartCloudStandingSync(ctx, 5*time.Minute)
+
+	// Start dead worker detection (every 5 minutes)
+	go jobsService.StartDeadWorkerDetection(ctx, 5*time.Minute)
+
+	// Resolve campaign sends that were reserved and dispatched but whose worker
+	// result never came back, so a lead is never held in flight forever.
+	go jobsService.StartStuckSendReclaimer(ctx, 5*time.Minute)
+
+	// Mirror Redis heartbeats into workers.last_seen_at every 60s
+	// so the admin dashboard can render liveness without touching Redis.
+	go jobsService.StartWorkerHeartbeatSync(ctx, 60*time.Second)
+
+	// Re-evaluate per-mailbox risk bands hourly. The band feeds warmup partner
+	// selection and pacing; it does not move mailboxes between workers, because
+	// the worker is not the sending identity.
+	go jobsService.StartRiskRebalancer(ctx, 1*time.Hour)
+	// Same cadence, different question: the band describes reputation, the
+	// lifecycle picks whether the mailbox is in cold rotation at all.
+	go jobsService.StartLifecycleRebalancer(ctx, 1*time.Hour)
+	// The abuse sweep: cross-account shape, plus what each organization's mail
+	// did to recipients. Nightly, because both form over days.
+	orgRiskService := orgrisk.NewService(repository.NewOrgRiskRepository(primaryDB))
+	go correlate.NewService(
+		repository.NewCorrelationRepository(primaryDB),
+		repository.NewOrgConductRepository(primaryDB),
+		orgRiskService,
+	).Start(ctx, 24*time.Hour)
+	// Evidence a one-shot detector filed cannot retract itself, so it carries
+	// an expiry; only a re-derive moves the stored score, which is this.
+	go orgrisk.StartExpirySweep(ctx, orgRiskService, orgrisk.ExpirySweepInterval)
+
+	// Tracking consumer (opens/clicks): a second subscription on the shared bus
+	// for the tracking topic. It records open/click engagement and fires INSTANT
+	// open/click action chains (advancedService), the open/click analog of the
+	// reply path. Decodes with the same codec the Rust tracking service writes
+	// (Avro on Kafka, JSON on NATS).
+	// GeoIP is optional here as on the backend: it only turns an open or
+	// click's source network into a country and city on the logs.
+	// Nothing waits for the database: opens and clicks are recorded either way
+	// and only their country and city label depends on it, so a mirror that is
+	// slow or gone must not delay this service coming up.
+	geoPath, _ := cfg.LoadGeoDBPath(ctx)
+	geoloc, _ := geo.New("")
+	geo.Start(ctx, geoloc, geoPath, cfg.LoadGeoDBURL(ctx))
+	if trackingCfg, terr := cfg.LoadTrackingConsumerConfig(ctx); terr != nil {
+		log.Println("tracking consumer config unavailable; opens/clicks not consumed:", terr)
+	} else if trackingConsumer, terr := jobs.NewTrackingConsumer(
+		consumerBus,
+		consumerCodec,
+		trackingCfg.Topic,
+		trackingCfg.GroupID,
+		taskRepo,
+		campaignProgressRepo,
+		campaignRepo,
+		contactRepo,
+		streamingPublisher,
+		repository.NewTrackingDedupeRepository(primaryDB.Pool),
+		repository.NewTrackedLinkRepository(primaryDB.Pool),
+		repository.NewLinkClickRepository(primaryDB.Pool),
+		advancedService,
+		verificationEvidence,
+		repository.NewEmailOpenRepository(primaryDB.Pool),
+		geoloc,
+	); terr != nil {
+		log.Println("tracking consumer unavailable; opens/clicks not consumed:", terr)
+	} else {
+		// The engagement prune reads its window from the instance settings on
+		// every pass, and the machine-window rule reads its windows per event,
+		// so editing either in the admin panel needs no restart. Both go
+		// through this process's own read cache, so an edit lands within its
+		// TTL rather than instantly.
+		trackingSettings := instancesettings.NewService(instancesettings.NewStore(primaryDB.Pool))
+		trackingConsumer.WireRetention(trackingSettings)
+		trackingConsumer.WireTrackingPolicy(trackingSettings)
+		trackingConsumer.WireDirectMail(emailRepo)
+		defer trackingConsumer.Close()
+		go func() {
+			if err := trackingConsumer.Start(ctx); err != nil {
+				log.Println("tracking consumer stopped:", err)
+			}
+		}()
+		log.Println("Tracking consumer started, listening on", trackingCfg.Topic)
+	}
+
+	// The consumer is a fleet node like any other: it enrols, heartbeats,
+	// reports what it is running and what it is using, and picks up the
+	// version the control plane wants. Before this it was anonymous, so a
+	// dead one stayed invisible until work started backing up.
+	agentDone := make(chan struct{})
+	go func() {
+		defer close(agentDone)
+		newConsumerAgent().Run(ctx)
+	}()
+
+	log.Println("Consumer started, listening on", kafka.TopicWorkerEvents)
+	jobsService.Start(ctx)
+
+	// Give the farewell beat a moment to land, bounded so a wedged backend
+	// cannot stop the consumer exiting.
+	select {
+	case <-agentDone:
+	case <-time.After(8 * time.Second):
+		log.Println("timed out waiting for the shutdown heartbeat")
+	}
+	log.Println("Consumer stopped")
+}
+
+// newConsumerAgent builds the fleet agent for this consumer.
+//
+// Identity resolution mirrors the worker's: an explicit PEGASUSBOUND_NODE_ID wins,
+// otherwise it is derived from the hostname so a container recreate keeps the
+// same identity instead of leaving a dead row behind on every restart.
+func newConsumerAgent() *nodeagent.Agent {
+	id := resolveConsumerID()
+	return nodeagent.New(nodeagent.Config{
+		NodeID:            id,
+		Role:              models.NodeRoleConsumer,
+		Name:              os.Getenv("PEGASUSBOUND_NODE_NAME"),
+		Region:            os.Getenv("PEGASUSBOUND_NODE_REGION"),
+		Version:           os.Getenv("PEGASUSBOUND_VERSION"),
+		BaseURL:           consumerBackendURL(),
+		Token:             config.NodeAPIToken(),
+		TargetVersionPath: os.Getenv("PEGASUSBOUND_TARGET_VERSION_PATH"),
+	})
+}
+
+func resolveConsumerID() uuid.UUID {
+	if raw := os.Getenv("PEGASUSBOUND_NODE_ID"); raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			return id
+		}
+		log.Printf("PEGASUSBOUND_NODE_ID is not a valid uuid; deriving one from the hostname instead")
+	}
+	host, err := os.Hostname()
+	if err != nil || host == "" {
+		// Last resort. A random id means this process shows up as a new node
+		// on every restart, which is visible in the dashboard rather than
+		// silent, so it is a better failure than refusing to start.
+		return uuid.New()
+	}
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("pegasusbound-consumer:"+host))
+}
+
+func consumerBackendURL() string {
+	if v := os.Getenv("PEGASUSBOUND_BACKEND_URL"); v != "" {
+		return v
+	}
+	return os.Getenv("ENCRYPTED_KEYS_BACKEND_URL")
+}

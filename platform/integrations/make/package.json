@@ -1,0 +1,12 @@
+{
+  "name": "pegasusbound-make-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pegasusbound Custom App for Make.com: triggers, actions, and searches for email warmup and cold outreach.",
+  "scripts": {
+    "validate": "node scripts/validate.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

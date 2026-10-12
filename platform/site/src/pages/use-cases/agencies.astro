@@ -1,0 +1,171 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Icon from '../../components/Icon.astro';
+import CTA from '../../components/CTA.astro';
+import SectionIntro from '../../components/page/SectionIntro.astro';
+import Rule from '../../components/page/Rule.astro';
+import Faq from '../../components/page/Faq.astro';
+import HeroSwitcher from '../../components/scenes/use-cases/agencies/HeroSwitcher.astro';
+import ClientReport from '../../components/scenes/use-cases/agencies/ClientReport.astro';
+import ClientCampaigns from '../../components/scenes/use-cases/agencies/ClientCampaigns.astro';
+import ClientSuppression from '../../components/scenes/use-cases/agencies/ClientSuppression.astro';
+import ClientKeys from '../../components/scenes/use-cases/agencies/ClientKeys.astro';
+import SharedPool from '../../components/scenes/use-cases/agencies/SharedPool.astro';
+import InviteClient from '../../components/scenes/use-cases/agencies/InviteClient.astro';
+import WorkspaceBilling from '../../components/scenes/use-cases/agencies/WorkspaceBilling.astro';
+
+// Isolation follows CLAUDE.md: every read of a workspace's data is scoped to
+// that workspace, while the warmup pool is shared by design. Roles and the
+// Viewer description are the seeded ones in docs/content/docs/guides/team-roles.mdx.
+
+const tileTitle = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const tileBody = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+
+const billing = [
+  { k: 'You pay', v: 'Per workspace', d: 'One subscription per client, owned by you.' },
+  { k: 'Seats', v: 'Free', d: 'Add your SDRs, AEs and reviewers at no cost.' },
+  { k: 'Mailboxes', v: 'Unlimited', d: 'On every paid plan, under fair use.' },
+  { k: 'Your margin', v: 'Yours', d: 'Bill clients however you like.' },
+];
+
+const roles = [
+  { n: 'Admin', c: '#8b5cf6', d: 'Everything except transferring ownership.' },
+  { n: 'Manager', c: '#10b981', d: 'Campaigns, contacts, mailboxes and integrations.' },
+  { n: 'Viewer', c: '#f59e0b', d: 'Read-only access to campaigns, contacts and reports.' },
+];
+
+const faq: [string, string][] = [
+  ['Can one client’s bad mailbox hurt another client?', 'Reputation is judged mailbox by mailbox, so one client’s struggling mailbox doesn’t drag another client’s down. The warmup pool is shared on purpose, because a pool only works with many mailboxes, and a mailbox that draws complaints or bounces is taken out of it.'],
+  ['How many clients can I run?', 'As many as you like. Each client is its own workspace with its own subscription, so capacity grows with your roster rather than your headcount.'],
+  ['Do my clients get a Pegasusbound invoice?', 'No. You own every workspace subscription and bill your clients yourself, at whatever margin you choose.'],
+  ['Can a client’s mailboxes be kept apart from everyone else’s?', 'On Business and Enterprise, a workspace’s mailboxes sign in to their providers from an address no other customer uses.'],
+  ['Can clients log in and see their own results?', 'Yes. Invite them to their workspace with a role that fits, and they see their own campaigns and numbers and nothing from your other clients.'],
+];
+---
+<Layout
+  title="Cold Email for Agencies: Run Every Client From One Account | Pegasusbound"
+  description="Run cold outreach for many clients from one account: a workspace per client with its own contacts, suppression, analytics and integrations, per-workspace billing and no seat charges."
+>
+  <!-- HERO: the whole dashboard, switcher open over one client's numbers. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="grid items-end gap-8 lg:grid-cols-[1.3fr_1fr]">
+      <div>
+        <a href="/use-cases/" class="text-[14px] text-slate-500 hover:text-slate-900">Use cases · Agencies</a>
+        <h1 class="mt-4 max-w-3xl text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">Every client’s outreach, from one account.</h1>
+      </div>
+      <div class="lg:pb-2">
+        <p class="text-[17px] md:text-[18px] leading-[1.55] text-slate-500">Give each client a workspace of their own, with their own domains, lists and reporting. Switch between them in a click and bill each one however you like.</p>
+        <div class="mt-7 flex flex-wrap items-center gap-3">
+          <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">Start free <Icon name="arrowRight" size={14} /></a>
+          <a href="/contact/?topic=sales" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">Talk to us</a>
+        </div>
+      </div>
+    </div>
+    <div class="mt-14 md:mt-16">
+      <HeroSwitcher />
+    </div>
+  </section>
+
+  <!-- KEPT APART: what each workspace keeps to itself, and the one thing shared. -->
+  <Rule class="mt-20" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-end gap-8 lg:grid-cols-[1.2fr_1fr] lg:gap-16">
+      <SectionIntro lead="Kept apart." title="Each client sees only their own work." />
+      <p class="text-[16px] md:text-[18px] leading-[1.6] text-slate-500 lg:pb-2">Every workspace is walled off at the data layer. The one thing shared is the warmup pool, on purpose: a pool only works with many mailboxes, and every one of them is held to the same health rules.</p>
+    </div>
+
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-6">
+      <article class="lg:col-span-3">
+        <ClientReport />
+        <h3 class={tileTitle}>Analytics</h3>
+        <p class={tileBody}>Sends, replies and placement are reported per workspace, and any campaign exports as an image you can send the client.</p>
+      </article>
+      <article class="lg:col-span-3">
+        <ClientCampaigns />
+        <h3 class={tileTitle}>Contacts and campaigns</h3>
+        <p class={tileBody}>Each client’s lists, sequences and conversations live in its own workspace.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <ClientSuppression />
+        <h3 class={tileTitle}>Suppression</h3>
+        <p class={tileBody}>One client’s unsubscribes and bounces never block another client’s sequence.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <ClientKeys />
+        <h3 class={tileTitle}>API keys and webhooks</h3>
+        <p class={tileBody}>Each client’s integrations only ever see that client’s data.</p>
+      </article>
+      <article class="md:col-span-2 lg:col-span-2">
+        <SharedPool />
+        <h3 class={tileTitle}>Shared on purpose: the warmup pool</h3>
+        <p class={tileBody}>Every member is held to the same complaint, bounce and placement bands.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- INVITE: the client joins their own workspace with a role. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="Client access." title="Invite the client, pick what they can touch." text="Add the client to their own workspace from Settings, Members, with a role that fits. They see their campaigns and numbers, and nothing from your other clients." />
+        <ul class="mt-9 divide-y divide-slate-200 border-y border-slate-200">
+          {roles.map((r) => (
+            <li class="flex items-baseline gap-4 py-4">
+              <span class="inline-flex w-24 shrink-0 items-center gap-2 text-[15px] font-medium text-slate-900"><span class="size-2 rounded-full" style={`background-color:${r.c}`}></span>{r.n}</span>
+              <span class="text-[15px] leading-[1.55] text-slate-500">{r.d}</span>
+            </li>
+          ))}
+        </ul>
+        <p class="mt-4 text-[14px] text-slate-400">Rename these, change what they allow, or add your own.</p>
+      </div>
+      <InviteClient />
+    </div>
+  </section>
+
+  <!-- BILLING: a subscription per workspace. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1.1fr_0.9fr] lg:gap-16">
+      <div class="lg:order-2">
+        <SectionIntro lead="Billing." title="Each client is its own subscription." text="Every workspace carries its own plan, so a client running hard can sit on Grow while a new one warms up on a smaller plan." />
+        <dl class="mt-10 grid grid-cols-2 gap-x-6 gap-y-8">
+          {billing.map((b) => (
+            <div class="border-t border-slate-200 pt-4">
+              <dt class="text-[13px] text-slate-400">{b.k}</dt>
+              <dd class="mt-1.5 text-[26px] font-medium tracking-[-0.04em] text-slate-900">{b.v}</dd>
+              <dd class="mt-1 text-[14.5px] leading-[1.5] text-slate-500">{b.d}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+      <div class="lg:order-1">
+        <WorkspaceBilling />
+      </div>
+    </div>
+  </section>
+
+  <!-- SAFETY: the same rules for every client. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="The same rules for everyone." title="One client can’t push past safe limits." text="Every mailbox, in every workspace, sends within its own cap and spacing, warms on the same ramp and is slowed down by the same health checks. Your client’s ambitions never become your reputation problem." />
+    <div class="mt-12 grid gap-px overflow-hidden rounded-[6px] bg-slate-200 ring-1 ring-slate-200 grid-cols-2 md:grid-cols-4">
+      {[
+        { v: '50 a day', k: 'Default cold cap per mailbox' },
+        { v: '90 to 420 s', k: 'Between two sends, varied each time' },
+        { v: '10 to 40', k: 'Warmup emails a day' },
+        { v: '10%', k: 'Spam placement that slows a mailbox' },
+      ].map((s) => (
+        <div class="bg-white p-6">
+          <div class="text-[28px] font-medium tracking-[-0.04em] text-slate-900">{s.v}</div>
+          <div class="mt-1 text-[14px] text-slate-500">{s.k}</div>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Agencies, answered." />
+
+  <CTA photo="paint-aqua" title="Bring your client roster into one account." description="Start with one client workspace for free and add the rest as you move them over." />
+</Layout>

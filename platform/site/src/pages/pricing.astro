@@ -1,0 +1,326 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import WarmupScene from '../components/scenes/WarmupScene.astro';
+import InboxScene from '../components/scenes/InboxScene.astro';
+import InstallScene from '../components/scenes/InstallScene.astro';
+import BillingScene from '../components/scenes/pricing/BillingScene.astro';
+import FreeScene from '../components/scenes/pricing/FreeScene.astro';
+import WarmupPlanScene from '../components/scenes/pricing/WarmupPlanScene.astro';
+import MailboxLimitScene from '../components/scenes/pricing/MailboxLimitScene.astro';
+import PlacementScene from '../components/scenes/pricing/PlacementScene.astro';
+import SuppressionScene from '../components/scenes/pricing/SuppressionScene.astro';
+
+// Prices and volumes mirror web/src/lib/plans.ts.
+const plans = [
+  { name: 'Starter', price: 29, annual: 23, sends: '150', href: 'https://app.pegasusbound.com/auth/register?plan=starter', summary: 'For small teams starting cold outreach.' },
+  { name: 'Grow', price: 89, annual: 71, sends: '3,000', href: 'https://app.pegasusbound.com/auth/register?plan=grow', summary: 'For teams sending from many mailboxes.' },
+  { name: 'Business', price: 329, annual: 263, sends: '15,000', href: 'https://app.pegasusbound.com/auth/register?plan=business', summary: 'For established teams at real volume.', featured: true },
+  { name: 'Enterprise', price: null, annual: null, sends: '15,000+', href: '/contact/?topic=sales', summary: 'Custom volume, contract and support.' },
+];
+
+const Y = '✓', N = '–';
+const matrix = [
+  {
+    group: 'Sending',
+    rows: [
+      ['Cold emails a day', '150', '3,000', '15,000', '15,000+'],
+      ['Mailboxes', 'Unlimited', 'Unlimited', 'Unlimited', 'Unlimited'],
+      ['Limit per mailbox', '50 a day, adjustable', '50 a day, adjustable', '50 a day, adjustable', '50 a day, adjustable'],
+      ['A sign-in address no other customer uses', N, N, Y, Y],
+    ],
+  },
+  {
+    group: 'Deliverability',
+    rows: [
+      ['Warmup in the premium pool', 'Unlimited', 'Unlimited', 'Unlimited', 'Unlimited'],
+      ['Inbox placement tests', Y, Y, Y, Y],
+      ['Suppression and one-click unsubscribe', Y, Y, Y, Y],
+    ],
+  },
+  {
+    group: 'Outreach',
+    rows: [
+      ['Sequences with branching', Y, Y, Y, Y],
+      ['Unified inbox with reply labels', Y, Y, Y, Y],
+      ['Automations', Y, Y, Y, Y],
+    ],
+  },
+  {
+    group: 'Team and platform',
+    rows: [
+      ['CRM with pipelines, deals and tasks', N, Y, Y, Y],
+      ['API and signed webhooks', N, Y, Y, Y],
+      ['Team roles and audit log', N, N, Y, Y],
+      ['Single sign-on', N, N, N, Y],
+      ['Support', 'Community', 'Email', 'Priority', 'Dedicated'],
+    ],
+  },
+];
+
+const billingFacts: [string, string][] = [
+  ['Switching', 'Moving to another plan is prorated and takes effect straight away.'],
+  ['Cancelling', 'The plan stays active to the end of the period you paid for. Mailboxes, warmup and settings are kept.'],
+  ['One limit', 'Need more of one thing without changing plan? Ask from Settings > Limits.'],
+  ['Invoices', 'Your legal name and tax ID go on every invoice, and PDF receipts are in the billing portal.'],
+];
+
+const h2 = 'text-[32px] md:text-[48px] font-medium tracking-[-0.045em] leading-[1.04] text-slate-900';
+const lead = 'text-[17px] md:text-[19px] leading-[1.55] text-slate-500';
+const title = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const body = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+const link = 'group mt-4 inline-flex items-center gap-2 text-[16px] text-[color:var(--brand)] hover:text-[color:var(--brand-strong)]';
+
+const faq: [string, string][] = [
+  ['Do you charge per email sent?', 'No. Each plan includes a daily send budget. Unused volume doesn’t carry over to the next day.'],
+  ['Is warmup charged separately?', 'No. Warmup is unlimited on every paid plan and runs in the premium pool.'],
+  ['Is there really no mailbox limit?', 'Mailboxes are unlimited on every paid plan under fair use: one mailbox for every email a day your plan includes, so Grow holds 3,000 and Business 15,000. If you need more, ask from the connect dialog and we usually answer within a business day.'],
+  ['Is there a free plan?', 'Yes. A hosted workspace starts free with up to 10 mailboxes warming, no card and no time limit. Sending, the inbox and the CRM unlock when you pick a plan.'],
+  ['Can I pay for warmup only?', 'Yes. The Warmup plan is $15 a month, or $144 a year. It moves your mailboxes into the premium pool, removes mailboxes that start landing in spam early, and has no mailbox cap, whether your mailboxes are connected here or on a self-hosted instance you link.'],
+  ['What does self-hosting cost?', 'Nothing. Pegasusbound is Apache 2.0 and free to run on your own servers. The only paid part is linking to the warmup pool once Pegasusbound Cloud launches: free for 10 mailboxes, $15 a month for unlimited.'],
+  ['Is there a charge per seat?', 'No. Add as many teammates as you like. Roles and the audit log come with Business.'],
+  ['Can I pay yearly?', 'Yes, with 20% off. Use the switch at the top of this page.'],
+  ['Can I buy as a business?', 'Yes. Add your legal name and tax ID at checkout. They appear on your invoices, and reverse charge is applied where the rules allow it. Taxes are calculated from your billing address and shown before you pay.'],
+  ['What is your refund policy?', 'A full refund within 14 days of a paid purchase if Pegasusbound didn’t work for you.'],
+  ['Do you have startup pricing?', '50% off Grow for a year for pre-seed and seed companies from YC, Antler, EF, Techstars and similar programmes.'],
+];
+---
+<Layout
+  title="Pricing: Unlimited Mailboxes and Warmup | Pegasusbound"
+  description="Pegasusbound pricing from $29 a month with unlimited mailboxes and unlimited warmup on every paid plan. Free to self-host, free to warm up to 10 mailboxes, and 20% off yearly."
+>
+  <!-- HEADER: the promise and the billing switch. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="flex flex-wrap items-end justify-between gap-8">
+      <div class="max-w-3xl">
+        <div class="text-[14px] text-slate-500">Pricing</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+          Pay for the email you send.
+        </h1>
+        <p class="mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+          Every paid plan has unlimited mailboxes and unlimited warmup. Plans differ in how much cold email you can send a day, and in what your team needs around it.
+        </p>
+      </div>
+      <div class="inline-flex items-center gap-3" data-billing-toggle>
+        <div class="relative inline-flex rounded-full bg-slate-100 p-1 text-[14px] ring-1 ring-slate-200/70">
+          <button type="button" data-billing="monthly" class="h-9 rounded-full px-5 text-slate-500 transition-colors">Monthly</button>
+          <button type="button" data-billing="annual" class="h-9 rounded-full bg-white px-5 font-medium text-slate-900 shadow-sm transition-colors">Yearly</button>
+        </div>
+        <span class="rounded-full bg-emerald-50 px-2.5 py-1 text-[12px] font-medium text-emerald-700 ring-1 ring-emerald-100">Save 20%</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- THE TABLE: plans across the top, everything they include below. -->
+  <section class="container-page pt-12 md:pt-16 pb-20 md:pb-28">
+    <!-- On a phone the plans stack as cards, and the table below only compares. -->
+    <div class="grid gap-3 sm:grid-cols-2 md:hidden">
+      {plans.map((p) => (
+        <div class={`rounded-[6px] bg-white p-5 ring-1 ${p.featured ? 'ring-slate-900' : 'ring-slate-200'}`}>
+          <div class="flex items-center gap-2">
+            <span class="text-[17px] font-medium text-slate-900">{p.name}</span>
+            {p.featured && <span class="rounded-full bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-white">Most popular</span>}
+          </div>
+          <p class="mt-1 text-[13.5px] text-slate-500">{p.summary}</p>
+          <div class="mt-4 flex items-baseline gap-1.5">
+            {p.price !== null ? (
+              <>
+                <span class="text-[34px] font-medium tracking-[-0.04em] leading-none text-slate-900">$<span class="plan-price" data-monthly={p.price} data-annual={p.annual}>{p.annual}</span></span>
+                <span class="text-[13px] text-slate-400">/ month, <span class="plan-note" data-monthly="billed monthly" data-annual="billed yearly">billed yearly</span></span>
+              </>
+            ) : (
+              <span class="text-[34px] font-medium tracking-[-0.04em] leading-none text-slate-900">Custom</span>
+            )}
+          </div>
+          <div class="mt-2 text-[14px] text-slate-600"><span class="font-medium text-slate-900">{p.sends}</span> cold emails a day</div>
+          <a href={p.href} class={`mt-5 inline-flex h-10 w-full items-center justify-center rounded-full text-[14px] font-medium transition-colors ${p.featured ? 'bg-slate-900 text-white hover:bg-slate-800' : 'bg-white text-slate-900 ring-1 ring-slate-200 hover:bg-slate-50'}`}>
+            {p.price !== null ? 'Start free' : 'Talk to sales'}
+          </a>
+        </div>
+      ))}
+    </div>
+    <div class="mt-10 mb-3 flex items-baseline justify-between text-[13px] text-slate-400 md:hidden"><span class="text-[15px] font-medium text-slate-900">Compare plans</span>Swipe for every plan</div>
+    <div class="overflow-x-auto overscroll-x-contain rounded-[6px] bg-white ring-1 ring-slate-200">
+      <table class="w-full min-w-[640px] md:min-w-[880px] border-collapse text-left">
+        <thead>
+          <tr class="align-top">
+            <th class="sticky left-0 z-[1] w-[30%] bg-white p-4 md:p-6 text-[13px] font-normal text-slate-400 md:static"><span class="hidden md:inline">Compare plans</span></th>
+            {plans.map((p) => (
+              <th class={`p-4 md:p-6 font-normal ${p.featured ? 'bg-slate-50 shadow-[inset_0_3px_0_#0f172a]' : ''}`}>
+                <div class="flex items-center gap-2">
+                  <span class="text-[17px] font-medium text-slate-900">{p.name}</span>
+                  {p.featured && <span class="rounded-full bg-slate-900 px-2 py-0.5 text-[11px] font-medium text-white">Most popular</span>}
+                </div>
+                <div class="hidden md:block">
+                <p class="mt-1 min-h-[40px] text-[13px] leading-snug text-slate-500">{p.summary}</p>
+                <div class="mt-4 flex items-baseline gap-1 whitespace-nowrap">
+                  {p.price !== null ? (
+                    <>
+                      <span class="text-[36px] font-medium tracking-[-0.04em] leading-none text-slate-900">$<span class="plan-price" data-monthly={p.price} data-annual={p.annual}>{p.annual}</span></span>
+                      <span class="text-[13px] text-slate-400">/ month</span>
+                    </>
+                  ) : (
+                    <span class="text-[36px] font-medium tracking-[-0.04em] leading-none text-slate-900">Custom</span>
+                  )}
+                </div>
+                <div class="mt-1 h-5 text-[12.5px] text-slate-400">
+                  {p.price !== null ? <span class="plan-note" data-monthly="billed monthly" data-annual="billed yearly">billed yearly</span> : 'volume-based'}
+                </div>
+                <a href={p.href} class={`mt-4 inline-flex h-10 w-full items-center justify-center rounded-full text-[14px] font-medium transition-colors ${p.featured ? 'bg-slate-900 text-white hover:bg-slate-800' : 'bg-white text-slate-900 ring-1 ring-slate-200 hover:bg-slate-50'}`}>
+                  {p.price !== null ? 'Start free' : 'Talk to sales'}
+                </a>
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {matrix.map((section) => (
+            <>
+              <tr>
+                <td colspan="5" class="border-t border-slate-200 px-4 md:px-6 pb-2 pt-7 text-[13px] text-slate-400"><span class="sticky left-4">{section.group}</span></td>
+              </tr>
+              {section.rows.map((row) => (
+                <tr class="transition-colors hover:bg-slate-50/60">
+                  <td class="sticky left-0 z-[1] border-t border-slate-100 bg-white px-4 md:px-6 py-3.5 text-[14px] md:text-[14.5px] text-slate-700 md:static">{row[0]}</td>
+                  {row.slice(1).map((cell, i) => (
+                    <td class={`border-t border-slate-100 px-4 md:px-6 py-3.5 text-[14.5px] ${plans[i].featured ? 'bg-slate-50' : ''}`}>
+                      {cell === Y ? <Icon name="check" size={15} class="text-slate-900" /> : cell === N ? <span class="text-slate-300">–</span> : <span class="text-slate-900">{cell}</span>}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </>
+          ))}
+        </tbody>
+      </table>
+    </div>
+    <p class="mt-4 text-[13.5px] text-slate-400">Prices in US dollars. Taxes are calculated from your billing address and shown before you pay.</p>
+  </section>
+
+  <!-- INCLUDED: what every paid plan carries, each shown working. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1.15fr_1fr] lg:items-end lg:gap-16">
+      <h2 class={h2}><span class="text-slate-400">In every paid plan.</span> The whole product, at any volume.</h2>
+      <p class={lead}>Starter and Business send different amounts of mail, but both warm every mailbox, catch every reply and protect every list the same way.</p>
+    </div>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-6">
+      <article class="md:col-span-2 lg:col-span-3">
+        <WarmupScene />
+        <h3 class={title}>Unlimited warmup in the premium pool</h3>
+        <p class={body}>Every mailbox trades real email with other inboxes, starting at 10 a day and growing by one a day to 40, for as long as it stays connected.</p>
+      </article>
+      <article class="md:col-span-2 lg:col-span-3">
+        <InboxScene />
+        <h3 class={title}>One inbox for every reply</h3>
+        <p class={body}>Replies from all your mailboxes arrive in one place, already labeled as interested, out of office, a question or an unsubscribe.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <MailboxLimitScene />
+        <h3 class={title}>50 a day per mailbox, adjustable</h3>
+        <p class={body}>Each mailbox sends up to 50 cold emails a day, spaced out across its working day. Raise it once the mailbox has earned it.</p>
+      </article>
+      <article class="lg:col-span-2">
+        <PlacementScene />
+        <h3 class={title}>Inbox placement tests</h3>
+        <p class={body}>Send a step to seed inboxes and see whether it lands in the inbox, a tab or spam, provider by provider.</p>
+      </article>
+      <article class="md:col-span-2 lg:col-span-2">
+        <SuppressionScene />
+        <h3 class={title}>Suppression and one-click unsubscribe</h3>
+        <p class={body}>Unsubscribes, bounces and complaints stop mail across the whole workspace, and campaigns carry a one-click unsubscribe header by default.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- BILLING: the settings page that runs it, beside how changes work. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-[1.25fr_1fr] lg:gap-16">
+      <BillingScene />
+      <div>
+        <h2 class={h2}><span class="text-slate-400">Your plan, in Settings.</span> Nothing to work out.</h2>
+        <p class={`mt-5 ${lead}`}>The billing page shows your plan, when it renews and how much of today’s send allowance is used, counted against the limits the server actually enforces. Invoices and the card on file are one click away.</p>
+        <dl class="mt-8 divide-y divide-slate-200 border-y border-slate-200">
+          {billingFacts.map(([k, v]) => (
+            <div class="grid gap-1 py-3.5 sm:grid-cols-[130px_1fr] sm:gap-6">
+              <dt class="text-[15px] font-medium text-slate-900">{k}</dt>
+              <dd class="text-[15px] leading-[1.55] text-slate-500">{v}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <!-- SMALLER: only warming, or running it yourself. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1.15fr_1fr] lg:items-end lg:gap-16">
+      <h2 class={h2}><span class="text-slate-400">Not sending yet?</span> Warm up for free, or run the whole thing yourself.</h2>
+      <p class={lead}>Mailboxes need weeks of warmup before they send well. You can start that today without paying for sending you are not doing yet.</p>
+    </div>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-3">
+      <article class="flex flex-col">
+        <FreeScene />
+        <div class="mt-6 flex items-baseline justify-between gap-4">
+          <h3 class="text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900">Free</h3>
+          <span class="text-[21px] md:text-[23px] font-medium tracking-[-0.03em] text-slate-900">$0</span>
+        </div>
+        <p class={`${body} flex-1`}>Warm up to 10 mailboxes in the Pegasusbound pool, replies and spam rescue included. No card and no time limit. Sending unlocks with a plan.</p>
+        <a href="https://app.pegasusbound.com/auth/register" class={link}>Start free <Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a>
+      </article>
+      <article class="flex flex-col">
+        <WarmupPlanScene />
+        <div class="mt-6 flex items-baseline justify-between gap-4">
+          <h3 class="text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900">Warmup</h3>
+          <span class="text-[21px] md:text-[23px] font-medium tracking-[-0.03em] text-slate-900">$<span class="plan-price" data-monthly="15" data-annual="12">12</span><span class="text-[14px] font-normal text-slate-400"> / month</span></span>
+        </div>
+        <p class={`${body} flex-1`}>The premium pool for every mailbox, with no cap, whether it is connected here or on a self-hosted instance you link.</p>
+        <a href="https://app.pegasusbound.com/auth/register" class={link}>Start warming <Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a>
+      </article>
+      <article class="flex flex-col">
+        <InstallScene />
+        <div class="mt-6 flex items-baseline justify-between gap-4">
+          <h3 class="text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900">Self-hosted</h3>
+          <span class="text-[21px] md:text-[23px] font-medium tracking-[-0.03em] text-slate-900">Free</span>
+        </div>
+        <p class={`${body} flex-1`}>The whole platform under Apache 2.0, on your own servers, with unlimited mailboxes. Link it to the warmup pool when Pegasusbound Cloud launches.</p>
+        <code class="mt-4 block truncate rounded-md bg-slate-50 px-3 py-2 font-mono text-[12.5px] text-slate-700 ring-1 ring-slate-200">curl -fsSL https://pegasusbound.com/install.sh | sh</code>
+      </article>
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Pricing, answered.">
+    <p class="mt-4 text-[16px] leading-[1.6] text-slate-500">Something else? Email <a class="font-medium text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-900" href="mailto:team@pegasusbound.com">team@pegasusbound.com</a>.</p>
+  </Faq>
+
+  <CTA photo="sheer-blue" title="Start free. Pick a plan when you send." description="Warm up to 10 mailboxes for free while you set up. Upgrade when your first campaign is ready." secondaryLabel="Talk to sales" secondaryHref="/contact/?topic=sales" />
+</Layout>
+
+<script>
+  // Monthly and yearly prices, the notes under them, and the switch itself.
+  const root = document.querySelector<HTMLElement>('[data-billing-toggle]');
+  const buttons = [...(root?.querySelectorAll<HTMLButtonElement>('[data-billing]') ?? [])];
+  const apply = (mode: 'monthly' | 'annual') => {
+    buttons.forEach((b) => {
+      const on = b.dataset.billing === mode;
+      b.classList.toggle('bg-white', on);
+      b.classList.toggle('shadow-sm', on);
+      b.classList.toggle('font-medium', on);
+      b.classList.toggle('text-slate-900', on);
+      b.classList.toggle('text-slate-500', !on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    document.querySelectorAll<HTMLElement>('.plan-price, .plan-note').forEach((el) => {
+      const v = el.dataset[mode];
+      if (v != null) el.textContent = v;
+    });
+  };
+  buttons.forEach((b) => b.addEventListener('click', () => apply(b.dataset.billing as 'monthly' | 'annual')));
+</script>

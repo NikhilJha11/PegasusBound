@@ -1,0 +1,41 @@
+# Security response headers for the Cloudflare Pages deployment of the
+# dashboard. The nginx image carries the same set in
+# nginx-security-headers.conf; both exist because the hosted service serves the
+# frontends from Pages while a self-host serves them from the image.
+#
+# build:pages fills the built policy's hashes and configured resource origins.
+/*
+  ! Access-Control-Allow-Origin
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), interest-cohort=()
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
+
+# Pages applies path headers to missing assets too; revalidate instead of caching a 404 immutably.
+/assets/*
+  Cache-Control: public, max-age=0, must-revalidate
+
+/mail-preview.html
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; style-src 'unsafe-inline'; img-src data: https: http:; font-src data: https:; media-src https:
+  ! X-Frame-Options
+  X-Frame-Options: SAMEORIGIN
+  ! Referrer-Policy
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store
+
+# Pages canonicalizes the .html asset to this extensionless URL.
+/mail-preview
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'none'; script-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'; style-src 'unsafe-inline'; img-src data: https: http:; font-src data: https:; media-src https:
+  ! X-Frame-Options
+  X-Frame-Options: SAMEORIGIN
+  ! Referrer-Policy
+  Referrer-Policy: no-referrer
+  Cache-Control: no-store
+
+# config.js is the runtime configuration and must never outlive a change to it; same rule as the nginx image.
+/config.js
+  Cache-Control: no-store

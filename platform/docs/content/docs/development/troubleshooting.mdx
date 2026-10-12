@@ -1,0 +1,170 @@
+---
+title: Troubleshooting
+description: The errors self-hosters actually hit, what causes each one, and the command that fixes it.
+---
+
+Search this page for the exact string you saw. Every row names the cause and the command, not a category.
+
+## I clicked register and got a 403
+
+> **403 This server is not accepting new accounts. Ask an administrator for an invitation.**
+
+Nothing is broken, and you do not need to change any setting to get in.
+
+A self-hosted instance ships with `DISABLE_REGISTRATION=invite_only`, which closes the sign-up form to the public. There is exactly one exemption: while the users table is **empty**, any signup is allowed, and that is what makes a fresh instance claimable. Once one account exists, the exemption is spent for good.
+
+The usual sequence behind that 403 is:
+
+1. you ran `make dev` at some point, which seeds nine fixture accounts by default
+2. `make dev` and `make up` pin the same compose project, the same `pegasusbound_postgres_data` volume and the same `pegasusbound_dev` database, so those accounts are your instance's accounts
+3. `make up` therefore found a claimed instance, issued no setup link, and printed none
+4. the sign-up form was the only path left, and `invite_only` refuses it
+
+Pick the fix that matches what you want:
+
+| You want | Do this |
+|---|---|
+| An account for yourself, right now | `docker compose -p pegasusbound exec backend pegasusboundctl user create --email you@example.com --admin` |
+| To recover an account that already exists | `docker compose -p pegasusbound exec backend pegasusboundctl user reset-password --email you@example.com` and open the printed URL |
+| To let teammates in | Invite them from **Settings > Members** and share the link. See [inviting teammates](/development/accounts-and-access/#inviting-teammates) |
+| A truly fresh start | `make reset && make up`. This destroys the volumes, including the per-organization encryption keys |
+| Open public signup | `DISABLE_REGISTRATION=false` and restart. Read the consequence first: [opening public signup](/development/accounts-and-access/#opening-public-signup) |
+
+Not sure which state you are in?
+
+```bash
+make doctor
+```
+
+Newer builds return the invite-only refusal with its own machine code, `registration_invite_only`, and the text "This server is invite only. Ask an administrator to invite you, then open the link in the invitation to create your account." Same cause, same fixes.
+
+## First run and sign-in
+
+| Symptom | Cause and fix |
+|---|---|
+| `403 This server is invite only.` when registering | `DISABLE_REGISTRATION` defaults to `invite_only` on self-host. Open the invitation link that carries the token, run `pegasusboundctl user create --email you@example.com --admin`, or set `DISABLE_REGISTRATION=false` and restart. See [accounts and access](/development/accounts-and-access/) |
+| `403 This server is not accepting new accounts.` | `DISABLE_REGISTRATION=true`. No invitation overrides it. Only `pegasusboundctl user create` adds accounts |
+| Signup worked once, then stopped | The first-launch exemption applies only while the users table is empty. See [the first-launch exemption](/development/accounts-and-access/#the-first-launch-exemption) |
+| `make up` printed no claim link | The database already has accounts, usually from a previous `make dev`. Use `pegasusboundctl user create --email you@example.com --admin`, or `make reset` to start over, which destroys the encryption volume |
+| The claim link says invalid or expired | 24 hour lifetime, single use, and it does not survive a Redis flush. Print a new one with `pegasusboundctl setup-link` |
+| `/setup` says the instance is already set up | An account exists, so no claim link will ever be issued. `pegasusboundctl user reset-password --email ...`, or `pegasusboundctl user create --email you@example.com --admin` |
+| An invited person gets `invitation_invalid` | The invitation expired (7 days by default), was cancelled, was already used, or they typed a different address than the one it was issued for. Re-invite them |
+| Single sign-on succeeds at the provider then 404s | The redirect URI must be `<API_PUBLIC_URL>/v1/auth/oidc/callback`, not `/api/v1/...`. It has to match on both sides exactly. See [single sign-on](/development/accounts-and-access/#single-sign-on) |
+| Single sign-on stopped provisioning new users | Provisioning now obeys `DISABLE_REGISTRATION`. Invite the person, or set `SSO_AUTO_PROVISION=true` and restart |
+| No login code arrives | Self-host does not send one (`AUTH_LOGIN_CODE=off`). Registration and reset codes go wherever `MAIL_TRANSPORT` points; under compose that is the backend log |
+| No invitation email arrives | Same cause. Copy the link from **Pending invitations** and send it yourself. See [without a mail relay](/development/accounts-and-access/#without-a-mail-relay) |
+| "Too many attempts" on password reset | Password reset is capped at 2 requests per address per 4 hours. Use `pegasusboundctl user reset-password` instead of waiting |
+| The reset form says the mail was sent and nothing arrives | The address has no account on this instance (the form says the same thing either way, on purpose). The backend logs `password reset requested for an address with no account` with the address it was given. If that line is absent, the mail was really attempted and the transport is the place to look |
+| The passkey button is missing | Passkeys need a secure context, so `APP_URL` must be HTTPS or a `localhost` address. A LAN IP over plain HTTP cannot be a relying party |
+| Google, Apple or passkey buttons appear but never work | The sign-in screen follows `GET /auth/config`. If they still appear, that request is failing and the screen says which API URL it tried |
+| Locked out of the only admin account | `pegasusboundctl user create --email you@example.com --admin`. Every recovery command is on [recovering access](/development/accounts-and-access/#recovering-access) |
+
+## The build fails
+
+| Symptom | Cause and fix |
+|---|---|
+| `no space left on device`, often from a random service mid-compile | Docker is out of disk. Free space with `docker builder prune -af` and `docker image prune -af`, check the host has about 10 GB free, then re-run `make up` |
+| `failed to authorize: ... EOF` while pulling a base image | A transient registry blip. Re-run `make up`; completed layers are cached |
+| `ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY` while building the `forms` image | A `forms/node_modules` from a native `make forms` or `make dev` was shipped into the Docker build context and overwrote the image's own install, and pnpm will not recreate it without a terminal. Current checkouts keep every `node_modules` out of the context and run pnpm in CI mode; on an older checkout, `rm -rf forms/node_modules` and re-run `make up` |
+| `failed to xattr /path/._something: operation not permitted` on macOS | The checkout is on a filesystem without native extended attributes (exFAT, NTFS or a network share), so macOS writes `._*` sidecar files that BuildKit cannot read. Run `dot_clean -m .` then `find . -name '._*' -delete` and re-run. Cloning to an APFS volume avoids it |
+
+## The stack is up but something is wrong
+
+| Symptom | Cause and fix |
+|---|---|
+| The backend exits at boot | Read the first log lines. The usual causes are a published default secret with `APP_ENV=prod` (the message names `ALLOW_INSECURE_DEFAULTS`), cloud provider defaults outside compose, a `CREDENTIALS_ENCRYPTION_KEY` that is not exactly 64 hex characters, or a missing `EMAIL_ADDRESS`, `EMAIL_NAME` or `GEODB_PATH` |
+| The dashboard loads but every request fails | Check `http://localhost:5173/config.js` returns the right `API_URL`. It is generated at container start from `PEGASUSBOUND_API_URL`. If the URL is right, the origin is probably missing from `CORS_ALLOW_ORIGINS` |
+| Nothing updates live and presence is empty | `AUTH_SECRET` must equal realtime's `JWT_SECRET`, and `PUBSUB_ENABLED` must agree across backend, consumer and realtime. Compare the fingerprints under **Instance > Configuration > Environment** |
+| Workers or tracking get 401s | `INTERNAL_API_TOKEN` must match on the backend and tracking. Workers present `NODE_BROKER_TOKEN` when the backend sets one (otherwise `INTERNAL_API_TOKEN`, as `ENCRYPTED_KEYS_WORKER_TOKEN`), and it must match too. Unset fails closed |
+| "No mailbox workers are available" when connecting a mailbox | No worker has a heartbeat inside the last 10 minutes. Check `make status` shows `worker` running and `make logs worker` is clean. An empty `ENCRYPTED_KEYS_BACKEND_URL` or worker token lets a worker start and never register, silently |
+| Connecting a mailbox fails with `SERVER_UNREACHABLE` on a reachable host | The security setting may not match the server. A server expecting STARTTLS looks unreachable to a client attempting implicit TLS, and vice versa. Any port from 1 to 65535 is accepted, so the port alone no longer decides: set **Security** to SSL / TLS for a server that is encrypted from the first byte (usually SMTP `465`, IMAP `993`) and STARTTLS for one that upgrades in place (usually SMTP `587` or `2525`, IMAP `143`). The error names the step that failed and its cause. A refused or timed out `dial` never reached the server. `tls: first record does not look like a TLS handshake` points to a protocol mismatch. Other `tls:` dial failures describe certificate or handshake problems and do not by themselves mean the security mode is wrong. Anything from `mail from` onwards is the server's own answer |
+| Sending fails with `SERVER_UNREACHABLE` on port `465` while `587` works | The network between the sending machine and the mail server does not allow implicit TLS submission; some hosting providers block `465` outbound while leaving `587` open. The mailbox's error says `dial <host>:465: connect: connection refused` or `i/o timeout`. Move the mailbox to `587` with STARTTLS, or have the block lifted |
+| A mailbox's error says the sending network blocks outbound port `465`, and the worker's detail page in **Workers** says the same | The worker has seen several servers leave `465` silent while answering on `587`, so the block is its own network, not the mail server. Mailboxes whose server offers `587` keep sending through the automatic fallback; a server that accepts submission only on `465` cannot be reached from that machine. Many cloud providers block outbound `25` and `465` on new servers until asked: request that outbound `465` be opened for the worker's address. The warning clears on its own once any `465` connection succeeds |
+| A local relay such as Proton Bridge will not connect, and the **None** security option is not there | It appears only for a loopback literal (`localhost`, `127.0.0.0/8`, `::1`) on a self-hosted instance, because the mode is safe only when the credentials never leave the machine. A hostname that resolves to `127.0.0.1` is refused; type the address itself. On hosted Pegasusbound the worker is not your machine and cannot reach a Bridge at all. See [local mail relays](/guides/mailboxes/#local-mail-relays-proton-bridge) |
+| A mailbox reports `INSECURE_REMOTE_HOST` | It is stored with the unencrypted security mode but its host is not this machine, so the worker refused to dial it rather than put the password on a wire. Reconnect it with SSL / TLS or STARTTLS, or point it back at the local relay |
+| Connecting an Outlook mailbox stops at "Need admin approval" (or "Approval required", `AADSTS90095`) | The organization requires an administrator to approve the app. With default consent settings that is because the app registration has no verified publisher: Microsoft sends every user of a new, unverified multitenant app that asks for mail permissions to an administrator. [Verify the publisher](https://learn.microsoft.com/entra/identity-platform/publisher-verification-overview), or have an administrator approve once for the organization with the link the **Sign in one mailbox** panel shows after a first try (or **Enterprise applications > your app > Permissions > Grant admin consent**). Check the registration lists only the delegated `User.Read`, `Mail.Send`, `Mail.ReadWrite` and `offline_access`. If a non-admin is still refused after a tenant-wide grant, the instance predates the fix that stopped sending `prompt=consent`; upgrade it |
+| **Whole organization** answers `AADSTS90001` (the `prompt` value `admin_consent` is invalid) | The instance predates the fix that moved the Microsoft 365 organization grant to Microsoft's admin consent page. Upgrade it |
+| A mailbox stalls after about an hour | The worker is missing `BOX_GOOGLE_*` or `BOX_OUTLOOK_*`. The backend starts the OAuth flow but each worker refreshes the token. Set them and restart the worker |
+| Sending fails with an authentication error but the password is right | Pegasusbound negotiates the sign-in method from what the server advertises. If the mailbox reports `AUTH_UNSUPPORTED`, the server offers only mechanisms Pegasusbound does not implement, such as NTLM or GSSAPI, or it offers no encrypted connection at all and Pegasusbound will not send the password in the clear; an app password, or the provider's documented SMTP host, usually resolves both |
+| A send is refused and not retried | A `SEND_REJECTED` or `RECIPIENT_REJECTED` error means the receiving server answered with a permanent `5xx`, so retrying cannot deliver the message and would only spend the mailbox's daily budget. Both carry the server's own words, which is what distinguishes an address that no longer exists from one blocked by a policy. A temporary `4xx` is retried automatically and reported as a connection problem |
+| An IMAP mailbox connects but no mail ever arrives | Check the sync card in the mailbox drawer for a folder count. Zero folders on a reachable server means the server refused `STATUS` for every folder; the worker log names each one it skipped. A connected mailbox whose inbox is genuinely empty is normal |
+| A mailbox shows an error that is already fixed | Connection errors clear themselves: the first sync pass that reaches the server again resolves them. Errors that need you to act, such as wrong credentials or a domain-authentication refusal, stay until you reconnect the mailbox or fix the cause |
+| An IMAP mailbox shows `IMAP_UNKNOWN` with `Bad token (expecting date specification)` and imports nothing | The server refuses a date in `SEARCH` in the quoted form the IMAP client writes (Seznam.cz does). Current workers notice the refusal, log `server refused a dated SEARCH` once per mailbox, and read each message's `INTERNALDATE` instead, so the import runs and the error clears on the next completed pass. On an instance that still shows it, update the workers |
+| An IMAP mailbox stopped syncing and the log is quiet | Sessions dropped by the server, or by a firewall that removed the mapping without closing the connection, are re-dialed on the next pass, and every pass that cannot reach the server is retried on a widening interval up to five minutes. If a mailbox is still stuck, `make logs worker` shows the folder cursors; a mailbox held by the sync budget says so in its drawer instead |
+| A folder is missing from the unibox | Up to `100` folders per mailbox are synced (**Instance > Configuration > Effective limits**). Past that, the inbox and the special folders are kept and the rest follow the server's order, and the mailbox drawer's **Sync** card names how many were left out. Gmail's All Mail, Starred and Important are label views over other folders and are deliberately never synced. A folder can also be skipped when the mail server lists the same folder name twice, which the Sync card says as well. A folder sharing its `UIDVALIDITY` with another folder is no longer a reason to skip anything: folders are identified by name, which is what IMAP guarantees is unique. Both notes clear themselves on the next pass once the cause is gone |
+| Scheduled sends never fire | Delayed sends run through the in-process Postgres task poller (`TASKS_PROVIDER=local`), so the backend must be running |
+| Every send dead-letters with `permission denied` on `/data/blobs` | The `blobs` volume was created before the images owned that path, so it is still `root:root` while the services run as uid 1000. Fix it once with `docker compose -p pegasusbound exec -u root backend chown -R pegasusbound:pegasusbound /data/blobs`. The `blob_fs_root` health check reports it, and volumes created from current images are already correct |
+| `email account <id> not found in worker` | The mailbox is assigned to a worker that no longer exists, usually because the worker was recreated and came back with a fresh UUID. The reconciler releases and re-places it on a live worker within its interval. Compose workers now keep their id in the `worker_state` volume (`WORKER_STATE_DIR`), so this stops recurring once that volume exists; removing the volume or unsetting `WORKER_STATE_DIR` reintroduces the churn. See [worker identity](/development/deployment-guide/#worker-identity) |
+| Opens and clicks never record | First check the container is actually up with `docker compose -p pegasusbound ps -a`: a dead `tracking` breaks nothing else, because sends do not wait on it. Then check `TRACKING_DOMAIN` resolves and the service answers on `/health`. If you overrode `KAFKA_TRACKING_TOPIC`, it has to be overridden for the Rust publisher and the Go subscriber together |
+| `tracking` exits immediately with `Bind for 0.0.0.0:3000 failed: port is already allocated` | Something else on the host owns port `3000`, a very common default. Set `TRACKING_PORT=3001` in `.env`, re-run `make up`, and point your reverse proxy's tracking host at the new port |
+| The backend restart-loops with `duplicate migration file` | Two migrations on the branch share a version, which stops golang-migrate before a single one runs. Renumber the one that has not been released yet to the next free version and re-deploy. `make check-migrations` reports it, and CI runs the same check on every pull request. See [adding a migration](/development/local-development/#adding-a-migration) |
+| Seeding fails with `no migration found for version N` | The seed image is older than your schema. Re-run with `--build` |
+| A whole workspace stopped sending and its banner says suspended | Its abuse posture reached `suspended`. Open the org in the admin panel, read the findings in the **Abuse posture** panel, then retract the ones that are wrong or set the posture directly. See [workspace abuse posture](/development/accounts-and-access/#workspace-abuse-posture) |
+| Worker heartbeat offline | Nothing connects to a node, so this is always diagnosed on the machine itself: `systemctl status pegasusbound-worker`, then check it can reach the backend URL, NATS or Kafka, and Redis. `pegasusboundctl fleet show <id>` gives the last time it was seen |
+
+## Recovery
+
+Every recovery command, in all four runtimes, is on [recovering access](/development/accounts-and-access/#recovering-access): instance status, listing admins, resetting a password through a printed one-time link, creating a new owner and admin, clearing a lost authenticator, and reissuing the first-run claim link.
+
+The destructive alternative is `make reset`, which removes the volumes and starts over.
+
+<Callout type="warn" title="make reset destroys the encryption volume">
+The volumes hold the per-organization data keys. Every sealed mailbox credential and every stored message body becomes permanently undecryptable, even if you restore a database dump afterwards.
+</Callout>
+
+<Callout type="warn" title="Do not flush Redis to clear a rate limit">
+`redis-cli FLUSHDB` also destroys `bootstrap:setup_token`, every pending auth session and every login attempt counter. On an unclaimed instance that throws away the only way in. Delete the specific key, or wait out the window.
+</Callout>
+
+## Collecting errors somewhere you can read them
+
+`make logs` shows you what a service printed. It does not tell you that a handler threw at 3am, in which build, for which organization. Every runtime in Pegasusbound can send that to an error tracker instead, and none of them do until you say where.
+
+There are two backends. PostHog is the default:
+
+```bash
+# backend, consumer, worker, forms, tracking, realtime
+POSTHOG_KEY=phc_...
+# the dashboard, the admin panel, and public form pages (browser errors)
+PEGASUSBOUND_POSTHOG_KEY=phc_...
+# both, when your project is not on PostHog Cloud US
+POSTHOG_HOST=https://eu.i.posthog.com
+PEGASUSBOUND_POSTHOG_HOST=https://eu.i.posthog.com
+```
+
+Sentry is still supported, on its own or alongside PostHog:
+
+```bash
+SENTRY_DSN=https://<key>@<host>/<project>
+PEGASUSBOUND_SENTRY_DSN=https://<key>@<host>/<project>
+```
+
+Set both backends and every error goes to both, which is the safe way to try one without giving up the other. Going the other way, `POSTHOG_ERROR_TRACKING=false` keeps a PostHog key for product analytics and reports no exceptions there.
+
+Under the installer's compose file these go in `.env`: every service inherits them through `env_file`, so a couple of lines and a `docker compose up -d` covers the whole instance.
+
+Every event is tagged with the service that raised it, the environment and the build, so one project can hold the whole instance and still be filterable. Exceptions also carry the workspace and user they happened to and, where there was one, the failing request's id and route, so a support message quoting a request id and an issue in error tracking are the same incident. What each property is and where it comes from is on [configuration](/development/configuration/#error-reporting). Server-side services take the environment from `APP_ENV`. The dashboard and admin panel take theirs from `PEGASUSBOUND_SENTRY_ENVIRONMENT`, since the container serving the bundle is not the process reporting the error, and the name is that one whichever backend receives the event. Hosted form pages are the exception among the browser apps: their environment is stamped into the page by the forms service, so it comes from that service's `APP_ENV`. The frontends are separate projects' worth of events in practice; give the browser ones their own project if you want the noise apart.
+
+The server behind either is your choice. PostHog Cloud's free tier covers 100k exceptions a month and `POSTHOG_HOST` points at a PostHog you run yourself; Sentry Cloud's free Developer plan covers 5k errors a month, and a self-hosted Sentry or a Sentry-compatible server such as GlitchTip works with the same DSN variable.
+
+Browser stack traces are minified unless the images were built with source-map upload configured, which the published ones are. See [source maps](/development/configuration/#source-maps) if you build your own.
+
+Configuring neither backend is a supported configuration, not a degraded one: no host is contacted and errors go to the log as before. See [data control](/development/data-control/#error-reporting).
+
+## Still stuck
+
+```bash
+make logs            # follow everything
+make logs backend    # follow one service
+make doctor          # the full health check set, exits non-zero on an error
+```
+
+Ask in [Discord](https://dc.pegasusbound.com) or open a [GitHub issue](https://github.com/pegasusbound/pegasusbound/issues) with the output of `make doctor` and the first 50 lines of the failing service's log.
+
+## See also
+
+- [First run](/development/first-run/)
+- [Accounts and access](/development/accounts-and-access/)
+- [pegasusboundctl](/development/pegasusboundctl/)
+- [Configuration reference](/development/configuration/)
+- [Instance health](/development/instance-health/)

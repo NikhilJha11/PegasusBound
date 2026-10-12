@@ -1,0 +1,742 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+
+# Default token only gets `contents: read` on PRs from forks; the
+# dorny/paths-filter action needs to list PR files via the GitHub
+# API, which requires `pull-requests: read`. Without this the
+# "Detect Changes" job dies with "Bad credentials" and every
+# downstream language CI is skipped.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      go-services: ${{ steps.filter.outputs.go-services }}
+      migrations: ${{ steps.filter.outputs.migrations }}
+      tracking: ${{ steps.filter.outputs.tracking }}
+      realtime: ${{ steps.filter.outputs.realtime }}
+      web: ${{ steps.filter.outputs.web }}
+      admin: ${{ steps.filter.outputs.admin }}
+      site: ${{ steps.filter.outputs.site }}
+      forms: ${{ steps.filter.outputs.forms }}
+      qa: ${{ steps.filter.outputs.qa }}
+      make: ${{ steps.filter.outputs.make }}
+      ios: ${{ steps.filter.outputs.ios }}
+      installer: ${{ steps.filter.outputs.installer }}
+      cli-installer: ${{ steps.filter.outputs.cli-installer }}
+      pages: ${{ steps.filter.outputs.pages }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go-services:
+              - '.github/workflows/ci.yml'
+              - 'go.mod'
+              - 'go.sum'
+              - 'internal/**'
+              - 'cmd/**'
+              # make lint runs the join-script checks, so a change to the
+              # checker itself has to trigger the job that runs it.
+              - 'scripts/check-join-script.sh'
+              # make lint also checks that every Dockerfile COPY names a path
+              # that exists. Nothing else does: build-push.yml runs only on
+              # push to main, so a COPY of a file the same PR deleted is green
+              # here and breaks main on merge. Both halves of that have to
+              # trigger the job: the Dockerfiles, and the trees they copy from.
+              - 'scripts/**'
+              - 'deploy/docker/**'
+            migrations:
+              - 'internal/infrastructure/db/migrations/**'
+              - 'scripts/check-migrations.sh'
+            tracking:
+              - 'tracking/**'
+            realtime:
+              - 'realtime/**'
+              - 'deploy/docker/realtime.Dockerfile'
+            web:
+              - 'web/**'
+            admin:
+              - 'admin/**'
+            site:
+              - 'site/**'
+            forms:
+              - 'forms/**'
+              # The mirrored design engine has a copy in web/; editing only
+              # that side must still run the drift check below.
+              - 'web/src/components/app/forms/designCore.ts'
+              - 'web/src/components/app/forms/form-theme.css'
+              - 'scripts/check-forms-mirror.sh'
+            qa:
+              - 'qa/**'
+            make:
+              - 'integrations/make/**'
+            ios:
+              - 'ios/**'
+            installer:
+              - 'site/public/install.sh'
+              - 'site/public/install.sh.sha256'
+              - 'scripts/check-installer.sh'
+            cli-installer:
+              - 'site/public/cli.sh'
+              - 'site/public/cli.sh.sha256'
+              - 'site/public/cli.ps1'
+              - 'scripts/check-cli-installer.sh'
+              - 'scripts/build-cli.sh'
+            pages:
+              - '.github/scripts/pages-*'
+              - '.github/workflows/release.yml'
+              - '.github/workflows/ci.yml'
+              - 'web/docker-entrypoint.sh'
+              - 'admin/docker-entrypoint.sh'
+              - 'web/package.json'
+              - 'admin/package.json'
+              - 'site/package.json'
+              - 'docs/package.json'
+              - 'docs/next.config.mjs'
+
+  pages-ci:
+    name: Pages release configuration
+    needs: changes
+    if: needs.changes.outputs.pages == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check production configuration import
+        run: node --test .github/scripts/pages-*.test.mjs
+
+  migrations-ci:
+    name: Migrations
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check migration versions
+        # Runs on the PR's merge commit, so it sees main's versions too. That
+        # only holds while the branch is current, so this needs "Require
+        # branches to be up to date before merging" in branch protection.
+        run: ./scripts/check-migrations.sh
+
+  go-ci:
+    name: Go CI
+    needs: changes
+    if: needs.changes.outputs.go-services == 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pegasusbound
+          POSTGRES_PASSWORD: pegasusbound
+          POSTGRES_DB: pegasusbound_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pegasusbound -d pegasusbound_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "33.x"
+          repo-token: ${{ github.token }}
+
+      - name: Install required Go tools
+        run: make setup-tools
+
+      - name: Run golangci-lint
+        run: make lint
+
+      - name: Verify protobuf files are up to date
+        run: make check-proto
+
+      # The Kafka backend sits behind a build tag, so the default build never
+      # compiles it and it can rot unnoticed. Build rather than vet: vet does
+      # not link, and a CGO backend's characteristic failure is a link error.
+      - name: Verify the Kafka build still compiles and links
+        run: go build -tags kafka ./...
+
+      - name: Run tests with coverage
+        run: |
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Campaign send admission regressions (PostgreSQL)
+        env:
+          PRIMARY_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go run ./cmd/migrate
+          go test -race ./internal/app/behavior ./internal/repository ./internal/tasks -run 'TestDefaultPlan|TestLiveMailboxPlan|TestLiveCampaignAdmission|TestLiveSharedAdmission|TestLiveDeferredTicksDoNotSpendTheDailyBudget|TestLiveCampaignAtDailyCapWaitsForTomorrow' -count=1
+
+      - name: Shared mailbox pool pacing and send claim regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository ./internal/scheduler ./internal/tasks -run '^TestLive(MailboxSendClaim(AdmitsOnePerGap|WaitsOutAReservedSend)|BookedSendsLeaveOutCampaignWakeups|ParkedCampaignDoesNotThrottleItsPoolMate|BookedSendsStillSpaceTheCampaign|ClaimedMailboxIsPassedOver|CampaignsSharingAMailboxSendOncePerGap|LostMailboxClaimReschedulesWithoutSending)$' -count=1
+
+      - name: Invited signup atomic provisioning regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: go test -race ./internal/repository -run '^TestLiveInvitedSignup$' -count=1
+
+      - name: Scheduled-job retirement regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository -run '^TestLiveJobRun' -count=1
+          go test -race -p 1 ./internal/infrastructure/db -run '^TestLiveScheduledJobRetirementUpgradePreservesExecutionHistory$' -count=1
+
+      - name: Warmup dispatch, upgrade and admin-send regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race ./internal/repository -run '^TestLive(Monitoring|LastWarmupSendFailure|PersistentMailboxLoadingFailure|DispatchRetry|LineageQueueRevisions|AdminPlatformOverview|WarmupRecoversOldPreparation|WarmupPreparationRecoveryRetains|WarmupFilingRequiresAcknowledgement|WarmupFilingAuthority|WarmupTimeWindow|WarmupInvalidWindow)' -count=1
+          go test -race ./internal/tasks -run '^Test(LiveWarmup(SafetyHoldReschedules|Recovery|TaskDoesNotApplyResults|DispatchDefersInvalidHours)|WarmupSenderDistinguishes)' -count=1
+          go test -race ./internal/app/consumer -run '^TestLiveStoredSendResult' -count=1
+
+      - name: Monitoring database observation regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          set -euo pipefail
+          go test -race -v ./internal/repository -run '^TestLiveMonitoringDatabaseClock' -count=1 | tee monitoring-clock.log
+          if grep -q -- '--- SKIP:' monitoring-clock.log; then
+            echo "Monitoring database observation regressions must execute without skips"
+            exit 1
+          fi
+          for test in TestLiveMonitoringDatabaseClockAfterRequestStart \
+            TestLiveMonitoringDatabaseClockWarningSemantics \
+            TestLiveMonitoringDatabaseClockPredicateBoundaries \
+            TestLiveMonitoringDatabaseClockSingleSnapshot; do
+            grep -q "^--- PASS: $test " monitoring-clock.log
+          done
+
+      - name: Warmup generic execution authority regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -v -p 1 ./internal/api/handler -run '^TestLiveWarmupGeneric' -count=1 | tee warmup-generic-execution.log
+          if grep -q -- '--- SKIP:' warmup-generic-execution.log; then
+            echo "Warmup generic execution regressions must execute without skips"
+            exit 1
+          fi
+          for test in TestLiveWarmupGenericStartAfterPartialImport \
+            TestLiveWarmupGenericCancellationPreservesOtherHolds \
+            TestLiveWarmupGenericStartAndLateResult \
+            TestLiveWarmupGenericStartAfterCompatibleOverwrite \
+            TestLiveWarmupGenericCannotRepeatStartedWarmupClaim; do
+            grep -q "^--- PASS: $test " warmup-generic-execution.log
+          done
+
+      - name: Warmup charge and authoritative result regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -v -p 1 ./internal/repository ./internal/app/consumer ./internal/tasks ./internal/app/orgtransfer -run '^TestLive(Warmup(ReservationPreservesOriginalChargeDay|RefundCASProtectsConcurrentAndRestampedTasks|RefundAndResultRollbackTogether|ReplyRefundUsesChargedShapeAfterParentDeletion|ChargeAndRefundUseUTCInNonUTCSession|ChargeProofRollsBackWhenCounterWriteFails|CancellationPathsRefundOnlyProvenCharge|GenericCompletionDoesNotProveChargedAccounting|SendFailureGivesTheDayBack|SendGiveBackIsIdempotent|SafetyHoldReschedulesInsteadOfBlockingTheDispatcher|Recovery(RetiresExistingUnstartedDispatchOnce|HandlesPartialReservations|PreservesExecutionAndReceiptEvidence|KeepsOtherUnknownAndRestrictiveHolds|AndBeginCannotBothWin))|AppliedWarmupFailureRepairsOnlyRefundedChargeDeadLetters|GiveBackDailySend(ReversesADispatchedWarmupSend|LeavesOtherDaysAlone)|AccountDailyUsage(CountsWarmupTasksNotTheStatisticsRow|ScopesWarmupToTypeAndDay)|ImportWarmupStatisticsCannotGrantChargeRefundAuthority|Legacy(FailedStatusCannotProveNonExecution|JSONAndAvroFailurePersistConservativeAdmission)|AuthoritativeDeadLetterResultsReconcileWithoutReplay|DeadLetterResultEffectsAndSettlementRollBackTogether|Campaign(DeadLetterWorkerResultReleasesReservationOnce|ForeignKeyCleanupDoesNotProveWakeupOnly)|UserEmailDeadLetterUsesUnderlyingSendTaskType|UnknownSendOperatorResolutionReconcilesAndAudits|RecordedWorkerOutcomeSurvivesLostEvent|UnreservedLegacyFailedTaskRetainsUnknownHold|UnknownResolutionRejectsMissingEvidenceAndLiveExecution|SendRecoveryResolutionRequiresEvidenceAndRetainsUnknown|UnstartedDispatchRetainsDeferredOutcomeConflict)$' -count=1
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveWarmupChargeUpgradeKeepsLegacyUnverifiedAndPreservesEvidence$' -count=1
+
+      - name: Warmup filing provider-floor regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -v -p 1 ./internal/repository -run '^TestLiveWarmupFiling(ClaimProviderFloor|DeferralIsScopedCommittedAndMonotonic|DeferralRefusesStaleAndForeignWork|ProviderFloorSurvivesReassignment|ProviderFloorDoesNotShortenClaimLease|DeferralDatabaseErrorIsNotProof|DeferralLostHTTPResponseRetriesIdempotently)$' -count=1
+          go test -race -v -p 1 ./internal/repository -run '^TestLiveWarmupFilingAdmission(DeniesMissingOwnedRow|KeepsUntrackedLegacyAction)$' -count=1
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveWarmupFilingProviderFloorUpgradePreservesLegacyLeasesAndRollback$' -count=1
+
+      - name: Authoritative send-conflict and historical-origin regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveSendRecoveryConflict(CLIStartup|UpgradePreservesHistoricalEvidence|Production284UpgradePreservesHistoricalEvidence|HistoricalOnlyDownRefuses|EmptyDownUp)$' -count=1
+          go test -race -v -p 1 ./internal/repository ./internal/app/orgtransfer -run '^TestLive(DefinitiveConflictDirectionsDuplicatesAndRestrictiveHolds|PriorDefinitiveConflictWithoutOperatorResolution|AuthenticationRepairRetainsUnresolvedOutcomeConflict|ConcurrentAuthenticationRepairRetainsNewOutcomeConflict|UnstartedDispatchRetainsDeferredOutcomeConflict|HistoricalConfirmationRequiresFreshOrIndependentAuthority|ExpandedConflictSchemaRequiresUpgradedReadersAndWriters|OrdinarySendResultsNeedNoRecoveryConfirmation|ImportSendRecoveryHistoryCannotReconcileUnknownOutcome|ArchiveSendRecoveryLocalOriginResets|ImportedHistoryDoesNotRepeatAuthoritativeWorkerResult)$' -count=1
+          go test -race -v -p 1 ./internal/app/consumer -run '^TestLiveDelayedPreparationDuplicateMustNotCreateDefinitiveConflict$' -count=1
+
+          go test -race -v -p 1 ./internal/app/consumer -run '^TestLiveAdvancedBounceReconciliationRollbackAndReplayWithOneConnection$' -count=1
+
+      - name: Typed mailbox history, archive checkpoint and real-driver upgrade regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          set -o pipefail
+          go test -race -v -p 1 ./internal/infrastructure/db -run '^TestLiveMailTransport(CLIStartup|UpgradePreservesHistoryAndRollback)$' -count=1 | tee mailbox-transport-upgrade.log
+          grep -q '^--- PASS: TestLiveMailTransportCLIStartup ' mailbox-transport-upgrade.log
+          grep -q '^--- PASS: TestLiveMailTransportUpgradePreservesHistoryAndRollback ' mailbox-transport-upgrade.log
+          if grep -q -- '--- SKIP:' mailbox-transport-upgrade.log; then exit 1; fi
+          go test -race -v -p 1 ./internal/repository ./internal/app/orgtransfer ./internal/app/consumer ./internal/app/email -run '^TestLive(MailTransport.*|ImportMailTransport.*|WorkerMailboxLoadReadsOneGenerationWithSingleConnection)$' -count=1 | tee mailbox-transport-runtime.log
+          for test in TestLiveMailTransportNativeDomainExcludesHistory TestLiveMailTransportImportSerializesWithConfirmedResult TestLiveImportMailTransportCheckpointCountsAndUnchangedRows TestLiveMailTransportConfirmedSendReconcilesOnlySend TestLiveMailTransportUnreadableSyncStateCannotAcquireRecovery TestLiveImportMailTransportLateAndSpanningSuccess TestLiveImportMailTransportCredentialOnlyWritesRotateFence TestLiveImportMailTransportExportOmitsGeneration TestLiveImportMailTransportWholeArchiveOmitsGeneration TestLiveMailTransportSnapshotKeepsConfigurationAndGenerationTogether TestLiveWorkerMailboxLoadReadsOneGenerationWithSingleConnection TestLiveMailTransportOperatorConfirmationDoesNotRecover; do
+            grep -q "^--- PASS: $test " mailbox-transport-runtime.log
+          done
+          if grep -q -- '--- SKIP:' mailbox-transport-runtime.log; then exit 1; fi
+          grep -q '^--- PASS: TestLiveImportMailTransportWholeArchiveSendResultLockOrder ' mailbox-transport-runtime.log
+          for logfile in mailbox-transport-upgrade.log mailbox-transport-runtime.log; do
+            test "$(grep -c '^=== RUN' "$logfile")" -gt 0
+            printf '%s RUN=%s PASS=%s SKIP=0\n' "$logfile" "$(grep -c '^=== RUN' "$logfile")" "$(grep -c -- '--- PASS:' "$logfile")"
+          done
+          go test -race -v -p 1 ./internal/app/worker/wmail ./internal/app/worker/mailmanager ./internal/app/consumer -run '^Test(MailTransportGeneration.*|SyncState.*)$' -count=1 | tee mailbox-transport-worker.log
+          grep -q '^--- PASS: TestMailTransportGenerationRequiresFreshCompletedSyncPass ' mailbox-transport-worker.log
+          grep -q '^--- PASS: TestMailTransportGenerationReplacesUnchangedCredentialsAndDrains ' mailbox-transport-worker.log
+          if grep -q -- '--- SKIP:' mailbox-transport-worker.log; then exit 1; fi
+
+      - name: Typed mailbox JSON and native Avro registry compatibility
+        env:
+          SR_URL: http://127.0.0.1:18181
+        run: |
+          set -o pipefail
+          docker run -d --name mailbox-transport-registry -p 18181:8081 redpandadata/redpanda:v24.3.13 redpanda start --mode dev-container --smp 1 --memory 512M --reserve-memory 0M --node-id 0 --check=false
+          trap 'docker rm -f mailbox-transport-registry' EXIT
+          ready=false
+          for attempt in $(seq 1 60); do
+            if curl -fsS "$SR_URL/subjects" >/dev/null; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          go test -tags kafka -race -v -p 1 ./internal/infrastructure/codec -run '^TestMailTransportCodec.*Compatibility$' -count=1 | tee mailbox-transport-codec.log
+          grep -q '^--- PASS: TestMailTransportCodecJSONCompatibility ' mailbox-transport-codec.log
+          grep -q '^--- PASS: TestMailTransportCodecRegistryCompatibility ' mailbox-transport-codec.log
+          for testcase in add send sync error; do
+            grep -q -- "--- PASS: TestMailTransportCodecRegistryCompatibility/$testcase " mailbox-transport-codec.log
+          done
+          if grep -q -- '--- SKIP:' mailbox-transport-codec.log; then exit 1; fi
+          printf 'codec RUN=%s PASS=%s SKIP=0\n' "$(grep -c '^=== RUN' mailbox-transport-codec.log)" "$(grep -c -- '--- PASS:' mailbox-transport-codec.log)"
+
+      - name: Mailbox sync admission, replay, truthful state and upgrade regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository ./internal/app/consumer ./internal/app/orgtransfer ./internal/infrastructure/db -run '^TestLive(SyncArrival|SyncTruth|EmailErrorDedupe)' -count=1
+
+      - name: Payload-free arrival delivery diagnostics regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: go test -race -v -p 1 ./internal/observability/arrivaldiag ./internal/repository ./internal/app/consumer -run '^Test(ArrivalDiagnostics|LiveArrivalDiagnostics)' -count=1
+
+      - name: Restricted member summary, inbox and notification regressions (PostgreSQL)
+        env:
+          PEGASUSBOUND_TEST_DB: postgres://pegasusbound:pegasusbound@127.0.0.1:5432/pegasusbound_test?sslmode=disable
+        run: |
+          go test -race -p 1 ./internal/repository -run '^TestLive(OrganizationScopedCounts|UniboxVisibility|EmailCursorVisibility|NotificationAudience)' -count=1
+
+      - name: Notification digest authorization retries (Redis)
+        env:
+          PEGASUSBOUND_TEST_REDIS: redis://127.0.0.1:6379/15
+        run: go test -race ./internal/app/notification -run '^TestLivePushDigestAudienceRetries$' -count=1
+
+      - name: Test the Kafka codec, failed-handler replay and client lifecycle
+        run: go test -race -tags kafka ./internal/infrastructure/codec/ ./internal/infrastructure/kafka/ ./internal/infrastructure/eventbus/
+
+      # fail_ci_if_error does not cover the uploader crashing before it runs
+      # (a TLS handshake failure to Codecov failed jobs whose tests passed).
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        continue-on-error: true
+        with:
+          files: coverage.out
+          flags: go
+          fail_ci_if_error: false
+
+  web-ci:
+    name: Web CI
+    needs: changes
+    if: needs.changes.outputs.web == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          working-directory: web
+
+      - name: Pages route and asset separation
+        run: node scripts/check-pages-routing.mjs
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: pnpm test:run
+
+      - name: Build
+        run: pnpm build
+
+  # The proof harness records against a live local stack, so CI only checks that it compiles and its flows load.
+  qa-ci:
+    name: QA harness CI
+    needs: changes
+    if: needs.changes.outputs.qa == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: qa
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          working-directory: qa
+          node-version: "24"
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Flows load
+        run: pnpm exec playwright test --list
+
+  admin-ci:
+    name: Admin CI
+    needs: changes
+    if: needs.changes.outputs.admin == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: admin
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          working-directory: admin
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Run tests
+        run: pnpm test:run
+
+      - name: Build
+        run: pnpm build
+
+  site-ci:
+    name: Site CI
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          working-directory: site
+          node-version: "22"
+
+      - name: Exception filtering regressions
+        run: pnpm test
+
+      - name: Build
+        # Astro project; build catches type errors, broken imports,
+        # missing assets. No separate lint/typecheck script is wired
+        # in package.json today.
+        run: pnpm build
+
+  forms-ci:
+    name: Forms CI
+    needs: changes
+    if: needs.changes.outputs.forms == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: forms
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check forms mirror
+        working-directory: .
+        run: ./scripts/check-forms-mirror.sh
+
+      - uses: ./.github/actions/setup-pnpm
+        with:
+          working-directory: forms
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+  # The installer is served verbatim from site/public, so what CI checks is
+  # exactly what a `curl | sh` executes. The checksum is published next to it
+  # for anyone who would rather download, verify and read before running, and
+  # it is only useful if it cannot drift.
+  installer-ci:
+    name: Installer CI
+    needs: changes
+    if: needs.changes.outputs.installer == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the installer
+        run: ./scripts/check-installer.sh
+
+  cli-installer-ci:
+    name: CLI Installer CI
+    needs: changes
+    if: needs.changes.outputs.cli-installer == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # dash is what /bin/sh is on Debian and Ubuntu, which is what most people
+      # will pipe this into. Ubuntu runners already have shellcheck and pwsh.
+      - name: Install dash
+        run: sudo apt-get update && sudo apt-get install -y dash
+
+      - name: Check the CLI installer
+        run: ./scripts/check-cli-installer.sh
+
+  make-ci:
+    name: Make App CI
+    needs: changes
+    if: needs.changes.outputs.make == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/make
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate Make app
+        # IML is interpreted by Make (no compile step); validate.mjs checks the
+        # manifest, JSON validity, code-file references, and component enums.
+        run: node scripts/validate.mjs
+
+  rust-ci:
+    name: Rust CI
+    needs: changes
+    if: needs.changes.outputs.tracking == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tracking
+    steps:
+      - uses: actions/checkout@v4
+
+      # The default tracking build is NATS-only (pure Rust, rustls TLS), so it
+      # needs no librdkafka / libcurl / libsasl system headers. Those are only
+      # required for the optional `--features kafka` build.
+
+      # Pinned to whatever the image builds with, not to `stable`. A dependency
+      # that raises its rust-version above the builder's is invisible to a
+      # `stable` job and surfaces only when the release tries to build the
+      # image, which is the worst place to find out.
+      - name: Read the builder's Rust version
+        id: rust-version
+        run: echo "version=$(sed -n 's/^FROM rust:\([0-9.]*\)-alpine.*/\1/p' Dockerfile | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.rust-version.outputs.version }}
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tracking
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Run tests
+        run: cargo test
+
+      # The Kafka publisher is behind a cargo feature, so none of the steps
+      # above compile it: `cargo clippy` on the default build never opens
+      # kafka.rs. That file ships as the published tracking:*-kafka image, so a
+      # break in it would otherwise surface at release time rather than here.
+      # This is the Rust half of the `go build -tags kafka` step above.
+      # The Debian equivalents of what tracking/Dockerfile installs on alpine
+      # for this build. libcurl is needed even though rdkafka-sys configures
+      # with -DWITH_CURL=0: librdkafka's rdkafka_conf.c includes curl/curl.h
+      # unconditionally, so the build fails at the first object without it.
+      - name: Install librdkafka build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake pkg-config libssl-dev libcurl4-openssl-dev libsasl2-dev zlib1g-dev
+
+      - name: Run Clippy (kafka feature)
+        run: cargo clippy --features kafka --all-targets -- -D warnings
+
+  elixir-ci:
+    name: Elixir CI
+    needs: changes
+    if: needs.changes.outputs.realtime == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: realtime
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Elixir
+        # mix.exs requires `elixir: "~> 1.18"`. Bumped here to match.
+        # Phoenix 1.8 + plug 1.19 also expect a recent OTP.
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.18"
+          otp-version: "27"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: |
+            realtime/deps
+            realtime/_build
+          key: ${{ runner.os }}-mix-${{ hashFiles('realtime/mix.lock') }}
+          restore-keys: ${{ runner.os }}-mix-
+
+      - name: Install dependencies
+        run: mix deps.get
+
+      - name: Check formatting
+        run: mix format --check-formatted
+
+      - name: Run Credo
+        # credo isn't in mix.exs yet; skip when the binary isn't
+        # available so CI doesn't false-fail. Re-enable once it's
+        # added as a dev dep.
+        run: mix help credo > /dev/null 2>&1 && mix credo --strict || echo "credo not installed; skipping"
+
+      - name: Compile
+        # Don't fail the build on transitive warnings — jose/CAStore
+        # and a couple of our own files emit deprecation warnings on
+        # Elixir 1.18 that aren't fixable without forking deps.
+        # Real compile errors still fail the step.
+        run: mix compile
+
+      - name: Run tests
+        run: mix test
+
+  ios-ci:
+    name: iOS CI
+    needs: changes
+    if: needs.changes.outputs.ios == 'true'
+    # macOS minutes are 10x Linux; the paths filter keeps this off
+    # non-iOS PRs. The app needs the iOS 26 SDK and the Icon Composer
+    # .icon app icon, so it must be a macos-26 image.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select newest Xcode
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Build (iOS Simulator, no signing)
+        # arm64 only: the generic destination otherwise also builds the
+        # x86_64 slice, doubling build time for a compile check.
+        run: |
+          set -o pipefail
+          xcodebuild build \
+            -project ios/Pegasusbound.xcodeproj \
+            -scheme Pegasusbound \
+            -destination 'generic/platform=iOS Simulator' \
+            ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            CODE_SIGNING_ALLOWED=NO
+
+  # Validate the web/admin production Dockerfiles (build + nginx config check)
+  # without pushing, so a broken image can't reach a release tag unnoticed. The
+  # release workflow is the only other place these build, and only on tags.
+  frontend-images:
+    name: Frontend Image (${{ matrix.service }})
+    needs: changes
+    if: needs.changes.outputs.web == 'true' || needs.changes.outputs.admin == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, admin]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha,scope=ci-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.service }}
+
+  # The one job to mark required in branch protection. Skipped jobs pass
+  # (their tree did not change); anything failed or cancelled fails it.
+  # Dependency scanning lives in security.yml, off the PR path on purpose.
+  ci-status:
+    name: CI Status
+    runs-on: ubuntu-latest
+    needs: [changes, migrations-ci, go-ci, web-ci, qa-ci, admin-ci, site-ci, forms-ci, installer-ci, cli-installer-ci, make-ci, rust-ci, elixir-ci, ios-ci, frontend-images, pages-ci]
+    if: always()
+    steps:
+      - name: Check CI status
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

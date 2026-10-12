@@ -1,0 +1,377 @@
+---
+title: Realtime WebSocket
+description: Subscribe to live Pegasusbound events over a WebSocket connection.
+---
+
+Pegasusbound pushes dashboard events (campaign sends, opens, clicks, replies, inbox arrivals, audit entries, and more) over a WebSocket. The same socket that powers the live dashboard is available to developers. Events are ordered and carry a monotonic `seq`, and a reconnecting client can resume and replay what it missed.
+
+The gateway has a machine-readable AsyncAPI 3.1 description you can generate clients or docs from:
+
+```
+https://docs.pegasusbound.com/asyncapi.json
+```
+
+## Connecting
+
+The socket speaks the Phoenix channel protocol (serializer version `1.0.0`) at:
+
+```
+wss://realtime.pegasusbound.com/socket/websocket?vsn=1.0.0
+```
+
+Three token types are accepted:
+
+- **API key** (`pgsbd_…`): send a key with the `REALTIME_SUBSCRIBE` permission (bit 11) in the `X-Pegasusbound-Token` request header of the WebSocket handshake. See [Permissions](/api/permissions/) for how to grant it.
+- **OAuth access token** (`wmat_…`): send an access token whose grant includes the realtime scope (the lowercased permission, `realtime_subscribe`) in the same `X-Pegasusbound-Token` header. It connects on the granting user's behalf with exactly the scopes they approved. See [OAuth](/api/oauth/).
+- **Short-lived JWT**: browser sessions call the authenticated socket endpoint to mint a 10-minute connection token and pass it as the `token` query parameter. This is what the dashboard itself uses.
+
+Send API keys and OAuth access tokens in the `x-pegasusbound-token` header. Putting one in the URL as `token` still works but is deprecated: URLs end up in proxy and access logs, and these credentials outlive any session, so it will stop working in a later API version. The 10-minute connection token belongs in the query string. Browsers cannot set headers on a WebSocket, so connect with an API key or OAuth token from a server-side client.
+
+`POST /v1/getaway` continues returning the direct gateway `url` and `expires_in`. It also returns `proxy_path` when a gateway is configured. The dashboard resolves that path against its versioned API base and uses the API origin for its WebSocket, so a self-host does not depend on realtime CSP discovery succeeding during dashboard startup. Failed connection attempts alternate with the direct gateway for older proxy configurations. The proxy accepts only short-lived WebSocket tickets, not access tokens, API keys or OAuth credentials; developer clients continue connecting directly. It preserves the dashboard Origin and realtime authorization and connection limits. The backend signs a ticket-bound client-address proof so per-IP limits do not treat every proxied user as the same client.
+
+A credential stops working on the socket as soon as it does on the REST API: a revoked key or token, a holder banned from signing in, or a suspended OAuth app is refused at the handshake. Signing out, signing out everywhere, changing or resetting a password, and an account ban also close every socket that user has open; the dashboard reconnects on its own with a fresh connection token if its session is still valid.
+
+In short, both developer auth methods work here: an API key with `REALTIME_SUBSCRIBE`, or an OAuth access token with the realtime scope. They authenticate through the same gate, so everything below applies to either.
+
+If the key (or OAuth app) has IP restrictions configured, they are enforced on the socket handshake as well.
+
+## Channels
+
+After connecting, join one or more topics with a `phx_join` message:
+
+| Topic | Scope | Notes |
+| --- | --- | --- |
+| `user:<user_id>` | Events for the key's owning user | Always joinable by yourself |
+| `org:<org_id>` | Organization-wide events | Requires membership; events are filtered by your member permissions |
+| `campaign:<campaign_id>` | One campaign's activity | Requires `view_campaigns` |
+| `account:<account_id>` | One mailbox's sync and warmup events | Requires `manage_emails` |
+| `bulk:<operation_id>` | Progress of one bulk operation | Import/export progress; only the user who started the operation receives its events |
+
+Events arrive as channel messages whose event name is the event type, for example `EMAIL_SENT`, `EMAIL_OPENED`, `EMAIL_REPLIED`, `EMAIL_RECEIVED`, `AI_DRAFT_READY`, `CAMPAIGN_COMPLETED`, `CAMPAIGN_IDLE` (a continuous campaign ran out of leads and is waiting), `TASK_PROGRESS`, `ACCOUNT_HEALTH_CHANGED`, `ACCOUNT_SYNC_STATE`, `WARMUP_PLACEMENT` (a partner found one of the workspace's warmup emails; `status` is `inbox`, `tabs` or `spam`), `PLACEMENT_TEST_UPDATED`, `AUDIT_CREATED`, `AUTOMATION_RUN`, `MEETING_BOOKED`, `NOTIFICATION_CREATED`, `PAGE_HIT`. Payloads always include `event_type` and a timestamp, plus the relevant ids (`campaign_id`, `contact_id`, `thread_id`, and so on). `EMAIL_OPENED` and `EMAIL_CLICKED` also carry `occurred_at` (when the tracking service saw it; `timestamp` is the publish time), `machine` (true for a mail client prefetch or a security scanner's fetch), and `client`, `client_type` (`app` or `webmail`), `device_hidden` (a mailbox provider's image proxy fetched it, so the device is unknowable), `device_type`, `os`, `browser`, `country_code` and `city` when the consumer could tell.
+
+`AI_DRAFT_READY` fires when the [inbox agent](/guides/inbox-agent/) drafts a suggested reply awaiting review; it carries `thread_id` and `draft_id` and requires `access_unibox`.
+
+`MAILBOX_IMPORT_PROGRESS` fires on the org channel as a [mailbox import](/guides/mailbox-import/) moves: at most once a second per import while rows finish, and always when it completes, is cancelled, or a waiting sign-in row connects. It carries `org_id`, `import_id` and `status` (`running`, `completed` or `cancelled`), not the rows, so refetch `GET /emails/imports/:id` on receipt. It requires `manage_emails`.
+
+`CONTACT_IMPORT_PROGRESS` fires on the org channel as a [background contact import](/api/reference/contacts/#background-imports) moves: when it is queued and starts, at most once a second while its rows settle, and when it completes, fails, or is cancelled. It carries `org_id`, `import_id` and `status` (`queued`, `running`, `completed`, `failed` or `cancelled`), not the rows, so refetch `GET /contacts/imports/:id` on receipt. It requires `view_contacts`.
+
+`PLACEMENT_TEST_UPDATED` fires on the org channel when an [inbox placement test](/guides/placement-tests/) starts, each time one of its copies gets a verdict, and when it finishes or is cancelled. It carries `org_id`, `test_id`, `status` (`running`, `completed`, `cancelled` or `failed`) and, for a test of a campaign step, `campaign_id`, not the results, so refetch `GET /placement/tests/:id` on receipt. A [placement batch](/guides/placement-tests/#testing-a-fleet-with-batches) sends the same event with `batch_id` in place of `test_id` and the batch's status when it starts, skips or defers a mailbox, and finishes; its tests send their own events as they run, each with its `test_id`. It requires `view_analytics`, like the endpoints that read results.
+
+Permission filtering happens per event on the org channel: for example inbox events require `access_unibox`, campaign pulses require `view_campaigns`, placement tests require `view_analytics`, mailbox and mailbox import events require `manage_emails`, member changes require `manage_team`, and billing events require `manage_billing`. A member without the permission simply never receives the event.
+
+For a member restricted to [selected resources](/guides/team-roles/#access-scope), and any key or app acting for one, the org channel also filters by their grants: inbox events need a granted `email_account_id`, other events need a granted `campaign_id` or `email_account_id`, and `AUDIT_CREATED` arrives only for a granted campaign, folder or mailbox, or for a change to the member themselves. Everything else is dropped, including events that name no resource. Such a socket is never tracked in presence and receives no teammate `presence_state`, `presence_diff` or `live:*` frames. Presence diffs pass through the channel's authorization filter rather than Phoenix's direct broadcast fastlane. When an unrestricted member becomes restricted, their presence is removed and an empty `presence_state` clears their previously visible roster.
+
+`campaign:<id>` and `account:<id>` check access at join, then refresh authorization every 30 seconds and before delivery whenever the previous check is at least 30 seconds old. Refusal or an authorization lookup error stops the channel without delivering the event. The org channel has the same bounded refresh, including for unrestricted members who become restricted, and also re-reads grants on relevant member, campaign and folder changes. Revoking a grant or moving a campaign out of a granted folder therefore does not rely on an audit event being delivered. An existing authorization may remain usable within its 30-second cache window; revocation is not guaranteed to be instantaneous.
+
+Owner-addressed workspace events do not bypass these gates. The Go publisher checks current membership before using the direct user route, and `user:<id>` verifies each workspace or resource event against current access with a bounded 30-second authorization cache. Scope-less workspace events are withheld from restricted members. Personal account events, session revocation and sign-in security notices remain available. Workspace notifications require a current unrestricted membership, including stored feed rows and deferred email/push delivery.
+
+Private task, mailbox error and warmup-statistics events stay on their authorized user route; they are not promoted to workspace broadcasts. Contact reload signals retain their workspace authorization context without broadcasting to other members. If a queued push digest cannot verify membership or message eligibility because of a temporary lookup failure, it retries rather than delivering or discarding the affected items. Revoked access is checked again on retry.
+
+A change to your own membership, to a role, or to the workspace's owner triggers a re-read on the org channel when its change event arrives, with the bounded refresh above as a fallback. Removal from a workspace also applies to open connections: every socket the removed member has open is disconnected. On reconnect each channel's join checks membership again, so channels for workspaces they still belong to come back and the removed workspace's are refused with `not_a_member` (code `4010`).
+
+## Selecting events with intents
+
+By default an `org:<org_id>` subscriber receives every event the member is permitted to see. To narrow the stream, pass an `intents` array in the `phx_join` payload listing the event families you want:
+
+```json
+{ "intents": ["AUDIT", "CAMPAIGN", "EMAIL"] }
+```
+
+Each token is matched as a case-insensitive substring of the event type, so `CAMPAIGN` matches `CAMPAIGN_*`, `EMAIL` matches `EMAIL_SENT` / `EMAIL_OPENED` / `EMAIL_RECEIVED`, and `AUDIT` matches `AUDIT_CREATED`. An absent or empty array means the full stream. Intents reduce traffic against the per-connection message limit, they are not a security boundary (permission filtering still applies on top).
+
+## Custom events (fire event)
+
+You can have Pegasusbound emit your own events to this stream, so your app reacts to things happening in Pegasusbound without hosting a public webhook URL. Add a **Fire event** step to an automation or a campaign sequence: you give it an event name and a set of key/value fields (each value templated against the event/contact data, e.g. `{{.contact_email}}`). When the step runs, Pegasusbound publishes a `CUSTOM_EVENT` on the org channel.
+
+```json
+{
+  "event_type": "CUSTOM_EVENT",
+  "name": "lead.replied",
+  "payload": { "contact_email": "jane@example.com", "intent": "positive" },
+  "source": "automation",
+  "source_id": "…",
+  "org_id": "…",
+  "timestamp": "2026-06-14T15:00:00Z"
+}
+```
+
+`name` is the event name you chose and `payload` is your fields. Subscribe with an API key carrying `REALTIME_SUBSCRIBE` (or an OAuth access token with the realtime scope) and match on `name` (or use the `CUSTOM` intent to receive only these). This is the recommended way to "tell my system this happened": no inbound endpoint, no SSRF surface, and it works behind a firewall.
+
+## Heartbeats
+
+The `org:<org_id>` join reply doubles as a HELLO: it returns the cadence the server expects (so a client library does not hardcode it) and the current stream `seq`.
+
+```json
+{ "org_id": "...", "role": "owner", "heartbeat_interval_ms": 25000, "server_timeout_ms": 60000, "seq": 4821, "resume_supported": true }
+```
+
+Heartbeats are client-initiated (standard Phoenix): send a `heartbeat` event on the `phoenix` topic every `heartbeat_interval_ms`. If the server receives nothing for `server_timeout_ms` it closes the socket. The reference client also arms a short watchdog after each heartbeat and force-reconnects if the reply does not arrive, which detects a silently dead connection faster than the timeout.
+
+## Resuming after a disconnect
+
+Every event carries a monotonic per-organization sequence number in its `seq` field, delivered in order. Track the highest `seq` you have processed; the HELLO also returns the current `seq`.
+
+To resume after a reconnect, rejoin the `org:<org_id>` channel with a resume token instead of starting fresh:
+
+```json
+{ "resume": { "last_seq": 4821 } }
+```
+
+The server then either replays what you missed or tells you to resync:
+
+- **Replay.** The events with `seq` greater than `last_seq` are pushed as normal channel messages (same shape as live, filtered by your permissions and intents exactly like live delivery), followed by a `resumed` marker:
+
+  ```json
+  { "from": 4821, "current_seq": 4895, "replayed": 12 }
+  ```
+
+- **Resync.** If your position is no longer in the buffer (you were disconnected longer than the buffer window) or the token is malformed, the server pushes `resume_failed` and no events:
+
+  ```json
+  { "reason": "buffer_evicted", "current_seq": 5300 }
+  ```
+
+  On `resume_failed`, refetch the affected resources over the REST API, then continue live from `current_seq`.
+
+Resume is **at-least-once**: a replay may re-deliver an event you already handled, so dedupe by `seq`. The buffer holds roughly the most recent events per organization, bounded by both size and time, so resume covers short disconnects (deploys, network blips, tab sleep) but not arbitrarily long ones.
+
+## Reference client
+
+The serializer (`vsn=1.0.0`) frames every message as a five-element array `[join_ref, ref, topic, event, payload]`. The client below speaks that wire format directly over the Node.js [`ws`](https://www.npmjs.com/package/ws) package, which can set the `X-Pegasusbound-Token` handshake header (if you already use the `phoenix` npm package, its `Socket`/`Channel` classes do the same framing for you). It walks the whole lifecycle: connect with a token, join `org:<org_id>` with intents, read the HELLO join reply, run the heartbeat loop at the advertised cadence, resume from the last `seq` on reconnect, handle events (including `CUSTOM_EVENT`), and back off on close or rejection.
+
+```js
+// Node.js with `npm install ws`. token can be an API key (pgsbd_… with
+// REALTIME_SUBSCRIBE) or an OAuth access token (wmat_… with the realtime scope).
+import WebSocket from "ws";
+
+function connectRealtime({ token, orgId, intents = ["CUSTOM"], onEvent }) {
+  const url = "wss://realtime.pegasusbound.com/socket/websocket?vsn=1.0.0";
+  const topic = `org:${orgId}`;
+
+  let ws, ref = 0, joinRef = null, heartbeatTimer = null, watchdog = null;
+  let heartbeatRef = null, backoff = 1000, closedByUs = false;
+  let lastSeq = 0; // highest seq processed; survives reconnects so we can resume
+
+  const nextRef = () => String(++ref);
+
+  // Phoenix frame: [join_ref, ref, topic, event, payload]
+  const send = (frameTopic, event, payload, useJoinRef = false) => {
+    const r = nextRef();
+    ws.send(JSON.stringify([useJoinRef ? joinRef : null, r, frameTopic, event, payload]));
+    return r;
+  };
+
+  const join = () => {
+    joinRef = nextRef();
+    // Resume from last_seq when we have one, otherwise a fresh join.
+    const payload = { intents };
+    if (lastSeq > 0) payload.resume = { last_seq: lastSeq };
+    ws.send(JSON.stringify([joinRef, joinRef, topic, "phx_join", payload]));
+  };
+
+  const startHeartbeats = (intervalMs) => {
+    stopHeartbeats();
+    heartbeatTimer = setInterval(() => {
+      heartbeatRef = send("phoenix", "heartbeat", {});
+      // Watchdog: if the reply never lands, the socket is silently dead.
+      clearTimeout(watchdog);
+      watchdog = setTimeout(() => ws.close(4000, "heartbeat timeout"), intervalMs);
+    }, intervalMs);
+  };
+
+  const stopHeartbeats = () => {
+    clearInterval(heartbeatTimer);
+    clearTimeout(watchdog);
+    heartbeatTimer = watchdog = null;
+  };
+
+  const open = () => {
+    closedByUs = false;
+    ws = new WebSocket(url, { headers: { "X-Pegasusbound-Token": token } });
+
+    ws.onopen = () => { backoff = 1000; join(); };
+
+    ws.onmessage = (e) => {
+      const [, msgRef, msgTopic, event, payload] = JSON.parse(e.data);
+
+      // Heartbeat reply on the phoenix topic clears the watchdog.
+      if (msgTopic === "phoenix" && msgRef === heartbeatRef) {
+        clearTimeout(watchdog);
+        return;
+      }
+
+      // Join reply doubles as HELLO (heartbeat cadence, current seq, resume support).
+      if (event === "phx_reply" && msgRef === joinRef) {
+        if (payload.status === "ok") {
+          const hello = payload.response || {};
+          lastSeq = Math.max(lastSeq, hello.seq || 0);
+          startHeartbeats(hello.heartbeat_interval_ms || 25000);
+          console.log("joined", { seq: hello.seq, resume_supported: hello.resume_supported });
+        } else {
+          // Post-join rejection: structured { code, reason }.
+          const err = payload.response || {};
+          console.error("join rejected", err.code, err.reason);
+          ws.close(4000, "join rejected");
+        }
+        return;
+      }
+
+      // Resume outcome markers.
+      if (event === "resumed") { lastSeq = Math.max(lastSeq, payload.current_seq || lastSeq); return; }
+      if (event === "resume_failed") {
+        lastSeq = payload.current_seq || lastSeq; // resync over REST, then continue live
+        console.warn("resume_failed", payload.reason, "-> resync from", lastSeq);
+        return;
+      }
+
+      // Server-side throttle of outbound delivery.
+      if (event === "rate_limited") return;
+
+      // Real events. Track seq for resume and dedupe by it (delivery is at-least-once).
+      if (typeof payload?.seq === "number") {
+        if (payload.seq <= lastSeq) return; // already handled
+        lastSeq = payload.seq;
+      }
+      if (event === "CUSTOM_EVENT") {
+        onEvent?.({ name: payload.name, payload: payload.payload, raw: payload });
+      } else {
+        onEvent?.({ name: event, payload, raw: payload });
+      }
+    };
+
+    ws.onclose = (e) => {
+      stopHeartbeats();
+      // Connect-level rejections currently surface as a failed handshake (HTTP 403
+      // carrying the reason), not a close code; either way, reconnect with backoff.
+      // Re-mint the token first if it may have expired (4004).
+      if (closedByUs) return;
+      console.warn("closed", e.code, e.reason, "- retrying in", backoff, "ms");
+      setTimeout(open, backoff);
+      backoff = Math.min(backoff * 2, 30000); // exponential backoff, capped
+    };
+
+    ws.onerror = () => { try { ws.close(); } catch {} };
+  };
+
+  open();
+  return { close: () => { closedByUs = true; stopHeartbeats(); ws?.close(1000); } };
+}
+
+// Usage
+const conn = connectRealtime({
+  token: "pgsbd_…",            // or an OAuth "wmat_…" access token
+  orgId: "org_123",
+  intents: ["CUSTOM", "EMAIL", "AUDIT"],
+  onEvent: ({ name, payload }) => console.log(name, payload),
+});
+```
+
+## Presence
+
+The org channel carries team presence for the collaboration features in the dashboard (who is online, who is viewing or replying to a record). Standard Phoenix presence events are used:
+
+- `presence_state` is pushed once after a successful join with the full member map.
+- `presence_diff` carries joins and leaves as they happen.
+
+Clients update their own activity by pushing a `presence:update` event with `{ "page": "/app/unibox", "resource": "thread:<id>", "action": "viewing" }`. Valid actions are `viewing`, `editing`, `replying`, and `idle`.
+
+Presence is subject to the workspace's privacy settings. An admin can turn off "show who's online", in which case no member is tracked and the presence map stays empty, or "show activity", in which case members appear online but their `page`, `resource`, and `action` are stripped. These are enforced server-side, so the hidden detail never reaches any subscriber. Changing the setting re-gates connected sockets immediately and emits the corresponding `presence_diff`.
+
+API-key connections receive presence events but are never tracked as presences themselves: machines are not teammates.
+
+## Live collaboration
+
+The dashboard streams ephemeral collaboration frames so teammates see each other in real time: live cursors everywhere, cursor chat, in-flight card drags, and selections on the builder canvases. These ride a separate fast path from the sequenced event stream above.
+
+Every frame is scoped by a `resource` string, and a client only renders frames for the resource it is currently on:
+
+- `page:<route>` for an ordinary dashboard page (cursors only). Coordinates are relative to the page's content area; on pages that scroll at the app level they track the content as either person scrolls, and otherwise they mark where the teammate's pointer is within the viewport.
+- `automation:<id>` and `campaign:<id>` for the automation and campaign-sequence builder canvases (cursors, card drags, and selections). Coordinates are canvas (flow) space, so a point lands in the same place for everyone regardless of pan or zoom.
+
+Clients push:
+
+- `live:cursor` with `{ "resource": "<resource>", "x": <number>, "y": <number> }` for a pointer move, or `{ "resource": "<resource>", "gone": true }` when the pointer leaves. An optional `"chat"` string (capped at 120 characters and byte-bounded) attaches cursor-chat text to the frame; teammates render it as a bubble next to the pointer, and it clears when frames stop carrying it. Chat text is permission-gated server-side by the frame's surface (for example, chat on a unibox thread is stripped for members without unibox access; the cursor itself still delivers).
+- `live:node` with `{ "resource": "<canvas-resource>", "id": "<node-id>", "x": <number>, "y": <number>, "dragging": <bool> }` while a card is being moved (builder canvases only).
+- `live:select` with `{ "resource": "<canvas-resource>", "ids": ["<node-id>", ...] }` when the set of selected nodes changes (builder canvases only). At most 100 ids per frame; an empty list clears the selection for teammates. Senders re-emit a held selection every few seconds as a keep-alive, and receivers should expire a selection that has not been refreshed for around 12 seconds, so a lost clear frame heals on its own.
+- `live:patch` with `{ "resource": "<resource>", "data": { ... } }` for a generic collaborative-state hint, where `data` is a small flat map of scalar values (strings are capped, at most 20 keys). The dashboard uses it so a teammate's action lands instantly, for example a deal moved on a board (`{ "kind": "deal_move", "deal_id": "...", "stage_id": "..." }`) ahead of the durable refetch.
+
+They fan out to the other members on the same org channel as `LIVE_CURSOR`, `LIVE_NODE`, `LIVE_SELECT`, and `LIVE_PATCH` events carrying the same fields plus `user_id`. Resolve the mover's name and avatar from presence. A `live:patch` is a best-effort hint, not a source of truth: the change itself still persists over REST and re-syncs through the normal event stream, so a dropped frame self-heals.
+
+These frames are deliberately lightweight:
+
+- they are **not** sequenced and **not** resumable. A dropped frame is fine: the next one is milliseconds away, and a reconnecting client never replays them.
+- they follow the workspace privacy settings. A member whose activity is hidden ("show activity" off) emits no cursor or drag frames, the same gate as `presence:update`.
+- only human (JWT) members exchange them. API-key connections neither send nor receive live frames.
+- they are exempt from the per-minute client-event budget below (which they would exhaust instantly). Each socket is bounded by a small in-process burst limit instead, and clients should throttle pointer and drag frames to roughly 20 to 30 per second.
+
+Pegasusbound's own builder canvases lay themselves out from the flow's structure, so they send no `live:node` frames and store no positions. The frame and the layout endpoints remain for clients that arrange cards themselves.
+
+## Rate limits and connection caps
+
+The realtime service protects itself against connection spam. All limits are per user (the key's owner) unless noted:
+
+| Limit | Default |
+| --- | --- |
+| Concurrent connections | 10 (plan-dependent) |
+| Concurrent connections per IP | 50 |
+| Socket handshakes | 30/minute |
+| Channel joins | 30/minute |
+| Client-sent events (including `presence:update`) | 60/minute |
+| Server-to-client messages | 120/minute |
+
+Handshakes and channel joins draw on separate budgets, so a reconnect storm does not spend the allowance a client then needs to rejoin its topics with. Every limit allows a burst of 1.5x its per-minute figure before refusing.
+
+When a client-sent event is throttled you receive an error reply with `reason: "rate_limited"` and a `retry_after_ms` hint. When outbound delivery is throttled the channel pushes a `rate_limited` message instead of the event.
+
+A `phx_join` over the join budget is refused the same way, with `code: 4007` and its own `retry_after_ms`:
+
+```json
+{
+  "status": "error",
+  "response": {
+    "code": 4007,
+    "reason": "rate_limited",
+    "category": "ws_join",
+    "retry_after_ms": 21400
+  }
+}
+```
+
+The socket stays open, so the right response is to wait out `retry_after_ms` and send the join again, not to reconnect. `retry_after_ms` is the time until the current minute's budget resets, so retrying earlier only spends another refusal. Treat every other refusal reason as final and stop retrying that topic.
+
+Ephemeral [live-collaboration](#live-collaboration) frames (`live:cursor`, `live:node`, `live:select`, `live:patch`) are exempt from the client-event budget above: they are bounded by a separate small per-socket burst limit, and over-budget frames are dropped silently rather than rejected.
+
+## Connection rejections
+
+A connection can be refused at two points, and the two surface differently today:
+
+- **Connect-level** (authentication, the realtime permission, the IP allowlist, the rate limit, the connection cap): the WebSocket upgrade is refused at the HTTP layer. The handshake returns an **HTTP 403** carrying the reason, and the client observes a failed upgrade rather than an application close frame.
+- **Post-join** (a `phx_join` that fails after the socket is open, for example a channel you may not see): the join reply comes back with `status: "error"` and a structured error object `{ code, reason }` in its `response`. `reason` is a stable slug naming the specific refusal (`not_a_member`, `campaign_not_found`, `rate_limited`, ...); `code` is the coarse class to branch on.
+
+Both paths use the same reason codes:
+
+| Code | Meaning | Client action |
+| --- | --- | --- |
+| 4003 | Not authenticated (token missing) | Add a valid `token` to the connection URL |
+| 4004 | Authentication failed: token expired, or invalid key | Re-mint the token (or check the key), then reconnect |
+| 4005 | Malformed topic, for example an id that is not a UUID | Fix the topic; retrying will not help |
+| 4007 | Rate limited | Wait out `retry_after_ms`, then retry |
+| 4009 | Connection limit exceeded | Reduce concurrent sockets |
+| 4010 | Permission denied, not a member, or no such record | Do not retry this topic |
+
+Because connect-level rejections are an HTTP 403 and not a WebSocket close frame today, a client cannot branch on the connect-level code programmatically: treat any failed upgrade as "re-mint the token if it expired, otherwise back off". Post-join rejections are already machine-readable through `{ code, reason }`. Surfacing connect-level reasons as application close codes too is planned.
+
+## Delivery guarantees
+
+Every event has a monotonic per-organization `seq` and is delivered in order. Within the buffer window, a reconnecting client can [resume](#resuming-after-a-disconnect) and replay exactly what it missed; across a resume, delivery is at-least-once (dedupe by `seq`).
+
+The buffer is not an infinite log. It holds roughly the most recent events per organization, bounded by size and time, so a client disconnected longer than that window gets a `resume_failed` and must do a full resync over the REST API. For delivery that must survive arbitrary downtime, use [webhooks](/api/endpoints/), which are persisted and retried; the WebSocket is the low-latency path, webhooks are the durable one.
+
+## Good citizenship
+
+- Reuse one connection per process and multiplex channels over it instead of opening one socket per topic.
+- Pass `intents` so you only receive (and pay the message-rate budget for) the events you act on.
+- Reconnect with exponential backoff; the limits above treat reconnect storms the same as connection spam.
+- Back off on rejoins too, and hold one subscription per topic rather than one per component. A client that tears a channel down and rejoins it on every render will exhaust the join budget in seconds.
+- After a reconnect, resume with your last `seq` instead of refetching everything; only fall back to a full REST resync on `resume_failed`.
+- Treat event payloads as invalidation signals (they carry ids, not full state) and refetch the resource over the REST API when you need its current contents.

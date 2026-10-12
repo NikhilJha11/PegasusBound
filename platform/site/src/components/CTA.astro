@@ -1,0 +1,47 @@
+---
+import Icon from './Icon.astro';
+import Photo from './Photo.astro';
+
+/**
+ * The closing band on every marketing page: a photo frame with a white wash
+ * on the copy side, one line, one sentence and two buttons.
+ */
+interface Props {
+  title?: string;
+  description?: string;
+  primaryLabel?: string;
+  primaryHref?: string;
+  secondaryLabel?: string;
+  secondaryHref?: string;
+  photo?: string;
+}
+const {
+  title = 'Start sending cold email that lands.',
+  description = 'Connect a mailbox and start warming it today. Free to start, free to self-host.',
+  primaryLabel = 'Start free',
+  primaryHref = 'https://app.pegasusbound.com/auth/register',
+  secondaryLabel = 'See pricing',
+  secondaryHref = '/pricing/',
+  photo = 'sheer-blue',
+} = Astro.props;
+const external = secondaryHref.startsWith('http');
+---
+<section class="container-page py-20 md:py-28">
+  <div class="relative overflow-hidden rounded-[6px] bg-slate-100">
+    <Photo name={photo} sizes="100vw" class="absolute inset-0 h-full w-full object-cover select-none pointer-events-none" />
+    <!-- A white wash on the copy side keeps the type readable on any photo. -->
+    <div aria-hidden="true" class="absolute inset-0 bg-gradient-to-r from-white/90 via-white/60 to-white/0"></div>
+    <div class="relative px-6 py-14 md:px-14 md:py-20">
+      <h2 class="max-w-xl text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.08] text-slate-900">{title}</h2>
+      <p class="mt-4 max-w-md text-[16px] md:text-[17px] leading-[1.55] text-slate-600">{description}</p>
+      <div class="mt-8 flex flex-wrap items-center gap-3">
+        <a href={primaryHref} class="inline-flex h-11 px-5 items-center gap-2 rounded-full bg-slate-900 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+          {primaryLabel} <Icon name="arrowRight" size={14} />
+        </a>
+        <a href={secondaryHref} {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})} class="inline-flex h-11 px-5 items-center gap-2 rounded-full bg-white text-[15px] text-slate-800 ring-1 ring-slate-200 transition-colors hover:bg-slate-50">
+          {secondaryLabel}
+        </a>
+      </div>
+    </div>
+  </div>
+</section>

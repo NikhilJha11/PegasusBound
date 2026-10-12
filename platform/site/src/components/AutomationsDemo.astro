@@ -1,0 +1,361 @@
+---
+/**
+ * Live demo of the Pegasusbound automation builder (/app/automations/:id),
+ * mirrored from web/src/components/app/automations/AutomationFlow.tsx and the
+ * shared canvas in web/src/components/app/flow:
+ *
+ *   - the builder header: back, the name input, the Active switch, then
+ *     Undo / Redo, History, Test and Saved
+ *   - the tree canvas at the zoom it opens at: StepCard nodes laid out top
+ *     down on a dot grid, the If / else splitting into Yes and No columns, a +
+ *     at the end of each path (a line's own + shows on hover), zoom controls
+ *     bottom left
+ *   - the Test panel (InsightsPanel in a bare FlowPanel, 400px beside the
+ *     canvas): the dry-run intro, the sample event, the steps to run, Run
+ *     test, then one NodeResultRow per node the run touched. The finished run
+ *     marks each step it reached and fades the rest back
+ *
+ * Drawn inside the full app shell so it is the whole dashboard on screen.
+ * The builder keeps its 1280px design width, which with the 256px sidebar
+ * makes a 1536px window, uniformly scaled to fit.
+ *
+ * Demo: the cursor presses Test, the panel opens beside the canvas, Run test
+ * runs the dry run, the trace lands on the panel and the canvas, then the
+ * panel is closed again. Clicking the real Test button restarts the loop.
+ */
+import AppShellMock from './AppShellMock.astro';
+import DemoCursor from './DemoCursor.astro';
+import { RAW_BRAND_LOGOS } from '../lib/brandLogos';
+import { BRAND_ICON } from '../lib/brandIcons';
+
+const zapIcon = '<path d="M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"/>';
+const gitBranchIcon = '<line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>';
+const briefcaseIcon = '<path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/><rect width="20" height="14" x="2" y="6" rx="2"/>';
+const tagIcon = '<path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/>';
+const checkSquareIcon = '<path d="M21 10.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h12.5"/><path d="m9 11 3 3L22 4"/>';
+const historyIcon = '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>';
+const playIcon = '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-11.997 7A2 2 0 0 1 5 19z"/>';
+const checkIcon = '<path d="M20 6 9 17l-5-5"/>';
+const checkCircleIcon = '<path d="M21.801 10A10 10 0 1 1 17 3.335"/><path d="m9 11 3 3L22 4"/>';
+const arrowLeftIcon = '<path d="m12 19-7-7 7-7"/><path d="M19 12H5"/>';
+const plusIcon = '<path d="M5 12h14"/><path d="M12 5v14"/>';
+const minusIcon = '<path d="M5 12h14"/>';
+const maximizeIcon = '<path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/>';
+const undoIcon = '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/>';
+const redoIcon = '<path d="m15 14 5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13"/>';
+const xIcon = '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>';
+const loaderIcon = '<path d="M21 12a9 9 0 1 1-6.219-8.56"/>';
+
+// sampleEventData("campaign.reply_received") from lib/api/models/app/automations/meta.ts.
+const sample = `{
+  "contact_email": "jane@example.com",
+  "contact_id": "00000000-0000-0000-0000-000000000001",
+  "campaign_id": "00000000-0000-0000-0000-000000000002",
+  "campaign_name": "Q3 Outbound",
+  "first_name": "Jane",
+  "last_name": "Doe",
+  "company": "Example Inc",
+  "intent": "positive",
+  "confidence": 0.92,
+  "subject": "Re: quick question",
+  "snippet": "Sure, let's talk next week."
+}`;
+
+// The canvas in flow coordinates, as layoutFlow places it: 264x56 cards, a
+// 52px chain gap, 92px under a split, 36px between columns. It opens at 100%,
+// framed from the top and centred on the flow, like the builder.
+const ZOOM = 1;
+const VIEW = { x: 358, y: 56 };
+type Tile = { icon: string; tone: string } | { brand: 'slack' | 'hubspot' };
+type Card = { id: string; left: number; top: number; tile: Tile; kicker: string; title: string; summary: string; reached: boolean; result?: string };
+const cards: Card[] = [
+  { id: 'trigger', left: 150, top: 0, tile: { icon: zapIcon, tone: 'bg-sky-50 text-sky-600 ring-sky-100' }, kicker: 'Trigger', title: 'Prospect replies', summary: 'Starts this automation', reached: true },
+  { id: 'if', left: 150, top: 108, tile: { icon: gitBranchIcon, tone: 'bg-amber-50 text-amber-600 ring-amber-100' }, kicker: 'If / else', title: 'intent is Positive', summary: 'Checks the event', reached: true, result: 'Yes' },
+  { id: 'slack', left: 0, top: 256, tile: { brand: 'slack' }, kicker: 'Slack', title: 'Send a Slack message', summary: 'Slack · #sales', reached: true, result: 'Ran' },
+  { id: 'deal', left: 0, top: 364, tile: { icon: briefcaseIcon, tone: 'bg-sky-50 text-sky-600 ring-sky-100' }, kicker: 'Action', title: 'Create a deal', summary: '{{.company}} deal', reached: true, result: 'Ran' },
+  { id: 'hubspot', left: 0, top: 472, tile: { brand: 'hubspot' }, kicker: 'HubSpot', title: 'Create / update HubSpot contact', summary: 'HubSpot', reached: true, result: 'Ran' },
+  { id: 'label', left: 300, top: 256, tile: { icon: tagIcon, tone: 'bg-emerald-50 text-emerald-600 ring-emerald-100' }, kicker: 'Action', title: 'Add a label', summary: '1 label', reached: false },
+  { id: 'task', left: 300, top: 364, tile: { icon: checkSquareIcon, tone: 'bg-violet-50 text-violet-600 ring-violet-100' }, kicker: 'Action', title: 'Create a task', summary: 'Follow up later', reached: false },
+];
+// Lines: the chain into the condition, the Yes and No branches off one bus,
+// then each column's chain down to its trailing add button.
+const lines = [
+  'M282,56 L282,108',
+  'M282,164 L282,174 Q282,184 272,184 L142,184 Q132,184 132,194 L132,256',
+  'M282,164 L282,174 Q282,184 292,184 L422,184 Q432,184 432,194 L432,256',
+  'M132,312 L132,364',
+  'M132,420 L132,472',
+  'M132,528 L132,554',
+  'M432,312 L432,364',
+  'M432,420 L432,446',
+];
+// The add button at the end of each path; a line's own + only shows on hover.
+const ends = [[132, 565], [432, 457]];
+const pills = [
+  { x: 132, y: 204, label: 'Yes', cls: 'bg-emerald-50 text-emerald-700 ring-emerald-200/80' },
+  { x: 432, y: 204, label: 'No', cls: 'bg-white text-slate-500 ring-slate-200' },
+];
+
+// Every action step on the canvas, in tree order, as the panel lists them.
+const steps = cards.filter((c) => c.id !== 'trigger' && c.id !== 'if').map((c) => c.title);
+
+// The dry-run trace, one NodeResultRow each.
+type Row = { label: string; kind: 'condition' | 'action'; sub?: string; preview?: [string, string][] };
+const trace: Row[] = [
+  { label: 'IF', kind: 'condition', sub: 'intent is Positive' },
+  { label: 'Send a Slack message', kind: 'action', preview: [['channel', '#sales'], ['text', 'Reply from jane@example.com: "Sure, let\'s talk next week."']] },
+  { label: 'Create a deal', kind: 'action', preview: [['name', 'Example Inc deal'], ['stage', 'Discovery'], ['value', '4800']] },
+  { label: 'Create / update HubSpot contact', kind: 'action', preview: [['email', 'jane@example.com'], ['lifecycle_stage', 'opportunity']] },
+];
+---
+<div class="ad-root round-clip bg-white ring-1 ring-slate-900/[0.07]" style="box-shadow: 0 50px 110px -32px rgba(2,132,199,0.42), 0 14px 36px -16px rgba(15,23,42,0.18);">
+  <!-- browser chrome -->
+  <div class="flex items-center gap-2.5 px-3 h-11 border-b border-slate-200/80 bg-gradient-to-b from-[#f7f8fa] to-[#eceef1]">
+    <div class="flex items-center gap-2 shrink-0">
+      <span class="w-3 h-3 rounded-full bg-[#ff5f57]"></span>
+      <span class="w-3 h-3 rounded-full bg-[#febc2e]"></span>
+      <span class="w-3 h-3 rounded-full bg-[#28c840]"></span>
+    </div>
+    <div class="hidden @sm:flex items-center gap-1 shrink-0 text-slate-400">
+      <span class="grid place-items-center w-6 h-6 rounded-md"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></span>
+      <span class="grid place-items-center w-6 h-6 rounded-md text-slate-300"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></span>
+    </div>
+    <div class="flex-1 min-w-0 flex items-center gap-2 h-7 px-3 rounded-lg bg-white ring-1 ring-slate-200/90 text-[12px] shadow-[inset_0_1px_2px_rgba(15,23,42,0.04)]">
+      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="text-emerald-500 shrink-0"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      <span class="truncate font-medium text-slate-700">app.pegasusbound.com<span class="text-slate-400 font-normal">/automations/reply-to-revenue</span></span>
+    </div>
+    <div class="hidden @sm:flex items-center shrink-0 text-slate-300">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+    </div>
+  </div>
+
+  <!-- scale-to-fit screen: 256px shell + 1280px builder -->
+  <div class="ad-fit relative w-full overflow-hidden bg-white min-h-[240px]">
+    <div class="ad-screen absolute top-0 left-0 origin-top-left" style="width:1536px;">
+    <AppShellMock crumb="Automations" sub="Reply to revenue">
+    <div class="ad-builder relative flex flex-col" data-demo="ad">
+
+      <!-- ── Builder header ────────────────────────────────────────── -->
+      <div class="h-12 px-3 flex items-center gap-2 border-b border-slate-200 bg-white shrink-0">
+        <span class="h-7 w-7 rounded-md text-slate-500 inline-flex items-center justify-center"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={arrowLeftIcon}></svg></span>
+        <span class="h-7 px-2 w-56 rounded-md text-[13px] font-medium text-slate-900 border border-transparent inline-flex items-center truncate">Reply to revenue</span>
+        <span class="inline-flex h-7 items-center gap-2 rounded-md">
+          <span class="relative inline-flex h-[18px] w-8 shrink-0 items-center rounded-full bg-sky-600"><span class="inline-block size-3.5 translate-x-[16px] rounded-full bg-white shadow-sm"></span></span>
+          <span class="text-[12px] font-medium text-slate-700">Active</span>
+        </span>
+        <div class="ml-auto flex items-center gap-1.5">
+          <div class="flex items-center">
+            <span class="inline-flex size-7 items-center justify-center rounded-md text-slate-500 opacity-35"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={undoIcon}></svg></span>
+            <span class="inline-flex size-7 items-center justify-center rounded-md text-slate-500 opacity-35"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={redoIcon}></svg></span>
+          </div>
+          <span class="h-7 px-2.5 rounded-md border border-slate-200 text-slate-700 text-[12px] inline-flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={historyIcon}></svg>History</span>
+          <button type="button" class="ad-testbtn h-7 px-2.5 rounded-md border border-slate-200 text-slate-700 text-[12px] inline-flex items-center gap-1.5 transition-colors cursor-pointer select-none [&.is-hover]:border-slate-300 [&.is-hover]:text-slate-900" aria-label="Replay the demo run">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={playIcon}></svg>
+            Test
+          </button>
+          <span class="h-7 px-3 rounded-md text-[12px] font-medium inline-flex items-center gap-1.5 bg-slate-100 text-slate-400"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-slate-300" set:html={checkIcon}></svg>Saved</span>
+        </div>
+      </div>
+
+      <div class="relative flex min-h-[720px]">
+        <!-- ── Canvas ────────────────────────────────────────────────── -->
+        <div class="relative min-w-0 flex-1 overflow-hidden bg-slate-50/40" style={`background-image: radial-gradient(circle, #dde3eb 1px, transparent 1.2px); background-size: 20px 20px; background-position: ${VIEW.x}px ${VIEW.y}px;`}>
+          <div class="absolute left-0 top-0 origin-top-left" style={`transform: translate(${VIEW.x}px, ${VIEW.y}px) scale(${ZOOM}); width:564px; height:576px;`}>
+            <svg width="564" height="576" viewBox="0 0 564 576" class="absolute inset-0 overflow-visible pointer-events-none" aria-hidden="true">
+              {lines.map((d) => <path d={d} fill="none" stroke="#cbd5e1" stroke-width="1.25" />)}
+            </svg>
+
+            {pills.map((p) => (
+              <span class={`absolute rounded-full px-2 py-px text-[11px] font-medium leading-[18px] ring-1 ring-inset ${p.cls}`} style={`left:${p.x}px; top:${p.y}px; transform: translate(-50%, -50%);`}>{p.label}</span>
+            ))}
+            {ends.map(([x, y]) => (
+              <span class="absolute flex size-[22px] items-center justify-center rounded-full border border-slate-200 bg-white text-slate-400" style={`left:${x}px; top:${y}px; transform: translate(-50%, -50%);`}><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={plusIcon}></svg></span>
+            ))}
+
+            {cards.map((c) => (
+              <div class={`ad-card absolute transition-opacity duration-300 ${c.reached ? '' : 'ad-unreached'}`} style={`left:${c.left}px; top:${c.top}px; width:264px; height:56px;`}>
+                <div class="relative flex h-full w-full items-center gap-2.5 rounded-xl border border-slate-200/90 bg-white pl-2.5 pr-8 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
+                  {'brand' in c.tile ? (
+                    c.tile.brand === 'slack'
+                      ? <div class="w-7 h-7 rounded-md ring-1 ring-slate-200 bg-white inline-flex items-center justify-center shrink-0"><svg viewBox="0 0 256 256" role="img" aria-label="slack" class="w-4 h-4" set:html={RAW_BRAND_LOGOS.slack.inner}></svg></div>
+                      : <div class="w-7 h-7 rounded-md ring-1 ring-slate-200 bg-white inline-flex items-center justify-center shrink-0"><svg viewBox="0 0 24 24" role="img" aria-label="hubspot" class="w-4 h-4" fill={BRAND_ICON.hubspot.hex}><path d={BRAND_ICON.hubspot.path}/></svg></div>
+                  ) : (
+                    <span class={`inline-flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset ${c.tile.tone}`}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={c.tile.icon}></svg></span>
+                  )}
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-1.5">
+                      <span class="truncate text-[13px] font-medium leading-5 text-slate-900">{c.title}</span>
+                      {c.result && <span class="ad-result inline-flex h-4 shrink-0 items-center gap-1 rounded px-1.5 text-[10px] font-medium ring-1 ring-inset bg-emerald-50 text-emerald-700 ring-emerald-200">{c.result}</span>}
+                    </div>
+                    <div class="truncate text-[11.5px] leading-4 text-slate-400">{c.kicker}<span class="text-slate-500"> · {c.summary}</span></div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <!-- Panel top-center: the finished test's banner -->
+          <div class="ad-banner absolute left-1/2 top-[15px] z-[5] -translate-x-1/2">
+            <div class="flex items-center gap-2 rounded-md border border-sky-200 bg-sky-50 px-3 py-1.5 text-[12px] text-sky-800 shadow-sm">
+              Showing the path the test took.
+              <span class="font-medium text-sky-700">Clear</span>
+            </div>
+          </div>
+
+          <!-- Panel bottom-left: zoom controls -->
+          <div class="absolute left-3 bottom-3 z-[5] flex items-center gap-0.5 rounded-lg border border-slate-200 bg-white/95 p-0.5 shadow-sm">
+            <span class="inline-flex size-7 items-center justify-center rounded-md text-slate-500"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={minusIcon}></svg></span>
+            <span class="inline-flex h-7 min-w-11 items-center justify-center rounded-md px-1 text-[11.5px] tabular-nums text-slate-600">{Math.round(ZOOM * 100)}%</span>
+            <span class="inline-flex size-7 items-center justify-center rounded-md text-slate-500"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={plusIcon}></svg></span>
+            <span class="mx-0.5 h-4 w-px bg-slate-200"></span>
+            <span class="inline-flex size-7 items-center justify-center rounded-md text-slate-500"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={maximizeIcon}></svg></span>
+          </div>
+        </div>
+
+        <!-- ── FlowPanel (bare) > InsightsPanel (mode "test") ─────────── -->
+        <div class="ad-panel w-[400px] shrink-0 border-l border-slate-200 bg-white flex-col" aria-hidden="true">
+          <div class="h-11 px-3 flex items-center border-b border-slate-200 shrink-0">
+            <span class="text-[12.5px] font-medium text-slate-900">Test run</span>
+            <span class="ad-close ml-auto h-7 w-7 rounded-md inline-flex items-center justify-center text-slate-400 transition-colors [&.is-hover]:text-slate-700 [&.is-hover]:bg-slate-100"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" set:html={xIcon}></svg></span>
+          </div>
+          <div class="flex-1 min-h-0 overflow-hidden p-3 space-y-2">
+            <div class="space-y-3">
+              <p class="text-[11px] text-slate-400 leading-relaxed">Dry run: no messages are sent and no records change. Edit the sample event your automation receives, then run to see the path it takes and what each action would send.</p>
+              <div>
+                <div class="mb-1 flex items-center justify-between">
+                  <span class="text-[11px] font-medium text-slate-600">Sample event data</span>
+                  <span class="text-[11px] text-sky-600">Reset to sample</span>
+                </div>
+                <pre class="w-full h-[150px] overflow-hidden rounded-md border border-slate-200 bg-white px-2 py-1.5 text-[11.5px] leading-normal font-mono text-slate-800 whitespace-pre resize-y">{sample}</pre>
+                <p class="mt-1 text-[10.5px] text-slate-400">Conditions branch on these fields, so editing them changes which actions run.</p>
+              </div>
+              <div>
+                <div class="mb-1 text-[11px] font-medium text-slate-600">Steps to run <span class="text-slate-400">({steps.length}/{steps.length})</span></div>
+                <div class="space-y-1">
+                  {steps.map((s) => (
+                    <div class="w-full flex items-center gap-2 rounded-md border border-slate-200 px-2 py-1.5 text-left">
+                      <span class="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-sky-600 text-white"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={checkIcon}></svg></span>
+                      <span class="text-[12px] text-slate-700">{s}</span>
+                    </div>
+                  ))}
+                </div>
+                <p class="mt-1 text-[10.5px] text-slate-400">Turn a step off to skip it in this test. Conditions still decide which steps are reached.</p>
+              </div>
+              <span class="ad-run h-8 w-full rounded-md bg-sky-600 text-white text-[12px] font-medium inline-flex items-center justify-center gap-1.5 transition-colors [&.is-hover]:bg-sky-700 [&.is-pressed]:bg-sky-700">
+                <span class="ad-run-idle inline-flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" set:html={playIcon}></svg>Run test</span>
+                <span class="ad-run-busy inline-flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" set:html={loaderIcon}></svg>Running…</span>
+              </span>
+              <div class="border-t border-slate-200 pt-3 space-y-2">
+                <p class="ad-res-idle text-[12px] text-slate-500">Edit the sample event, then Run test.</p>
+                <div class="ad-res-busy flex items-center gap-2 text-[12px] text-slate-400"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="animate-spin" set:html={loaderIcon}></svg> Running…</div>
+                <div class="ad-res-done space-y-2">
+                  {trace.map((r) => (
+                    <div class="rounded-md border border-slate-200 px-2.5 py-1.5">
+                      <div class="flex items-center gap-1.5">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-emerald-500 shrink-0" set:html={checkCircleIcon}></svg>
+                        <span class="text-[11.5px] font-medium text-slate-700">{r.label}</span>
+                        {r.kind === 'condition' && <span class="ml-auto text-[10.5px] font-medium text-slate-400">→ yes</span>}
+                      </div>
+                      {r.sub && <div class="mt-0.5 text-[11px] text-slate-400">{r.sub}</div>}
+                      {r.preview && (
+                        <div class="mt-1 space-y-0.5">
+                          {r.preview.map(([k, v]) => (
+                            <div class="text-[10.5px] text-slate-500"><span class="text-slate-400">{k}:</span> <span class="font-mono">{v}</span></div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <DemoCursor />
+    </div>
+    </AppShellMock>
+    </div>
+  </div>
+
+  <style>
+    /* Test opens the panel beside the canvas, which narrows to make room; the
+       panel fades in over 120ms. */
+    .ad-testbtn{transition:background-color .15s,border-color .15s,color .15s;}
+    .ad-builder.is-test .ad-testbtn{border-color:#7dd3fc;background:#f0f9ff;color:#0369a1;}
+    .ad-panel{display:none;}
+    .ad-builder.is-test .ad-panel{display:flex;animation:ad-panel-in .12s ease-out;}
+    @keyframes ad-panel-in{from{opacity:0;}to{opacity:1;}}
+    /* Run test: the button and the result area show Running…, then the trace. */
+    .ad-run-busy,.ad-res-busy,.ad-res-done{display:none;}
+    .ad-builder.is-running .ad-run{opacity:.6;}
+    .ad-builder.is-running .ad-run-idle{display:none;}
+    .ad-builder.is-running .ad-run-busy{display:inline-flex;}
+    .ad-builder.is-running .ad-res-idle{display:none;}
+    .ad-builder.is-running .ad-res-busy{display:flex;}
+    .ad-builder.is-done .ad-res-idle{display:none;}
+    .ad-builder.is-done .ad-res-done{display:block;}
+    /* The finished run on the canvas: the banner, a result on each step it
+       reached, everything else faded back. */
+    .ad-result,.ad-banner{display:none;}
+    .ad-builder.is-done.is-test .ad-result{display:inline-flex;}
+    .ad-builder.is-done.is-test .ad-banner{display:block;}
+    .ad-builder.is-done.is-test .ad-unreached{opacity:.4;}
+    /* Reduced motion: hold the finished test still. */
+    .ad-builder.is-static .ad-panel{display:flex;animation:none;}
+    .ad-builder.is-static .ad-testbtn{border-color:#7dd3fc;background:#f0f9ff;color:#0369a1;}
+    .ad-builder.is-static .ad-res-idle{display:none;}
+    .ad-builder.is-static .ad-res-done{display:block;}
+    .ad-builder.is-static .ad-result{display:inline-flex;}
+    .ad-builder.is-static .ad-banner{display:block;}
+    .ad-builder.is-static .ad-unreached{opacity:.4;}
+  </style>
+
+  <script>
+    import { playCursor } from '../lib/cursor';
+    // Scale-to-fit (1536px window at lg+, where the shell shows; below that
+    // the shell hides itself and the left 860px of the builder show, like the
+    // hero mock does) + click Test to restart the run from zero.
+    const DESIGN = 1536;
+    const MOBILE_VISIBLE = 860;
+    function fit(screen: HTMLElement) {
+      const box = screen.parentElement as HTMLElement | null;
+      if (!box) return;
+      const visible = window.innerWidth >= 1024 ? DESIGN : MOBILE_VISIBLE;
+      const s = box.clientWidth / visible;
+      screen.style.transform = `scale(${s})`;
+      box.style.height = `${screen.offsetHeight * s}px`;
+    }
+    document.querySelectorAll<HTMLElement>('.ad-screen').forEach((screen) => {
+      const run = () => fit(screen);
+      run();
+      requestAnimationFrame(run);
+      if (screen.parentElement) {
+        new ResizeObserver(() => requestAnimationFrame(run)).observe(screen.parentElement);
+      }
+      window.addEventListener('load', run);
+      window.addEventListener('resize', run);
+    });
+    // Every waypoint is a real control, measured live: Test in the header,
+    // Run test and the close button inside the panel.
+    document.querySelectorAll<HTMLElement>('[data-demo="ad"]').forEach((root) => {
+      const player = playCursor(root, {
+        loop: 15000,
+        steps: [
+          { at: 0, x: 46, y: 62 },
+          { at: 1500, el: '.ad-testbtn', ox: 0.5, oy: 0.55, hover: '.ad-testbtn' },
+          { at: 1640, press: true, target: '.ad-testbtn', add: ['is-test'] },
+          { at: 3600, el: '.ad-run', ox: 0.5, oy: 0.55, hover: '.ad-run' },
+          { at: 3740, press: true, target: '.ad-run', add: ['is-running'] },
+          { at: 5300, add: ['is-done'], remove: ['is-running'] },
+          { at: 7400, el: '.ad-res-done', ox: 0.7, oy: 0.35 },
+          { at: 11600, el: '.ad-close', ox: 0.5, oy: 0.55, hover: '.ad-close' },
+          { at: 11740, press: true, target: '.ad-close', remove: ['is-test', 'is-done'] },
+          { at: 13600, x: 46, y: 62 },
+        ],
+      });
+      root.querySelector('.ad-testbtn')?.addEventListener('click', () => player.restart());
+    });
+  </script>
+</div>

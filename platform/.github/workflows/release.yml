@@ -1,0 +1,611 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+# One release at a time. Every build writes a buildx cache scope named after
+# the service, so two releases running together export to the same scope and
+# one of them loses the race: the layer blob it is writing disappears under it
+# and the whole build ends on "error writing layer blob: not_found", after the
+# compile succeeded. Tagging twice in quick succession is the ordinary way to
+# hit that, and it reads as a broken build rather than a collision.
+#
+# Not cancel-in-progress: a release that is half-way through pushing images is
+# the last thing that should be interrupted. The second tag waits its turn.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/pegasusbound
+
+jobs:
+  validate-tag:
+    name: Validate Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      major: ${{ steps.version.outputs.major }}
+      minor: ${{ steps.version.outputs.minor }}
+    steps:
+      - name: Extract version
+        id: version
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "major=$(echo "$VERSION" | cut -d. -f1)" >> $GITHUB_OUTPUT
+          echo "minor=$(echo "$VERSION" | cut -d. -f1-2)" >> $GITHUB_OUTPUT
+          echo "Release version: ${VERSION}"
+
+  # Go services: the Dockerfiles build on $BUILDPLATFORM and cross-compile to
+  # each target arch, so one amd64 runner produces both platforms without QEMU.
+  build-go:
+    name: Build ${{ matrix.service }}
+    needs: validate-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [backend, consumer, worker, forms, updater, cli]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.service }}.Dockerfile
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            BUILT_AT=${{ github.event.head_commit.timestamp }}
+            POSTHOG_CLI_PROJECT_ID=${{ vars.POSTHOG_CLI_PROJECT_ID }}
+            POSTHOG_CLI_HOST=${{ vars.POSTHOG_CLI_HOST }}
+          # Only the forms image mounts this: it builds the form page app and
+          # uploads its source maps the way the dashboard image does.
+          secrets: |
+            posthog_cli_api_key=${{ secrets.POSTHOG_CLI_API_KEY }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.ref_name }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:v${{ needs.validate-tag.outputs.minor }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:v${{ needs.validate-tag.outputs.major }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:prod
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # Frontends (web dashboard, admin panel): the pnpm build runs once on the
+  # build platform and its static output is served from nginx, so a single
+  # buildx build produces both arches without a per-arch rebuild.
+  build-frontend:
+    name: Build ${{ matrix.service }}
+    needs: validate-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [web, admin]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          file: ./${{ matrix.service }}/Dockerfile
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            SENTRY_ORG=${{ vars.SENTRY_ORG }}
+            SENTRY_PROJECT=${{ matrix.service == 'admin' && vars.SENTRY_PROJECT_ADMIN || vars.SENTRY_PROJECT_WEB }}
+            POSTHOG_CLI_PROJECT_ID=${{ vars.POSTHOG_CLI_PROJECT_ID }}
+            POSTHOG_CLI_HOST=${{ vars.POSTHOG_CLI_HOST }}
+          # Source maps are uploaded only when a backend is fully configured on
+          # this repository. A fork has neither set, no upload runs, and the
+          # image is byte-identical to one built with no error-tracking account
+          # at all.
+          secrets: |
+            sentry_auth_token=${{ secrets.SENTRY_AUTH_TOKEN }}
+            posthog_cli_api_key=${{ secrets.POSTHOG_CLI_API_KEY }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.ref_name }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:v${{ needs.validate-tag.outputs.minor }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:v${{ needs.validate-tag.outputs.major }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:prod
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # Everything that cannot cross-compile: Rust (tracking), Elixir (realtime),
+  # and the Kafka variants of the bus-facing Go services, which link librdkafka
+  # through cgo. An emulated arm64 build under QEMU runs for an hour or more, so
+  # build each arch on a native runner and merge the digests into one manifest
+  # (the Docker-documented multi-runner pattern).
+  #
+  # The Kafka variants publish under the same image names with a -kafka tag
+  # suffix, so an operator on Kafka pins ...:prod-kafka and gets the same
+  # release built with EVENTBUS_PROVIDER=kafka available.
+  build-native:
+    name: Build ${{ matrix.target.service }}${{ matrix.target.suffix }} (${{ matrix.platform }})
+    needs: validate-tag
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { service: tracking, suffix: "", args: "" }
+          - { service: tracking, suffix: "-kafka", args: "CARGO_FEATURES=kafka" }
+          - { service: realtime, suffix: "", args: "" }
+          - { service: backend, suffix: "-kafka", args: "GO_TAGS=kafka" }
+          - { service: consumer, suffix: "-kafka", args: "GO_TAGS=kafka" }
+          - { service: worker, suffix: "-kafka", args: "GO_TAGS=kafka" }
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # `key` is the per-variant identifier: the image name plus the tag suffix,
+      # so a Kafka build never shares a cache scope or a digest artifact with
+      # the plain build of the same service.
+      - name: Prepare identifiers
+        id: prep
+        run: |
+          echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+          echo "key=${SERVICE}${SUFFIX}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          SERVICE: ${{ matrix.target.service }}
+          SUFFIX: ${{ matrix.target.suffix }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.target.service == 'tracking' && './tracking' || '.' }}
+          file: ${{ matrix.target.service == 'tracking' && './tracking/Dockerfile' || format('deploy/docker/{0}.Dockerfile', matrix.target.service) }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            ${{ matrix.target.args }}
+          cache-from: type=gha,scope=${{ steps.prep.outputs.key }}-${{ steps.prep.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=${{ steps.prep.outputs.key }}-${{ steps.prep.outputs.pair }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.prep.outputs.key }}-${{ steps.prep.outputs.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-native:
+    name: Merge ${{ matrix.target.service }}${{ matrix.target.suffix }} manifest
+    needs: [validate-tag, build-native]
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { service: tracking, suffix: "" }
+          - { service: tracking, suffix: "-kafka" }
+          - { service: realtime, suffix: "" }
+          - { service: backend, suffix: "-kafka" }
+          - { service: consumer, suffix: "-kafka" }
+          - { service: worker, suffix: "-kafka" }
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.target.service }}${{ matrix.target.suffix }}-linux-*
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}:${{ github.ref_name }}${{ matrix.target.suffix }} \
+            -t ${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}:v${{ needs.validate-tag.outputs.minor }}${{ matrix.target.suffix }} \
+            -t ${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}:v${{ needs.validate-tag.outputs.major }}${{ matrix.target.suffix }} \
+            -t ${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}:prod${{ matrix.target.suffix }} \
+            $(printf '${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}@sha256:%s ' *)
+
+  # The `pegasusbound` CLI is a plain static binary, so it cross-compiles for every
+  # platform on one runner.
+  #
+  # Assets are named WITHOUT the version, so
+  # releases/latest/download/pegasusbound_linux_amd64.tar.gz always resolves. That is
+  # what lets the install script find the newest build with no GitHub API call,
+  # which matters because the unauthenticated API is rate limited and a curl
+  # installer that fails on a busy CI runner is not an installer.
+  build-cli:
+    name: Build CLI
+    needs: validate-tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Cross-compile and package
+        env:
+          VERSION: ${{ github.ref_name }}
+          COMMIT: ${{ github.sha }}
+          BUILT_AT: ${{ github.event.head_commit.timestamp }}
+        run: |
+          set -euo pipefail
+          ./scripts/build-cli.sh dist
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: pegasusbound-cli
+          path: dist/
+          retention-days: 1
+
+  # GHCR creates a package private and does not inherit the repository's
+  # visibility, and there is no API to change it, so a green build proves
+  # nothing about whether a stranger can pull what it published. Releases
+  # v0.1.0 to v0.4.0 all shipped an installer that could not pull one byte
+  # (#371). This is the only step here that talks to the registry the way an
+  # operator does: no login, no credentials, no `packages` permission.
+  #
+  # It gates the release rather than trailing it, because install.sh resolves
+  # its default version from the newest GitHub Release. Failing before the
+  # release exists is what keeps an unpullable build from becoming the version
+  # every `curl | sh` picks up. Fix the visibility, then re-run this job; the
+  # images and their digests are untouched by it.
+  verify-public:
+    name: Verify images are publicly pullable
+    needs: [validate-tag, build-go, build-frontend, merge-native]
+    runs-on: ubuntu-latest
+    # contents: read is what checkout needs. The absence of `packages` is the
+    # point: this job must not be able to see a private image.
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pull-test every image anonymously
+        env:
+          TAG: ${{ github.ref_name }}
+        run: ./scripts/check-images-public.sh --prefix "$IMAGE_PREFIX" --tag "$TAG"
+
+  create-release:
+    name: Create GitHub Release
+    needs: [validate-tag, build-go, build-frontend, merge-native, build-cli, verify-public]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download the CLI binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: pegasusbound-cli
+          path: /tmp/cli
+
+      # The installer verifies what it pulled against this file, so it is what
+      # makes "curl | sh" checkable after the fact rather than only before it.
+      # One line per service, because the thing that reads it is a POSIX shell.
+      # Digests are read anonymously, from the same view the operator who
+      # checks them has. Reading them with a token that can see private
+      # packages is what let four releases publish a manifest for images
+      # nobody else could fetch.
+      - name: Publish the image manifest
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ./scripts/check-images-public.sh --prefix "$IMAGE_PREFIX" --tag "$TAG" \
+            backend consumer worker forms updater web admin tracking realtime \
+            | grep -E '^[a-z]+[[:space:]]+sha256:' > /tmp/digests.tsv
+          {
+            printf '{\n'
+            printf '  "tag": "%s",\n' "$TAG"
+            printf '  "registry": "%s",\n' "$IMAGE_PREFIX"
+            printf '  "images": {\n'
+            first=1
+            while IFS=$'\t' read -r svc digest; do
+              [ "$first" = 1 ] || printf ',\n'
+              first=0
+              printf '    "%s": "%s"' "$svc" "$digest"
+            done < /tmp/digests.tsv
+            printf '\n  }\n}\n'
+          } > /tmp/images.json
+          cat /tmp/images.json
+          # Nine services in, nine digests out, or the manifest is incomplete
+          # and the installer would silently skip whatever is missing.
+          [ "$(wc -l < /tmp/digests.tsv)" -eq 9 ] || {
+            echo "::error::expected 9 image digests, got $(wc -l < /tmp/digests.tsv)"; exit 1; }
+
+      - name: Generate release notes
+        env:
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          .github/scripts/release-notes.sh "$TAG" > /tmp/changelog.md
+          cat /tmp/changelog.md
+
+      - name: Assemble release body
+        run: |
+          {
+            cat /tmp/changelog.md
+            cat <<'EOF'
+
+          ## Install
+
+          ```
+          curl -fsSL https://pegasusbound.com/install.sh | sh -s -- --version ${{ github.ref_name }}
+          ```
+
+          Add `--wizard` to be asked where each store lives, what is kept and
+          for how long, and how it is backed up.
+
+          ## The pegasusbound CLI
+
+          ```
+          curl -fsSL https://pegasusbound.com/cli.sh | sh          # macOS, Linux
+          irm https://pegasusbound.com/cli.ps1 | iex               # Windows
+          brew install pegasusbound/tap/pegasusbound                    # Homebrew
+          scoop install pegasusbound                               # Scoop
+          ```
+
+          Or take an archive below and unpack it yourself; `checksums.txt`
+          verifies every one of them. Already installed? `pegasusbound upgrade`.
+
+          `images.json` below lists the manifest digest of every image in this
+          release. The installer checks what it pulled against it, and you can
+          too:
+
+          ```
+          docker image inspect ${{ env.IMAGE_PREFIX }}/backend:${{ github.ref_name }} --format '{{index .RepoDigests 0}}'
+          ```
+
+          ## Docker Images
+
+          All images are available at `ghcr.io/${{ github.repository_owner }}/pegasusbound`:
+
+          | Service | Image |
+          |---------|-------|
+          | Backend | `${{ env.IMAGE_PREFIX }}/backend:${{ github.ref_name }}` |
+          | Consumer | `${{ env.IMAGE_PREFIX }}/consumer:${{ github.ref_name }}` |
+          | Worker | `${{ env.IMAGE_PREFIX }}/worker:${{ github.ref_name }}` |
+          | Tracking | `${{ env.IMAGE_PREFIX }}/tracking:${{ github.ref_name }}` |
+          | Realtime | `${{ env.IMAGE_PREFIX }}/realtime:${{ github.ref_name }}` |
+          | Dashboard (web) | `${{ env.IMAGE_PREFIX }}/web:${{ github.ref_name }}` |
+          | Admin | `${{ env.IMAGE_PREFIX }}/admin:${{ github.ref_name }}` |
+          | Forms | `${{ env.IMAGE_PREFIX }}/forms:${{ github.ref_name }}` |
+          | Updater | `${{ env.IMAGE_PREFIX }}/updater:${{ github.ref_name }}` |
+          | CLI | `${{ env.IMAGE_PREFIX }}/cli:${{ github.ref_name }}` |
+
+          ## Deployment
+
+          This release will be automatically deployed to production.
+          EOF
+          } > /tmp/release-body.md
+
+      # The formula and manifest are generated with the archives, so their
+      # checksums can never drift from what they describe. Pushing them is
+      # skipped, loudly, when the tap token is not configured: a release must
+      # not fail because a downstream package repo is not set up yet.
+      - name: Publish the Homebrew formula and Scoop manifest
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAP_TOKEN:-}" ]; then
+            echo "HOMEBREW_TAP_TOKEN is not set; skipping the tap push."
+            echo "The formula and manifest are still attached to the release."
+            exit 0
+          fi
+          # A prerelease must never become the default `brew install`.
+          case "$TAG" in
+            *-*) echo "$TAG is a prerelease; not updating the taps."; exit 0 ;;
+          esac
+          git config --global user.name "pegasusbound-release"
+          git config --global user.email "release@pegasusbound.com"
+          git clone --depth 1 \
+            "https://x-access-token:${TAP_TOKEN}@github.com/pegasusbound/homebrew-tap.git" /tmp/tap
+          mkdir -p /tmp/tap/Formula /tmp/tap/bucket
+          cp /tmp/cli/pegasusbound.rb /tmp/tap/Formula/pegasusbound.rb
+          cp /tmp/cli/pegasusbound.json /tmp/tap/bucket/pegasusbound.json
+          cd /tmp/tap
+          git add Formula/pegasusbound.rb bucket/pegasusbound.json
+          if git diff --cached --quiet; then
+            echo "the tap already describes $TAG"
+          else
+            git commit -m "pegasusbound $TAG"
+            git push
+            echo "pushed pegasusbound $TAG to the tap"
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body_path: /tmp/release-body.md
+          files: |
+            /tmp/images.json
+            /tmp/cli/*
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+
+  pages-targets:
+    name: Configure Pages release deployments
+    needs: create-release
+    if: ${{ vars.CLOUDFLARE_PAGES_DEPLOY_ENABLED == 'true' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Validate deployment targets
+        id: targets
+        env:
+          CLOUDFLARE_PAGES_PROJECTS: ${{ vars.CLOUDFLARE_PAGES_PROJECTS }}
+          CLOUDFLARE_PAGES_PROJECT_NAME: ${{ vars.CLOUDFLARE_PAGES_PROJECT_NAME }}
+        run: node .github/scripts/pages-projects.mjs
+
+  deploy-pages:
+    name: Deploy ${{ matrix.app }} to Pages (${{ matrix.project }})
+    needs: pages-targets
+    if: ${{ needs.pages-targets.result == 'success' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.pages-targets.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    environment: ${{ matrix.environment }}
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      CLOUDFLARE_PAGES_PROJECT_NAME: ${{ matrix.project }}
+      PAGES_APP: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Load existing Pages production configuration
+        id: pages-config
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_PAGES_PROJECT_NAME; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Set $name before enabling Cloudflare Pages release deployments."
+              exit 1
+            fi
+          done
+          curl --fail --silent --show-error \
+            --header "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/pages/projects/$CLOUDFLARE_PAGES_PROJECT_NAME" \
+            | node .github/scripts/pages-production-config.mjs
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.9.0"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: ${{ matrix.directory }}/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: ${{ matrix.directory }}
+        run: pnpm install --frozen-lockfile
+
+      - name: Build production frontend
+        working-directory: ${{ matrix.directory }}
+        env:
+          VITE_SENTRY_RELEASE: ${{ github.ref_name }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars[matrix.sentry_project_var] }}
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          POSTHOG_CLI_PROJECT_ID: ${{ vars.POSTHOG_CLI_PROJECT_ID }}
+          POSTHOG_CLI_HOST: ${{ vars.POSTHOG_CLI_HOST }}
+          POSTHOG_CLI_API_KEY: ${{ secrets.POSTHOG_CLI_API_KEY }}
+          BUILD_SCRIPT: ${{ matrix.build_script }}
+        run: pnpm run "$BUILD_SCRIPT"
+
+      - name: Deploy tagged frontend to production
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_PAGES_PRODUCTION_BRANCH: ${{ steps.pages-config.outputs.production_branch }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          WRANGLER_SEND_METRICS: "false"
+          PAGES_OUTPUT_DIR: ${{ matrix.output_dir }}
+        run: |
+          pnpm dlx wrangler@4.45.0 pages deploy "$PAGES_OUTPUT_DIR" \
+            --project-name "$CLOUDFLARE_PAGES_PROJECT_NAME" \
+            --branch "$CLOUDFLARE_PAGES_PRODUCTION_BRANCH" \
+            --commit-hash "$GITHUB_SHA" \
+            --commit-message "$RELEASE_TAG"

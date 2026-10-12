@@ -1,0 +1,30 @@
+---
+title: OpenAPI spec
+description: A machine-readable OpenAPI 3.1 description of the Pegasusbound API.
+---
+
+The full Pegasusbound API is described by a machine-readable OpenAPI 3.1 document:
+
+```
+https://docs.pegasusbound.com/openapi.json
+```
+
+Everything in this reference is generated from the same surface the spec describes, so the document and the docs never drift.
+
+## What you can do with it
+
+- **Generate a client.** Point any OpenAPI generator (openapi-generator, oapi-codegen, openapi-typescript, and friends) at the URL to produce a typed client in your language.
+- **Explore it interactively.** Import the URL into Postman or Insomnia to get a ready-to-call collection with every endpoint, parameter, and schema.
+- **Validate against it.** Use it for contract tests so your integration breaks loudly when an assumption changes.
+
+There are no official SDKs yet, so generating a client from this spec (or calling the API over plain HTTP) is the supported path today.
+
+The realtime WebSocket gateway has its own machine-readable description in [AsyncAPI 3.1](https://docs.pegasusbound.com/asyncapi.json); see the [realtime guide](/api/realtime/).
+
+## Conventions baked into the spec
+
+- The single server is `https://api.pegasusbound.com/v1`. Every path in the spec is relative to that versioned base. See [versioning](/api/).
+- Authentication is an API key sent as a Bearer token (`bearerAuth`). See [authentication](/api/authentication/).
+- List endpoints share a `data` plus `pagination` envelope with an opaque `cursor` token, and errors share a `code` plus `request_id` shape. See the [overview](/api/) and [error codes](/api/error-codes/).
+
+The spec is versioned with the API: a breaking change ships as a new spec under a new version, never as an in-place edit to `v1`.

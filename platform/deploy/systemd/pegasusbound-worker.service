@@ -1,0 +1,25 @@
+[Unit]
+Description=Pegasusbound worker (send and sync executor)
+Documentation=https://docs.pegasusbound.com/development/bare-metal/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pegasusbound
+Group=pegasusbound
+# The worker has its own env file: it never sees the database URL or AUTH_SECRET.
+EnvironmentFile=/etc/pegasusbound/worker.env
+WorkingDirectory=/opt/pegasusbound
+ExecStart=/opt/pegasusbound/bin/worker
+Restart=always
+RestartSec=3
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/pegasusbound
+
+[Install]
+WantedBy=multi-user.target

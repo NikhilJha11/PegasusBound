@@ -1,0 +1,1 @@
+{"name":"brand-tools","private":true,"type":"module","scripts":{"render":"node render-icons.mjs"},"dependencies":{"ffmpeg-static":"^5.2.0","png-to-ico":"^2.1.8","sharp":"^0.34.5"},"devDependencies":{"playwright":"^1.64.0"}}

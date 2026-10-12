@@ -1,0 +1,21 @@
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import type { CRMTaskWrite } from "@/lib/api/models/app/crm/CRMTask";
+import createCRMTask from "@/lib/api/client/app/crm/tasks/createCRMTask";
+import { useLivePatch } from "@/hooks/useLivePatch";
+
+export default function useCreateCRMTask() {
+    const queryClient = useQueryClient();
+    const { pushPatch } = useLivePatch("crm_tasks");
+
+    return useMutation({
+        mutationFn: (data: CRMTaskWrite) => createCRMTask(data),
+        onSuccess: () => {
+            // Broad prefix so the server-driven search list, the summary totals,
+            // and the sidebar overdue indicator all refresh on create.
+            queryClient.invalidateQueries({
+                queryKey: ["crm", "tasks"],
+            })
+            pushPatch({ kind: "task_change" })
+        }
+    })
+}

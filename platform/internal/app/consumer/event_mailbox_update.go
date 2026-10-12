@@ -1,0 +1,24 @@
+package jobs
+
+import (
+	"context"
+
+	"github.com/pegasusbound/pegasusbound/internal/models"
+)
+
+func (s *JobsService) HandleMailboxUpdate(ctx context.Context, e *models.JobEventMailboxUpdate) error {
+	if err := s.MailboxRepository.CreateEntry(
+		ctx,
+		e.UserID,
+		e.EmailID,
+		e.Data,
+	); err != nil { // replaces the data if it already exists
+		if s.dropForDeletedMailbox(ctx, e.UserID, e.EmailID, err) {
+			return nil
+		}
+		CaptureError(e.UserID, e.EmailID, err)
+		return err
+	}
+
+	return nil
+}

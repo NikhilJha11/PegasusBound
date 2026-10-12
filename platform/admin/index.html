@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Admin · Pegasusbound</title>
+
+    <!-- Favicons. SVG for modern browsers; PNG + ICO fallbacks for the rest;
+         apple-touch-icon for the iOS home screen; manifest for installable /
+         Android icons. The ICO and apple/PWA PNGs are generated from the
+         Pegasusbound mark (see admin/public/admin-icon.svg). -->
+    <link rel="icon" type="image/svg+xml" href="/admin-icon.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <meta name="theme-color" content="#0b0b0d" />
+
+    <meta name="apple-mobile-web-app-title" content="Admin · Pegasusbound" />
+    <meta name="robots" content="noindex, nofollow" />
+
+    <!-- Theme before first paint (dark unless light or system was picked), so a
+         reload never flashes the wrong surface.
+         Same key and rules as src/lib/theme.ts. -->
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem("pegasusbound-admin:theme");
+          var dark = t === "system" ? window.matchMedia("(prefers-color-scheme: dark)").matches : t !== "light";
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {}
+      })();
+    </script>
+
+    <!-- Runtime config: the production image overwrites this with values from
+         container env so one build serves any deployment. Empty in dev. Loads
+         before the app module so window.__PEGASUSBOUND_ENV__ is set first. -->
+    <script src="/config.js"></script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

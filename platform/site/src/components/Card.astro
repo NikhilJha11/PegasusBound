@@ -1,0 +1,7 @@
+---
+interface Props { class?: string; padded?: boolean }
+const { class: className = '', padded = true } = Astro.props;
+---
+<div class={`rounded-[12px] bg-white ring-1 ring-[color:var(--border)] ${padded ? 'p-6' : ''} ${className}`} style="box-shadow: var(--shadow-sm);">
+  <slot />
+</div>

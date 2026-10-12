@@ -1,0 +1,35 @@
+// Platform admin permission bits, mirroring internal/models/admin_permission.go.
+// /auth/me serializes the bitmask as a single uint32, so the frontend has to
+// know the bit positions to gate nav and pages the way the backend gates routes.
+//
+// Bits 2, 3 and 15 to 18 are retired (edit/impersonate users, enterprise
+// inquiries, plans, billing). They stay in stored masks and must not be reused.
+
+export const AdminPerm = {
+    ViewUsers: 1 << 0,
+    BanUsers: 1 << 1,
+    ViewWorkers: 1 << 4,
+    ManageWorkers: 1 << 5,
+    ViewWarmupPool: 1 << 6,
+    ManageWarmupBans: 1 << 7,
+    ReviewAppeals: 1 << 8,
+    ViewCampaigns: 1 << 9,
+    StopCampaigns: 1 << 10,
+    ViewAnalytics: 1 << 11,
+    ViewAuditLogs: 1 << 12,
+    ManageRateLimits: 1 << 13,
+    ManageSettings: 1 << 14,
+    GrantAdminAccess: 1 << 19,
+    ManageTesters: 1 << 22,
+    ViewOrganizations: 1 << 20,
+    ManageOrganizations: 1 << 21,
+} as const;
+
+export type AdminPermBit = (typeof AdminPerm)[keyof typeof AdminPerm];
+
+// A payload without the bitmask is an older backend, not a denial: callers
+// treat "unknown" as visible and let the API answer.
+export function hasAdminPerm(mask: number | undefined, perm: number): boolean {
+    if (typeof mask !== "number") return true;
+    return (mask & perm) === perm;
+}

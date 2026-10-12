@@ -1,0 +1,71 @@
+package cipher
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/encryptedkeys"
+	"github.com/pegasusbound/pegasusbound/internal/observability/errs"
+)
+
+type Cipher struct {
+	plainDEK []byte
+}
+
+func (s *cipherService) Cipher(ctx context.Context, orgID uuid.UUID) (*Cipher, error) {
+	// Cache hit: reuse the decrypted DEK. Any miss or cache error (redis.Nil
+	// on first use of an org's key) falls through to the KMS path — a cache
+	// problem must never block crypto.
+	if key, err := s.getDecryptedKey(ctx, orgID); err == nil && len(key) > 0 {
+		return &Cipher{plainDEK: key}, nil
+	}
+
+	key, err := s.loadOrCreateDEK(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.saveDecryptedKey(ctx, orgID, key); err != nil {
+		errs.CaptureException(err)
+	}
+
+	return &Cipher{
+		plainDEK: key,
+	}, nil
+}
+
+// loadOrCreateDEK returns the organization's stored DEK, creating it on first
+// use. The stored key always wins: a concurrent first use adopts it.
+func (s *cipherService) loadOrCreateDEK(ctx context.Context, orgID uuid.UUID) ([]byte, error) {
+	encDEKB64, err := s.encryptedKeys.Get(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if encDEKB64 != "" {
+		return s.kms.GetDecryptedKey(ctx, encDEKB64)
+	}
+
+	key, encryptedDEK, err := s.kms.GenerateDataKey(ctx)
+	if err != nil {
+		return nil, err
+	}
+	err = s.encryptedKeys.Put(ctx, orgID, encryptedDEK)
+	if err == nil {
+		return key, nil
+	}
+	if !errors.Is(err, encryptedkeys.ErrAlreadyExists) {
+		return nil, err
+	}
+
+	// Another caller stored this organization's DEK first; ours is discarded unused.
+	encDEKB64, err = s.encryptedKeys.Get(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	if encDEKB64 == "" {
+		return nil, fmt.Errorf("cipher: dek for organization %s reported present but not readable", orgID)
+	}
+	return s.kms.GetDecryptedKey(ctx, encDEKB64)
+}

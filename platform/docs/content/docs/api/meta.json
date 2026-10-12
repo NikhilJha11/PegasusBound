@@ -1,0 +1,20 @@
+{
+  "title": "API Reference",
+  "description": "Build on the Pegasusbound API",
+  "root": true,
+  "pages": [
+    "index",
+    "authentication",
+    "sdks",
+    "cli",
+    "oauth",
+    "permissions",
+    "endpoints",
+    "mcp",
+    "agent-tools",
+    "openapi",
+    "reference",
+    "realtime",
+    "error-codes"
+  ]
+}

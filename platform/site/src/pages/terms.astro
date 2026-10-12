@@ -1,0 +1,226 @@
+---
+import Legal from '../layouts/Legal.astro';
+
+const sections = [
+  { id: 'acceptance',         num: '01', title: 'Acceptance of terms' },
+  { id: 'who-we-are',         num: '02', title: 'Who we are' },
+  { id: 'definitions',        num: '03', title: 'Definitions' },
+  { id: 'account',            num: '04', title: 'Your account' },
+  { id: 'use',                num: '05', title: 'Acceptable use' },
+  { id: 'plans',              num: '06', title: 'Plans, billing, refunds' },
+  { id: 'limits',             num: '07', title: 'Usage limits and increase requests' },
+  { id: 'service',            num: '08', title: 'Service availability' },
+  { id: 'data',               num: '09', title: 'Your content and data' },
+  { id: 'ip',                 num: '10', title: 'Intellectual property' },
+  { id: 'third-party',        num: '11', title: 'Third-party services' },
+  { id: 'warranties',         num: '12', title: 'Disclaimers' },
+  { id: 'liability',          num: '13', title: 'Limitation of liability' },
+  { id: 'indemnity',          num: '14', title: 'Indemnification' },
+  { id: 'termination',        num: '15', title: 'Termination' },
+  { id: 'law',                num: '16', title: 'Governing law' },
+  { id: 'changes',            num: '17', title: 'Changes to these terms' },
+  { id: 'contact',            num: '18', title: 'Contact' },
+];
+---
+<Legal
+  title="Terms of Service | Pegasusbound"
+  description="The terms that govern your use of Pegasusbound: acceptable use for cold email sending, billing, account responsibilities, and service limitations."
+  effective="2026-05-27"
+  updated="2026-09-27"
+  sections={sections}
+>
+
+<section id="acceptance" class="scroll-mt-24">
+  <h2>01. Acceptance of terms</h2>
+  <p>
+    These terms of service (the "Terms") govern your access to and use of Pegasusbound, an open-source cold outreach and email warmup platform operated by Mindroot Ltd. By creating an account, accessing the service, or using the platform in any way, you agree to be bound by these Terms. If you do not agree, do not use the service.
+  </p>
+  <p>
+    If you are using the service on behalf of an organisation, you confirm that you have authority to bind that organisation, and "you" in these Terms refers to both you and that organisation.
+  </p>
+</section>
+
+<section id="who-we-are" class="scroll-mt-24">
+  <h2>02. Who we are</h2>
+  <p>
+    Pegasusbound is operated by Mindroot Ltd, a company registered in England and Wales with company number 16543299. Our registered office is at 71-75 Shelton Street, London, England, WC2H 9JQ.
+  </p>
+  <p>
+    You can reach us at <a href="mailto:team@pegasusbound.com">team@pegasusbound.com</a> for any matter arising under these Terms.
+  </p>
+</section>
+
+<section id="definitions" class="scroll-mt-24">
+  <h2>03. Definitions</h2>
+  <ul>
+    <li><strong>Service</strong> means the Pegasusbound platform, including the web application, APIs, workers, and any related software or content we make available.</li>
+    <li><strong>Account</strong> means the credentials and workspace associated with your use of the Service.</li>
+    <li><strong>Customer content</strong> means recipients, message bodies, contact lists, and other data you upload, send, or generate through the Service.</li>
+    <li><strong>Connected mailbox</strong> means any email account you connect to Pegasusbound for sending, syncing, or warmup.</li>
+  </ul>
+</section>
+
+<section id="account" class="scroll-mt-24">
+  <h2>04. Your account</h2>
+  <p>
+    You are responsible for keeping your login credentials confidential and for all activity that happens under your account. You must provide accurate registration information, keep it up to date, and notify us promptly if you suspect unauthorised access.
+  </p>
+  <p>
+    You may not share an account across multiple individuals. Each named user in your workspace must use their own credentials.
+  </p>
+</section>
+
+<section id="use" class="scroll-mt-24">
+  <h2>05. Acceptable use</h2>
+  <p>
+    Pegasusbound is built for legitimate business-to-business cold outreach, mailbox warmup, and reply handling. You agree to use the Service in compliance with all applicable laws, including but not limited to GDPR, CAN-SPAM, CASL, and ePrivacy where they apply to you.
+  </p>
+  <p>You agree not to use the Service to:</p>
+  <ul>
+    <li>Send unlawful, harassing, defamatory, or fraudulent content.</li>
+    <li>Send unsolicited commercial email to consumer addresses or to addresses sourced from purchased or scraped lists without lawful basis.</li>
+    <li>Impersonate any person or organisation, including impersonating Pegasusbound or Mindroot Ltd.</li>
+    <li>Distribute malware, phishing content, sextortion, romance scams, crypto pump-and-dump schemes, multi-level marketing recruitment, or content sexualising minors.</li>
+    <li>Probe, scan, or test the vulnerability of the Service, or attempt to bypass authentication or rate limits.</li>
+    <li>Use the Service to coordinate distributed bulk sending across accounts you do not control, or to circumvent per-mailbox sending budgets, warmup pool safety controls, or suppression rules.</li>
+    <li>Forge warmup verification tokens, abuse the shared warmup pool, or otherwise undermine pool integrity.</li>
+  </ul>
+  <p>
+    We may suspend, throttle, quarantine, or terminate accounts that breach these rules. We may also remove or block any content or sending activity that we reasonably believe violates them.
+  </p>
+</section>
+
+<section id="plans" class="scroll-mt-24">
+  <h2>06. Plans, billing, and refunds</h2>
+  <p>
+    Pegasusbound is sold to businesses for use in their trade or profession, not to consumers. By subscribing or buying credits you confirm that you are acting for business purposes, and you give us your company's legal name and, where it has one, its VAT or other business tax number.
+  </p>
+  <p>
+    Paid plans are billed in advance on a recurring basis through Stripe. Fees, included usage, and billing cadence are shown on the pricing page and reflected in your invoice at the time of purchase.
+  </p>
+  <p>
+    Fees are exclusive of taxes. Where the law requires us to charge VAT, sales tax, or a similar tax, we add it to your invoice. Where we do not, you are responsible for accounting for any tax due in your country, including under the reverse charge.
+  </p>
+  <p>
+    Subscriptions renew automatically until cancelled. You can cancel at any time from the billing area of your workspace, and your plan will remain active until the end of the current billing period. Except where required by law, fees already paid are non-refundable.
+  </p>
+  <p>
+    We may change pricing, plans, or feature inclusions with reasonable notice. Continued use of the Service after the effective date of a price change constitutes acceptance of the new price.
+  </p>
+</section>
+
+<section id="limits" class="scroll-mt-24">
+  <h2>07. Usage limits and increase requests</h2>
+  <p>
+    Every plan operates under usage limits: mailboxes, campaigns, team members, contacts, daily sending volume, and other capacity controls described in the workspace's billing area. Where marketing language describes a resource as "unlimited," that means there is no plan-tier cap, but a product-wide hard ceiling still applies. Hard ceilings exist to protect shared infrastructure, deliverability for other customers, and our compliance with mailbox-provider policies, and are necessary even on premium and enterprise tiers.
+  </p>
+  <p>
+    You may request an increase to any limit through the in-app limit-request form in your workspace settings. Each request is reviewed by our team. We may approve, partially approve, decline, or defer any request <strong>at our sole discretion</strong>, with or without further explanation, and we are under no obligation to grant any particular increase regardless of plan tier or contractual commitment. Reasons we may decline include, without limitation: insufficient sending reputation, prior abuse signals, deliverability risk to shared pools, fraud-prevention concerns, infrastructure capacity, and compliance considerations.
+  </p>
+  <p>
+    Approved increases take effect when the override is applied to your workspace. We may revoke, reduce, or condition any previously granted increase at any time, including but not limited to circumstances where a workspace's bounce rate, spam-complaint rate, warmup-pool behaviour, or reported abuse signals materially worsen. Such adjustments are operational responses to risk, not modifications to these terms.
+  </p>
+  <p>
+    Nothing in this section creates an entitlement to any particular volume or capacity beyond the limits in effect on your workspace at a given moment. If a hard ceiling materially limits your intended use, contact us at <a href="mailto:team@pegasusbound.com">team@pegasusbound.com</a> before purchasing so we can assess whether the Service is the right fit.
+  </p>
+</section>
+
+<section id="service" class="scroll-mt-24">
+  <h2>08. Service availability and changes</h2>
+  <p>
+    We work hard to keep Pegasusbound available and reliable, but the Service is provided without uptime guarantees beyond what is described in any separate service-level agreement we agree with you in writing.
+  </p>
+  <p>
+    We may add, modify, or discontinue features. If we materially reduce a paid feature you depend on, we will give reasonable notice and offer a prorated refund where appropriate.
+  </p>
+</section>
+
+<section id="data" class="scroll-mt-24">
+  <h2>09. Your content and data</h2>
+  <p>
+    You retain ownership of Customer content. You grant us a limited, non-exclusive licence to host, process, transmit, and display that content solely to operate the Service for you, to enforce these Terms, and to comply with law.
+  </p>
+  <p>
+    For details on what we collect, why, and how it is protected, see our <a href="/privacy/">privacy policy</a>. Sensitive credentials, including OAuth tokens and mailbox passwords, are encrypted at the application layer using envelope encryption.
+  </p>
+</section>
+
+<section id="ip" class="scroll-mt-24">
+  <h2>10. Intellectual property</h2>
+  <p>
+    Pegasusbound and Mindroot Ltd retain all rights in the Service, including the brand, the trademarks, the visual identity, the documentation, and the proprietary parts of the platform. Open-source components are licensed under their respective licences and are not subject to this clause.
+  </p>
+  <p>
+    Nothing in these Terms transfers any of your intellectual property to us, except for the limited operational licence in Section 08.
+  </p>
+</section>
+
+<section id="third-party" class="scroll-mt-24">
+  <h2>11. Third-party services</h2>
+  <p>
+    Pegasusbound integrates with third-party services, including email providers, OAuth identity providers, payment processors such as Stripe, and infrastructure providers. Your use of those third-party services is governed by their own terms, and we are not responsible for their availability, content, or actions.
+  </p>
+</section>
+
+<section id="warranties" class="scroll-mt-24">
+  <h2>12. Disclaimers</h2>
+  <p>
+    Except where prohibited by mandatory law, the Service is provided on an "as is" and "as available" basis without warranties of any kind, whether express or implied, including warranties of merchantability, fitness for a particular purpose, non-infringement, accuracy, or uninterrupted operation.
+  </p>
+  <p>
+    Email deliverability is influenced by many factors outside our control, including the behaviour of recipients, mailbox providers, blocklists, and your own sending practices. We make no guarantee that any specific email will reach a recipient's inbox.
+  </p>
+</section>
+
+<section id="liability" class="scroll-mt-24">
+  <h2>13. Limitation of liability</h2>
+  <p>
+    To the maximum extent permitted by law, neither party will be liable to the other for any indirect, incidental, special, consequential, or punitive damages, or for any loss of profits, revenue, goodwill, or data, even if advised of the possibility of such damages.
+  </p>
+  <p>
+    Each party's total aggregate liability arising out of or relating to these Terms, whether in contract, tort, or otherwise, is limited to the fees you actually paid to Pegasusbound for the Service during the twelve months preceding the event giving rise to the claim.
+  </p>
+  <p>
+    Nothing in these Terms limits liability for fraud, gross negligence, or for any liability that cannot lawfully be limited.
+  </p>
+</section>
+
+<section id="indemnity" class="scroll-mt-24">
+  <h2>14. Indemnification</h2>
+  <p>
+    You agree to defend, indemnify, and hold harmless Mindroot Ltd, its officers, employees, and affiliates from and against any claims, damages, liabilities, and reasonable legal costs arising from your Customer content, your use of the Service in breach of these Terms, or your violation of any law or third-party right.
+  </p>
+</section>
+
+<section id="termination" class="scroll-mt-24">
+  <h2>15. Termination</h2>
+  <p>
+    You may cancel your account at any time from the billing area of your workspace. We may suspend or terminate your access if you breach these Terms, if your use of the Service creates a security or deliverability risk to other users, or if we are required to do so by law.
+  </p>
+  <p>
+    On termination, your right to use the Service ends immediately. We will retain or delete Customer content as described in our <a href="/privacy/">privacy policy</a>.
+  </p>
+</section>
+
+<section id="law" class="scroll-mt-24">
+  <h2>16. Governing law and jurisdiction</h2>
+  <p>
+    These Terms are governed by and construed in accordance with the laws of England and Wales. You and Mindroot Ltd agree to submit to the exclusive jurisdiction of the courts of London, United Kingdom, for any dispute arising out of or relating to these Terms or your use of the Service.
+  </p>
+</section>
+
+<section id="changes" class="scroll-mt-24">
+  <h2>17. Changes to these terms</h2>
+  <p>
+    We may update these Terms from time to time. If we make material changes, we will notify you by email or through the Service before the changes take effect. Your continued use of the Service after the effective date constitutes acceptance of the updated Terms.
+  </p>
+</section>
+
+<section id="contact" class="scroll-mt-24">
+  <h2>18. Contact</h2>
+  <p>
+    Questions or concerns about these Terms can be sent to <a href="mailto:team@pegasusbound.com">team@pegasusbound.com</a> or by post to Mindroot Ltd, 71-75 Shelton Street, London, England, WC2H 9JQ.
+  </p>
+</section>
+
+</Legal>

@@ -1,0 +1,123 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Icon from '../../components/Icon.astro';
+import CTA from '../../components/CTA.astro';
+import SectionIntro from '../../components/page/SectionIntro.astro';
+import Rule from '../../components/page/Rule.astro';
+import Faq from '../../components/page/Faq.astro';
+import BrandMark from '../../components/page/BrandMark.astro';
+import HeroInbox from '../../components/scenes/use-cases/sales/HeroInbox.astro';
+import Rotation from '../../components/scenes/use-cases/sales/Rotation.astro';
+import RepTasks from '../../components/scenes/use-cases/sales/RepTasks.astro';
+import CrmSync from '../../components/scenes/use-cases/sales/CrmSync.astro';
+
+// Behaviour from docs: campaigns (rotation, follow-ups on the same mailbox),
+// contacts-crm (reply follow-up tasks), collaboration (presence), integrations.
+
+const ledger = [
+  ['Whose reputation', 'Shared by everyone on the alias', 'The one rep who sends from it'],
+  ['One complaint', 'Hurts the whole team', 'Stays with that mailbox'],
+  ['What the prospect sees', 'A generic sales address', 'A real person to write back to'],
+  ['When a rep leaves', 'Their threads stay on the alias', 'The mailbox and its threads stay with the company'],
+];
+
+const flow = [
+  { t: 'Rotation picks a rep', d: 'A new contact starts on the mailbox that has been idle longest.' },
+  { t: 'Follow-ups stay with them', d: 'Every later email comes from the same rep, in the same thread.' },
+  { t: 'The reply lands with them', d: 'In their mailbox and in the shared inbox, labelled by what it wants.' },
+  { t: 'A task opens for them', d: 'Due in 24 hours, so no answered email waits.' },
+];
+
+const faq: [string, string][] = [
+  ['How do we share volume across reps without overloading one mailbox?', 'Add every rep’s mailbox to the campaign. Rotation starts each new contact on the mailbox that has been idle longest, and every mailbox stays inside its own daily cap and spacing. A mailbox at its cap simply sits out until tomorrow.'],
+  ['Who answers a reply?', 'The rep whose mailbox wrote to that contact. Their follow-ups come from the same address, the reply lands in the same thread, and a follow-up task opens for them, due in 24 hours.'],
+  ['Can two reps answer the same prospect by mistake?', 'No. The inbox shows when a teammate is reading a thread, and when they are writing a reply, so nobody answers the same person twice.'],
+  ['Does it sync with our CRM?', 'Yes. HubSpot, Salesforce and Pipedrive connect with one sign-in, and HubSpot or Pipedrive can be the source of truth for deals and tasks.'],
+  ['Can one rep’s mailbox hurt the others?', 'No. Reputation is judged per mailbox. A struggling mailbox is slowed down on its own while the rest of the team keeps sending.'],
+];
+---
+<Layout
+  title="Cold Email for Sales Teams: Rep Mailboxes and CRM Sync | Pegasusbound"
+  description="Cold outreach for sales teams: a mailbox per rep, sending shared across the team within each mailbox’s limits, replies back to the rep who wrote, live collaboration and HubSpot, Salesforce or Pipedrive sync."
+>
+  <!-- HERO: centred copy, then the team's shared inbox with presence. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="mx-auto max-w-3xl text-center">
+      <a href="/use-cases/" class="text-[14px] text-slate-500 hover:text-slate-900">Use cases · Sales teams</a>
+      <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">Outreach your whole sales team can share.</h1>
+      <p class="mx-auto mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">Every rep sends from their own mailbox, the volume is shared across the team, and each reply goes back to the person who wrote. Everyone sees who is working on what, live.</p>
+      <div class="mt-9 flex flex-wrap items-center justify-center gap-3">
+        <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">Start free <Icon name="arrowRight" size={14} /></a>
+        <a href="/contact/?topic=sales" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">Talk to us</a>
+      </div>
+    </div>
+    <div class="mt-14 md:mt-16">
+      <HeroInbox />
+    </div>
+    <div class="mt-5 flex flex-wrap items-center justify-center gap-x-8 gap-y-2 text-[14px] text-slate-500">
+      <span class="inline-flex items-center gap-2"><span class="size-2 rounded-full bg-emerald-500"></span>A teammate is reading</span>
+      <span class="inline-flex items-center gap-2"><span class="size-2 rounded-full bg-amber-500"></span>A teammate is writing a reply</span>
+      <span class="inline-flex items-center gap-2"><span class="h-px w-4 bg-slate-400"></span>Sender: the rep each lead hears from</span>
+    </div>
+  </section>
+
+  <!-- ROTATION: a mailbox per rep, and how a new lead picks one. -->
+  <Rule class="mt-20" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1fr_1.1fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="One mailbox per rep." title="A shared sales@ alias carries everyone’s mistakes." text="Put every rep’s mailbox in the campaign instead. Rotation hands each new lead to the mailbox idle longest, and each mailbox stays inside its own cap." />
+        <div class="mt-10 overflow-x-auto">
+          <table class="w-full min-w-[460px] text-left text-[14.5px]">
+            <thead><tr class="border-b border-slate-200 text-[13px] text-slate-400"><th class="w-[30%] py-3 pr-4 font-normal"></th><th class="py-3 pr-4 font-normal">sales@acme.com</th><th class="py-3 font-normal text-slate-900">dana@acme.com</th></tr></thead>
+            <tbody class="divide-y divide-slate-100">
+              {ledger.map(([k, a, b]) => <tr><td class="py-3.5 pr-4 text-slate-500">{k}</td><td class="py-3.5 pr-4 text-slate-400">{a}</td><td class="py-3.5 text-slate-900">{b}</td></tr>)}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <Rotation />
+    </div>
+  </section>
+
+  <!-- REPLIES: the four-step path, then the tasks it leaves for each rep. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="Replies." title="Each reply goes back to the rep who wrote." />
+    <ol class="mt-12 grid gap-8 sm:grid-cols-2 lg:grid-cols-4 lg:gap-6">
+      {flow.map((s, i) => (
+        <li class="border-t border-slate-900 pt-5">
+          <div class="font-mono text-[12px] text-slate-400">{String(i + 1).padStart(2, '0')}</div>
+          <h3 class="mt-2 text-[17px] font-medium text-slate-900">{s.t}</h3>
+          <p class="mt-1.5 text-[15px] leading-[1.55] text-slate-500">{s.d}</p>
+        </li>
+      ))}
+    </ol>
+    <div class="mt-12 md:mt-14">
+      <RepTasks />
+    </div>
+  </section>
+
+  <!-- TOOLS: the CRM and chat the team already lives in. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[1.1fr_0.9fr] lg:gap-16">
+      <div class="lg:order-2">
+        <SectionIntro lead="Your stack." title="Keep the CRM and Slack your team already uses." text="Replies, meetings and deals flow into HubSpot, Salesforce or Pipedrive, and the moments that matter post to the right Slack channel." />
+        <div class="mt-9 flex flex-wrap gap-3">
+          {[['hubspot', 'HubSpot'], ['salesforce', 'Salesforce'], ['pipedrive', 'Pipedrive'], ['slack', 'Slack']].map(([n, l]) => (
+            <span class="inline-flex items-center gap-2.5 rounded-full bg-white py-1.5 pl-1.5 pr-4 text-[14px] text-slate-700 ring-1 ring-slate-200"><BrandMark name={n} size={28} class="rounded-full ring-0" />{l}</span>
+          ))}
+        </div>
+      </div>
+      <div class="lg:order-1">
+        <CrmSync />
+      </div>
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Sales teams, answered." />
+
+  <CTA photo="lake-motion" title="Give every rep a mailbox that sends safely." description="Connect your team’s mailboxes, warm them, and share one campaign across all of them." />
+</Layout>

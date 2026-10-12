@@ -1,0 +1,319 @@
+name: Build and Push
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service to build (all, backend, consumer, worker, forms, updater, tracking, realtime)"
+        required: false
+        default: "all"
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/pegasusbound
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      # JSON consumed as matrix inputs. `go` is a list of service names that
+      # cross-compile both arches on one runner. `native` is a list of
+      # {service, suffix, args} objects that cannot cross-compile, so each arch
+      # builds on a native runner and the digests are merged into one manifest:
+      # Rust and Elixir have no cross-compiler, and the Kafka variants of the Go
+      # services link librdkafka through cgo, which needs a native toolchain.
+      go: ${{ steps.matrix.outputs.go }}
+      native: ${{ steps.matrix.outputs.native }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'push'
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'go.mod'
+              - 'go.sum'
+              - 'internal/**'
+              - 'cmd/backend/**'
+              - 'deploy/docker/backend.Dockerfile'
+            consumer:
+              - 'go.mod'
+              - 'go.sum'
+              - 'internal/**'
+              - 'cmd/consumer/**'
+              - 'deploy/docker/consumer.Dockerfile'
+            worker:
+              - 'go.mod'
+              - 'go.sum'
+              - 'internal/**'
+              - 'cmd/worker/**'
+              - 'deploy/docker/worker.Dockerfile'
+            forms:
+              - 'go.mod'
+              - 'go.sum'
+              - 'internal/**'
+              - 'cmd/forms/**'
+              - 'forms/**'
+              - 'deploy/docker/forms.Dockerfile'
+            updater:
+              - 'go.mod'
+              - 'go.sum'
+              # internal/** and not internal/updater/**: the binary links
+              # internal/version and whatever else it grows, and an image that
+              # silently skips a rebuild is worse than one rebuilt too often.
+              - 'internal/**'
+              - 'cmd/updater/**'
+              - 'deploy/docker/updater.Dockerfile'
+            tracking:
+              - 'tracking/**'
+            realtime:
+              - 'realtime/**'
+              - 'deploy/docker/realtime.Dockerfile'
+      - name: Assemble build matrices
+        id: matrix
+        env:
+          EVENT: ${{ github.event_name }}
+          SELECTED: ${{ github.event.inputs.service }}
+          BACKEND: ${{ steps.filter.outputs.backend }}
+          CONSUMER: ${{ steps.filter.outputs.consumer }}
+          WORKER: ${{ steps.filter.outputs.worker }}
+          FORMS: ${{ steps.filter.outputs.forms }}
+          UPDATER: ${{ steps.filter.outputs.updater }}
+          TRACKING: ${{ steps.filter.outputs.tracking }}
+          REALTIME: ${{ steps.filter.outputs.realtime }}
+          BUILT_AT: ${{ github.event.head_commit.timestamp }}
+        run: |
+          go=""
+          native=""
+          # A service that talks to the event bus gets a second, Kafka-linked
+          # image published as :<tag>-kafka. backend, consumer, worker and
+          # tracking are the four that do; forms and updater never touch it, and
+          # realtime is fed by the others rather than reading the bus itself.
+          add() {
+            case "$1" in
+              backend|consumer|worker)
+                go="$go\"$1\","
+                native="$native{\"service\":\"$1\",\"suffix\":\"-kafka\",\"args\":\"GO_TAGS=kafka\\nBUILT_AT=$BUILT_AT\"},"
+                ;;
+              forms|updater)
+                go="$go\"$1\","
+                ;;
+              tracking)
+                native="$native{\"service\":\"tracking\",\"suffix\":\"\",\"args\":\"\"},"
+                native="$native{\"service\":\"tracking\",\"suffix\":\"-kafka\",\"args\":\"CARGO_FEATURES=kafka\"},"
+                ;;
+              realtime)
+                native="$native{\"service\":\"realtime\",\"suffix\":\"\",\"args\":\"\"},"
+                ;;
+            esac
+          }
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            sel="${SELECTED:-all}"
+            for s in backend consumer worker forms updater tracking realtime; do
+              if [ "$sel" = "all" ] || [ "$sel" = "$s" ]; then add "$s"; fi
+            done
+          else
+            [ "$BACKEND" = "true" ] && add backend
+            [ "$CONSUMER" = "true" ] && add consumer
+            [ "$WORKER" = "true" ] && add worker
+            [ "$FORMS" = "true" ] && add forms
+            [ "$UPDATER" = "true" ] && add updater
+            [ "$TRACKING" = "true" ] && add tracking
+            [ "$REALTIME" = "true" ] && add realtime
+            true
+          fi
+          # printf, not echo: the Go Kafka args carry a literal \n separating two
+          # build-args, and echo expands backslash escapes in some shells, which
+          # would split the value across two lines and break both the JSON and
+          # the single-line $GITHUB_OUTPUT format.
+          printf 'go=[%s]\n' "${go%,}" >> "$GITHUB_OUTPUT"
+          printf 'native=[%s]\n' "${native%,}" >> "$GITHUB_OUTPUT"
+
+  # Go services: the Dockerfiles build on $BUILDPLATFORM and cross-compile to
+  # each target arch, so one amd64 runner produces both platforms without QEMU.
+  build-go:
+    name: Build ${{ matrix.service }}
+    needs: changes
+    if: needs.changes.outputs.go != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.changes.outputs.go) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/${{ matrix.service }}.Dockerfile
+          push: true
+          build-args: |
+            VERSION=dev-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            BUILT_AT=${{ github.event.head_commit.timestamp }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:dev
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # Everything that cannot cross-compile: Rust (tracking), Elixir (realtime),
+  # and the Kafka variants of the Go services, which link librdkafka through
+  # cgo. An emulated arm64 build under QEMU runs for an hour or more, so build
+  # each arch on a native runner and merge the digests into one manifest (the
+  # Docker-documented multi-runner pattern).
+  build-native:
+    name: Build ${{ matrix.target.service }}${{ matrix.target.suffix }} (${{ matrix.platform }})
+    needs: changes
+    if: needs.changes.outputs.native != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.native) }}
+        platform: [linux/amd64, linux/arm64]
+    runs-on: ${{ matrix.platform == 'linux/arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # `key` is the per-variant identifier: the image name plus the tag suffix,
+      # so a Kafka build never shares a cache scope or a digest artifact with
+      # the plain build of the same service.
+      - name: Prepare identifiers
+        id: prep
+        run: |
+          echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+          echo "key=${SERVICE}${SUFFIX}" >> "$GITHUB_OUTPUT"
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          SERVICE: ${{ matrix.target.service }}
+          SUFFIX: ${{ matrix.target.suffix }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.target.service == 'tracking' && './tracking' || '.' }}
+          file: ${{ matrix.target.service == 'tracking' && './tracking/Dockerfile' || format('deploy/docker/{0}.Dockerfile', matrix.target.service) }}
+          platforms: ${{ matrix.platform }}
+          build-args: |
+            VERSION=dev-${{ github.sha }}
+            COMMIT=${{ github.sha }}
+            ${{ matrix.target.args }}
+          cache-from: type=gha,scope=${{ steps.prep.outputs.key }}-${{ steps.prep.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=${{ steps.prep.outputs.key }}-${{ steps.prep.outputs.pair }}
+          outputs: type=image,name=${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.prep.outputs.key }}-${{ steps.prep.outputs.pair }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge-native:
+    name: Merge ${{ matrix.target.service }}${{ matrix.target.suffix }} manifest
+    needs: [changes, build-native]
+    if: needs.changes.outputs.native != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(needs.changes.outputs.native) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.target.service }}${{ matrix.target.suffix }}-linux-*
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create \
+            -t ${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}:${{ github.sha }}${{ matrix.target.suffix }} \
+            -t ${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}:dev${{ matrix.target.suffix }} \
+            $(printf '${{ env.IMAGE_PREFIX }}/${{ matrix.target.service }}@sha256:%s ' *)
+
+  # A package on GHCR is created private and does not inherit the repository's
+  # visibility, and no API can change that: an owner has to flip it by hand.
+  # So a new service image is born unpullable, and the first sign of it would
+  # otherwise be a stranger's failed install (#371).
+  #
+  # This is the early warning: main is where a new image first appears, and
+  # finding out here costs nothing, while finding out at tag time blocks a
+  # release. It only warns, because the fix is not in this repo and nobody can
+  # land a PR that makes main green again.
+  verify-public:
+    name: Warn if images are not publicly pullable
+    needs: [build-go, merge-native]
+    if: always() && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      # Only what this workflow publishes. web, admin and cli are built at
+      # tag time and have no :dev tag, so checking them here would warn about
+      # something no push to main can fix.
+      - name: Pull-test every image anonymously
+        run: |
+          ./scripts/check-images-public.sh --prefix "$IMAGE_PREFIX" --tag dev --warn \
+            backend consumer worker forms updater tracking realtime

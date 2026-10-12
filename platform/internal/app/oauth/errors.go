@@ -1,0 +1,64 @@
+package oauth
+
+import "net/http"
+
+// OAuthError is a standard RFC 6749 / OAuth 2.1 error: a stable machine code plus
+// a human description, rendered as {"error":...,"error_description":...}.
+type OAuthError struct {
+	Code        string `json:"error"`
+	Description string `json:"error_description,omitempty"`
+	HTTPStatus  int    `json:"-"`
+}
+
+func (e *OAuthError) Error() string { return e.Code + ": " + e.Description }
+
+func newOAuthError(status int, code, desc string) *OAuthError {
+	return &OAuthError{Code: code, Description: desc, HTTPStatus: status}
+}
+
+// The error constructors below cover every code the authorize + token endpoints
+// can emit. Status codes follow RFC 6749 §5.2 (invalid_client is 401, the rest
+// of the request errors are 400).
+func errInvalidRequest(desc string) *OAuthError {
+	return newOAuthError(http.StatusBadRequest, "invalid_request", desc)
+}
+func errInvalidClient(desc string) *OAuthError {
+	return newOAuthError(http.StatusUnauthorized, "invalid_client", desc)
+}
+func errInvalidGrant(desc string) *OAuthError {
+	return newOAuthError(http.StatusBadRequest, "invalid_grant", desc)
+}
+func errUnauthorizedClient(desc string) *OAuthError {
+	return newOAuthError(http.StatusBadRequest, "unauthorized_client", desc)
+}
+func errUnsupportedGrantType(desc string) *OAuthError {
+	return newOAuthError(http.StatusBadRequest, "unsupported_grant_type", desc)
+}
+func errInvalidScope(desc string) *OAuthError {
+	return newOAuthError(http.StatusBadRequest, "invalid_scope", desc)
+}
+func errAccessDenied(desc string) *OAuthError {
+	return newOAuthError(http.StatusForbidden, "access_denied", desc)
+}
+
+// errNothingGrantable refuses a consent whose member's role covers none of the requested scopes.
+func errNothingGrantable() *OAuthError {
+	return errAccessDenied("your role in this workspace does not include any of the permissions this app requests")
+}
+func errServer(desc string) *OAuthError {
+	return newOAuthError(http.StatusInternalServerError, "server_error", desc)
+}
+
+// Dynamic Client Registration errors (RFC 7591 §3.2.2).
+func errInvalidRedirectURI(desc string) *OAuthError {
+	return newOAuthError(http.StatusBadRequest, "invalid_redirect_uri", desc)
+}
+func errInvalidClientMetadata(desc string) *OAuthError {
+	return newOAuthError(http.StatusBadRequest, "invalid_client_metadata", desc)
+}
+
+// errTooManyRegistrations throttles the open (unauthenticated) registration
+// endpoint per source IP so it can't be used to bloat the clients table.
+func errTooManyRegistrations() *OAuthError {
+	return newOAuthError(http.StatusTooManyRequests, "temporarily_unavailable", "registration rate limit exceeded, retry later")
+}

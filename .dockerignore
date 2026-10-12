@@ -1,0 +1,12 @@
+**/node_modules
+**/.next
+**/.data
+**/dist
+.env
+**/*.log
+platform/web
+platform/site
+platform/docs
+platform/ios
+platform/admin
+platform/forms

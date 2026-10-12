@@ -1,0 +1,654 @@
+---
+title: Deploying without Docker
+description: Step-by-step instructions for running Pegasusbound as native systemd services on one Linux host, built from source, with no containers anywhere.
+---
+
+The [self-hosting guide](/development/deployment-guide/) assumes Docker Compose. Nothing in Pegasusbound needs a container, though: every service is a single binary or a static build that reads its configuration from environment variables. This page walks through building those artifacts from source and running them under systemd on one Linux host, with nginx in front.
+
+It is longer than the compose route because it does by hand what the compose file does for you: installing the backing services, generating secrets, fanning one set of values out to five processes, and serving two static frontends. Read it once end to end before starting; the [quick reference](#quick-reference) at the bottom is enough the second time.
+
+<Mermaid
+  chart={`
+flowchart LR
+  U["Browser"] --> NG["nginx :443"]
+  NG --> WEB["web + admin (static files)"]
+  NG --> API["backend :8080"]
+  NG --> RT["realtime :4000"]
+  NG --> TRK["tracking :3000"]
+  NG --> FRM["forms :8090"]
+  subgraph HOST["One host, systemd"]
+    API --> PG[("PostgreSQL 16")]
+    API --> BUS{{"NATS JetStream"}}
+    API --> RD[("Redis 7")]
+    BUS --> CONS["consumer"] --> PG
+    TRK --> BUS
+    FRM --> API
+    RT --- RD
+    BUS --> W["worker"]
+  end
+  W --> P["Gmail · Microsoft · SMTP"]
+`}
+/>
+
+## Before you start
+
+| You need | Why |
+|----------|-----|
+| A Linux host with systemd | The units below; Debian 12, Ubuntu 22.04+ and their relatives are known to work |
+| Root or sudo | To install packages, create the service user, and write under `/etc` and `/opt` |
+| PostgreSQL 16, Redis 7, NATS 2.10+ | The backing services. Any packaging works: distro packages, upstream repositories, or a managed instance elsewhere |
+| Go 1.25 | Builds the backend, consumer, worker, `migrate` and `pegasusboundctl` |
+| Rust (stable, 1.93 or newer) | Builds the tracking service |
+| Elixir 1.18 on OTP 27 | Builds the realtime service |
+| Node 22 and pnpm | Builds the dashboard, admin panel and forms app |
+| nginx | Serves the static frontends and terminates TLS for the API, websocket, tracking and forms hosts |
+| Six DNS names | `app`, `admin`, `api`, `ws`, `t` and `forms` under your domain, all pointing at the host |
+
+The toolchains are only needed on the machine that builds. If you would rather not install compilers on the production host, build on another machine of the same architecture and copy `/opt/pegasusbound` over; nothing below is path-dependent beyond the values you put in the env file.
+
+<Callout type="warn" title="Not a development setup">
+For working on Pegasusbound itself use `make dev`, which runs the Go services natively already and only puts Postgres, Redis and NATS in containers. This page is for running the product for other people, which means real secrets, TLS and a mail relay.
+</Callout>
+
+## Install the backing services
+
+<Steps>
+
+<Step>
+
+### PostgreSQL
+
+Install PostgreSQL 16, then create the role and database the backend will own:
+
+```bash
+sudo -u postgres psql <<'SQL'
+CREATE ROLE pegasusbound WITH LOGIN PASSWORD 'choose-a-password';
+CREATE DATABASE pegasusbound OWNER pegasusbound;
+SQL
+```
+
+The migrations create every table and index, so nothing else is required in the database. Migrations apply automatically on every backend boot.
+
+</Step>
+
+<Step>
+
+### Redis
+
+Install Redis 7 and leave the default configuration: localhost only, no password. Redis holds the rate limiter, the decrypted-key cache and the realtime bridge; none of it is durable state, and a restart loses nothing that matters.
+
+If you enable `requirepass`, put the password in every `REDIS` and `REDIS_URL` value below as `redis://:password@127.0.0.1:6379`.
+
+</Step>
+
+<Step>
+
+### NATS with JetStream
+
+NATS is one static binary. Install it from your distribution or [nats.io](https://docs.nats.io/running-a-nats-system/introduction/installation), then run it with JetStream on, a storage directory, and both listeners bound to loopback:
+
+```bash
+sudo useradd --system --home /var/lib/nats --create-home nats
+sudo tee /etc/nats.conf >/dev/null <<'EOF'
+listen: 127.0.0.1:4222
+http: 127.0.0.1:8222
+jetstream { store_dir: /var/lib/nats }
+EOF
+sudo tee /etc/systemd/system/nats.service >/dev/null <<'EOF'
+[Unit]
+Description=NATS server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=nats
+ExecStart=/usr/local/bin/nats-server -c /etc/nats.conf
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload && sudo systemctl enable --now nats
+curl -s http://127.0.0.1:8222/healthz
+```
+
+Two lines matter. `jetstream` is required: without it the backend starts, then fails on its first publish with a message about the stream not existing. `listen: 127.0.0.1` is what keeps the bus private. Everything that goes over NATS is unauthenticated by default, and it carries worker commands (send this mail, sync this mailbox) and tracking events, so a client that can reach port 4222 can issue both. On a single host nothing but the services on that host needs it, and loopback is the whole access control.
+
+Only open it when a worker on another machine has to reach it, and then add authentication and TLS in the same change. See [workers on other machines](#workers-on-other-machines) for the configuration.
+
+</Step>
+
+</Steps>
+
+## Build from source
+
+<Steps>
+
+<Step>
+
+### Get the code and create the layout
+
+```bash
+sudo useradd --system --home /var/lib/pegasusbound --create-home --shell /usr/sbin/nologin pegasusbound
+sudo mkdir -p /opt/pegasusbound/bin /etc/pegasusbound /var/lib/pegasusbound/blobs
+sudo chown -R pegasusbound:pegasusbound /var/lib/pegasusbound
+sudo chmod 0700 /etc/pegasusbound
+sudo install -d -o "$USER" -g "$USER" /opt/pegasusbound/src
+git clone https://github.com/pegasusbound/pegasusbound /opt/pegasusbound/src
+```
+
+The checkout belongs to you, not root: every build below runs as your normal user and writes into `/opt/pegasusbound/src`, and only the final `sudo install` or `sudo cp` of each artifact touches the root-owned `/opt/pegasusbound/bin`, `/opt/pegasusbound/web` and friends. Cloning with `sudo` leaves a root-owned tree that the builds cannot write to.
+
+Checkout a release tag rather than `main` when you want a known version: `git -C /opt/pegasusbound/src checkout vX.Y.Z`. Everything below runs from `/opt/pegasusbound/src`.
+
+</Step>
+
+<Step>
+
+### Go services
+
+Six binaries come out of one module. Static builds, so the production host needs no Go runtime:
+
+```bash
+cd /opt/pegasusbound/src
+export CGO_ENABLED=0
+for cmd in backend forms consumer worker migrate pegasusboundctl; do
+  go build -ldflags="-s -w" -o "out/$cmd" "./cmd/$cmd"
+done
+sudo install -m 0755 out/backend out/forms out/consumer out/worker out/migrate out/pegasusboundctl /opt/pegasusbound/bin/
+sudo ln -sf /opt/pegasusbound/bin/pegasusboundctl /usr/local/bin/pegasusboundctl
+```
+
+The default build has no Kafka support, which is what you want: NATS is the event bus. Add `-tags kafka` (and `CGO_ENABLED=1` with `librdkafka` installed) only if you are pointing at an existing Kafka cluster.
+
+</Step>
+
+<Step>
+
+### Tracking service (Rust)
+
+```bash
+cd /opt/pegasusbound/src/tracking
+cargo build --release
+sudo install -m 0755 target/release/tracking /opt/pegasusbound/bin/tracking
+```
+
+The tracking snippet in `static/` is compiled into the binary, so nothing else needs copying.
+
+</Step>
+
+<Step>
+
+### Realtime service (Elixir)
+
+A mix release bundles the Erlang runtime, so the host does not need Elixir installed once the build is done:
+
+```bash
+cd /opt/pegasusbound/src/realtime
+mix local.hex --force && mix local.rebar --force
+MIX_ENV=prod mix deps.get --only prod
+MIX_ENV=prod mix compile
+MIX_ENV=prod mix release --overwrite
+sudo rm -rf /opt/pegasusbound/realtime
+sudo cp -r _build/prod/rel/realtime /opt/pegasusbound/realtime
+sudo chown -R pegasusbound:pegasusbound /opt/pegasusbound/realtime
+```
+
+Build on a machine with the same libc as the host: a release built on Alpine (musl) does not start on Debian (glibc), and the other way round.
+
+</Step>
+
+<Step>
+
+### Dashboard, admin panel and forms app
+
+All three are static Vite builds. No URL is baked in at build time; the dashboard and admin read `config.js` at runtime (next step), and the forms app is served by the forms binary itself, which looks for it at `forms/dist` under its working directory.
+
+```bash
+cd /opt/pegasusbound/src/web   && pnpm install --frozen-lockfile && pnpm build
+cd /opt/pegasusbound/src/admin && pnpm install --frozen-lockfile && pnpm build
+cd /opt/pegasusbound/src/forms && pnpm install --frozen-lockfile && pnpm build
+sudo rm -rf /opt/pegasusbound/web /opt/pegasusbound/admin /opt/pegasusbound/forms
+sudo cp -r /opt/pegasusbound/src/web/dist   /opt/pegasusbound/web
+sudo cp -r /opt/pegasusbound/src/admin/dist /opt/pegasusbound/admin
+sudo install -d /opt/pegasusbound/forms
+sudo cp -r /opt/pegasusbound/src/forms/dist /opt/pegasusbound/forms/dist
+```
+
+</Step>
+
+<Step>
+
+### Runtime config for the frontends
+
+In the container images an entrypoint renders this file from environment variables. Without containers you write it yourself, once per frontend:
+
+```bash
+sudo tee /opt/pegasusbound/web/config.js >/dev/null <<'EOF'
+window.__PEGASUSBOUND_ENV__ = {
+  API_URL: "https://api.example.com",
+  APP_URL: "https://app.example.com",
+  TURNSTILE_KEY: ""
+};
+EOF
+
+sudo tee /opt/pegasusbound/admin/config.js >/dev/null <<'EOF'
+window.__PEGASUSBOUND_ENV__ = {
+  API_URL: "https://api.example.com",
+  DASHBOARD_URL: "https://app.example.com",
+  ENV_LABEL: "production",
+  TURNSTILE_KEY: ""
+};
+EOF
+sudo chmod -R a+rX /opt/pegasusbound/web /opt/pegasusbound/admin
+```
+
+`TURNSTILE_KEY` is the Cloudflare Turnstile site key and stays empty unless you also set `CAPTCHA_PROVIDER=turnstile` on the backend. The file is read on every page load (nginx serves it with `no-store` below), so changing a URL later never needs a rebuild.
+
+</Step>
+
+</Steps>
+
+## Configure
+
+<Steps>
+
+<Step>
+
+### Generate the secrets
+
+```bash
+AUTH_SECRET=$(openssl rand -base64 32)
+INTERNAL_API_TOKEN=$(openssl rand -hex 24)
+SECRET_KEY_BASE=$(openssl rand -base64 64 | tr -d '\n')
+KMS_LOCAL_MASTER_KEY=$(openssl rand -base64 32)
+CREDENTIALS_ENCRYPTION_KEY=$(openssl rand -hex 32)
+```
+
+<Callout type="warn" title="Back up the last two before you connect a mailbox">
+`KMS_LOCAL_MASTER_KEY` and `CREDENTIALS_ENCRYPTION_KEY` seal every stored credential. Losing them is unrecoverable, and a database backup without them cannot be decrypted.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Write `/etc/pegasusbound/pegasusbound.env`
+
+One file feeds the backend, consumer, tracking and realtime services. Compose maps a few names between services for you (`AUTH_SECRET` to `JWT_SECRET`, `PRIMARY_DB` to `DATABASE_URL`, `REDIS` to `REDIS_URL`); here both spellings sit in the same file with the same value.
+
+```bash
+sudo tee /etc/pegasusbound/pegasusbound.env >/dev/null <<EOF
+# ── Mode ─────────────────────────────────────────────────────────
+APP_ENV=prod
+DEPLOYMENT_MODE=self_hosted
+GIN_MODE=release
+AWS_CONFIG_ENABLED=false
+
+# ── Secrets ──────────────────────────────────────────────────────
+AUTH_SECRET=${AUTH_SECRET}
+JWT_SECRET=${AUTH_SECRET}
+INTERNAL_API_TOKEN=${INTERNAL_API_TOKEN}
+SECRET_KEY_BASE=${SECRET_KEY_BASE}
+KMS_PROVIDER=local
+KMS_LOCAL_MASTER_KEY=${KMS_LOCAL_MASTER_KEY}
+CREDENTIALS_ENCRYPTION_KEY=${CREDENTIALS_ENCRYPTION_KEY}
+
+# ── Backing services ─────────────────────────────────────────────
+PRIMARY_DB=postgres://pegasusbound:choose-a-password@127.0.0.1:5432/pegasusbound?sslmode=disable
+DATABASE_URL=postgres://pegasusbound:choose-a-password@127.0.0.1:5432/pegasusbound?sslmode=disable
+REDIS=redis://127.0.0.1:6379
+REDIS_URL=redis://127.0.0.1:6379
+EVENTBUS_PROVIDER=nats
+NATS_URL=nats://127.0.0.1:4222
+CODEC_PROVIDER=json
+PUBSUB_ENABLED=false
+ENCRYPTED_KEYS_PROVIDER=postgres
+TASKS_PROVIDER=local
+BILLING_PROVIDER=none
+CAPTCHA_PROVIDER=none
+
+# ── Storage ──────────────────────────────────────────────────────
+BLOB_PROVIDER=filesystem
+BLOB_FS_ROOT=/var/lib/pegasusbound/blobs
+BLOB_PUBLIC_BASE_URL=https://api.example.com/public
+
+# ── Where it lives ───────────────────────────────────────────────
+API_HOST=127.0.0.1:8080
+API_PUBLIC_URL=https://api.example.com
+APP_URL=https://app.example.com
+CORS_ALLOW_ORIGINS=https://app.example.com,https://admin.example.com
+WEBSOCKET_URL=wss://ws.example.com/socket/websocket
+TRACKING_DOMAIN=t.example.com
+TRUSTED_PROXIES=127.0.0.1/32
+
+# ── Tracking service ─────────────────────────────────────────────
+TRACKING_HOST=127.0.0.1
+TRACKING_PORT=3000
+BACKEND_INTERNAL_URL=http://127.0.0.1:8080
+TRACKING_TRUSTED_PROXIES=127.0.0.1/32
+
+# ── Realtime service ─────────────────────────────────────────────
+PHX_HOST=ws.example.com
+PORT=4000
+CHECK_ORIGIN=true
+
+# ── GeoIP (the variable is required by the backend; the file is optional) ──
+GEODB_PATH=/var/lib/pegasusbound/GeoLite2-City.mmdb
+
+# ── Platform email (resets, invitations, digests) ────────────────
+MAIL_TRANSPORT=smtp
+SMTP_HOST=smtp.example.com
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_SECURITY=starttls
+EMAIL_NAME=Pegasusbound
+EMAIL_ADDRESS=noreply@example.com
+
+# ── Connecting mailboxes (optional) ──────────────────────────────
+BOX_GOOGLE_CLIENT_ID=
+BOX_GOOGLE_CLIENT_SECRET=
+BOX_OUTLOOK_CLIENT_ID=
+BOX_OUTLOOK_CLIENT_SECRET=
+EOF
+sudo chmod 0600 /etc/pegasusbound/pegasusbound.env
+sudo chown pegasusbound:pegasusbound /etc/pegasusbound/pegasusbound.env
+```
+
+A few lines differ from the compose defaults on purpose:
+
+- `API_HOST`, `TRACKING_HOST` and the realtime `PORT` sit on `127.0.0.1`, so only nginx reaches them. The realtime service binds all interfaces regardless, so keep `4000` closed at the firewall
+- `TRUSTED_PROXIES` and `TRACKING_TRUSTED_PROXIES` name the proxy, so rate limits and audit records see the visitor's address instead of `127.0.0.1`
+- `CHECK_ORIGIN=true` makes the websocket refuse browsers that are not on `PHX_HOST`'s origin list
+- `GEODB_PATH` points at a file that need not exist. The backend refuses to start without the variable, but a missing database only means sessions, audit rows and email opens and clicks carry no city; drop a MaxMind `GeoLite2-City.mmdb` at that path if you have one, or set `GEODB_URL` and let the service fetch its own copy (see [GeoIP](/development/configuration/#geoip))
+
+Every other variable, with its default, is in the [configuration reference](/development/configuration/), and [`deploy/config/env.example`](https://github.com/pegasusbound/pegasusbound/blob/main/deploy/config/env.example) is the annotated template this file was cut down from. Mail relay, OAuth clients, single sign-on and the AI provider are configured exactly as in the [self-hosting guide](/development/deployment-guide/#platform-email); only the way values reach the process differs.
+
+</Step>
+
+<Step>
+
+### Write `/etc/pegasusbound/worker.env`
+
+The worker is deliberately blind to the database: it reaches encrypted keys over the backend's internal API and holds only what it needs to send. Give it its own file:
+
+```bash
+sudo tee /etc/pegasusbound/worker.env >/dev/null <<EOF
+APP_ENV=prod
+AWS_CONFIG_ENABLED=false
+WORKER_ID=$(uuidgen)
+PEGASUSBOUND_NODE_REGION=eu-central
+
+EVENTBUS_PROVIDER=nats
+NATS_URL=nats://127.0.0.1:4222
+CODEC_PROVIDER=json
+REDIS=redis://127.0.0.1:6379
+
+ENCRYPTED_KEYS_PROVIDER=http
+ENCRYPTED_KEYS_BACKEND_URL=http://127.0.0.1:8080
+ENCRYPTED_KEYS_WORKER_TOKEN=${INTERNAL_API_TOKEN}
+KMS_PROVIDER=local
+KMS_LOCAL_MASTER_KEY=${KMS_LOCAL_MASTER_KEY}
+CREDENTIALS_ENCRYPTION_KEY=${CREDENTIALS_ENCRYPTION_KEY}
+
+BLOB_PROVIDER=filesystem
+BLOB_FS_ROOT=/var/lib/pegasusbound/blobs
+
+BOX_GOOGLE_CLIENT_ID=
+BOX_GOOGLE_CLIENT_SECRET=
+BOX_OUTLOOK_CLIENT_ID=
+BOX_OUTLOOK_CLIENT_SECRET=
+EOF
+sudo chmod 0600 /etc/pegasusbound/worker.env
+sudo chown pegasusbound:pegasusbound /etc/pegasusbound/worker.env
+```
+
+`WORKER_ID` is generated once and never changed: it is the worker's identity, and the mailboxes assigned to it follow that UUID. A worker that boots with a fresh id every time leaves the old one behind still holding its mailboxes, and sending stalls until the reconciler notices. The `BOX_*` values must match the backend's, because the worker is what refreshes an expiring OAuth token.
+
+</Step>
+
+</Steps>
+
+## Run it
+
+<Steps>
+
+<Step>
+
+### Install the units
+
+The repository ships one unit per service in [`deploy/systemd/`](https://github.com/pegasusbound/pegasusbound/tree/main/deploy/systemd), already pointed at the paths above and locked down to the `pegasusbound` user:
+
+```bash
+sudo cp /opt/pegasusbound/src/deploy/systemd/pegasusbound-*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+```
+
+</Step>
+
+<Step>
+
+### Start the backend first
+
+The backend applies migrations on boot, and everything else expects the schema to exist:
+
+```bash
+sudo systemctl enable --now pegasusbound-backend
+sudo journalctl -u pegasusbound-backend -f
+```
+
+Watch for the migrations to finish and `curl http://127.0.0.1:8080/health` to answer `200`. A `prod` boot refuses any of the published development secrets, so a message naming a variable means the env file still has a placeholder in it.
+
+To apply migrations without starting the API, for instance in a deploy script, `sudo -u pegasusbound env $(grep PRIMARY_DB /etc/pegasusbound/pegasusbound.env) /opt/pegasusbound/bin/migrate` runs the same embedded migrations and exits.
+
+</Step>
+
+<Step>
+
+### Start the rest
+
+```bash
+sudo systemctl enable --now pegasusbound-forms pegasusbound-consumer pegasusbound-tracking pegasusbound-realtime pegasusbound-worker
+systemctl status 'pegasusbound-*' --no-pager
+```
+
+Each answers on its own port:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8080/health   # backend
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:3000/health   # tracking
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8090/health   # forms
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:4000/health   # realtime
+```
+
+The consumer and worker have no port; `journalctl -u pegasusbound-worker` shows the worker registering and heartbeating, and it appears in the admin panel under Workers once you can sign in.
+
+</Step>
+
+<Step>
+
+### Put nginx in front
+
+[`deploy/nginx/pegasusbound.conf`](https://github.com/pegasusbound/pegasusbound/blob/main/deploy/nginx/pegasusbound.conf) serves the two static frontends and proxies the API, websocket, tracking and forms hosts. It references Let's Encrypt certificate files by path, so the certificates have to exist before nginx will accept the site. Issue them first, in standalone mode with nothing on port 80, then enable the site:
+
+```bash
+sudo systemctl stop nginx
+sudo certbot certonly --standalone --agree-tos -m you@yourdomain.com \
+  -d app.yourdomain.com -d admin.yourdomain.com -d api.yourdomain.com \
+  -d ws.yourdomain.com -d t.yourdomain.com -d forms.yourdomain.com \
+  --cert-name app.yourdomain.com
+
+sudo cp /opt/pegasusbound/src/deploy/nginx/pegasusbound.conf /etc/nginx/sites-available/pegasusbound.conf
+sudo sed -i 's/example\.com/yourdomain.com/g' /etc/nginx/sites-available/pegasusbound.conf
+sudo ln -s /etc/nginx/sites-available/pegasusbound.conf /etc/nginx/sites-enabled/
+sudo nginx -t && sudo systemctl start nginx
+```
+
+`--cert-name app.yourdomain.com` puts all six names on one certificate under `/etc/letsencrypt/live/app.yourdomain.com/`, which is the path every server block in the shipped file uses. Renewals run from the timer certbot installs; because the certificate was issued standalone, tell it how to reload nginx once:
+
+```bash
+sudo certbot renew --dry-run --pre-hook 'systemctl stop nginx' --post-hook 'systemctl start nginx'
+```
+
+Those hooks are saved in the renewal config and reused on every real renewal.
+
+### Custom tracking and forms domains
+
+A workspace on this instance can point its own subdomain at your tracking or forms host (`t.acme.com` CNAME to `t.yourdomain.com`) and verify it. Verification is a DNS check, so it passes without nginx knowing anything about the name, and every tracked link and opt-out link on that domain then fails TLS because nginx has no certificate for it.
+
+nginx has no on-demand issuance, so this is a per-domain step. Add the name to the certificate and give it a server block that proxies to `:3000` for tracking, or `:8090` for forms:
+
+```bash
+sudo certbot certonly --standalone --cert-name app.yourdomain.com \
+  --expand -d t.acme.com
+```
+
+The backend exposes the same answer nginx cannot ask for itself, at `GET /tls/authorize?domain=<host>`: `204` when this instance has verified the name, `403` otherwise. That is what the bundled Caddy install uses to issue certificates without a per-domain step, and it is what a script that automates the above should check before requesting one.
+
+If you do not want to run that step per customer, leave custom domains unverified: links stay on your shared tracking host, which already has a certificate, and nothing breaks.
+
+A [root redirect](/guides/sending-domains/#root-redirects) takes the same step for the bare domain and its `www` (`acme.io`, `www.acme.io`), proxied to `:3000` with `proxy_set_header Host $host;`. Until nginx sends it on, the sending domains page shows the redirect as **Not reaching visitors** with the change to make. An instance [linked to Pegasusbound Cloud](/guides/pegasusbound-cloud/#root-redirects-served-by-pegasusbound-cloud) can have Cloud serve redirects instead, which needs no change to nginx.
+
+The frontends are plain files under `/opt/pegasusbound/web` and `/opt/pegasusbound/admin` with a history fallback to `index.html`, and `index.html` and `config.js` are served with `Cache-Control: no-store` so a redeploy is picked up on the next load. Any other web server can do the same; the config file has the exact headers.
+
+</Step>
+
+<Step>
+
+### Claim the instance
+
+On its first boot with an empty `users` table the backend prints a single-use setup link to its log:
+
+```bash
+sudo journalctl -u pegasusbound-backend | grep -o 'http[^ ]*/setup?token=[a-f0-9]*' | tail -1
+```
+
+Open it at `https://app.yourdomain.com`, pick a password, and you are the owner and platform admin. If the line has scrolled away, `pegasusboundctl setup-link` prints a fresh one:
+
+```bash
+sudo -u pegasusbound env $(grep -E '^(PRIMARY_DB|REDIS|AUTH_SECRET|APP_URL)=' /etc/pegasusbound/pegasusbound.env | xargs) pegasusboundctl setup-link
+```
+
+`pegasusboundctl` is the same operator CLI the container image ships; it reads `PRIMARY_DB` and friends from the environment, so the `env $(grep ...)` prefix above is how every command on the [pegasusboundctl reference](/development/pegasusboundctl/) is run on a bare host. A shell alias saves typing it:
+
+```bash
+alias pegasusboundctl='sudo -u pegasusbound env $(sudo grep -E "^(PRIMARY_DB|REDIS|AUTH_SECRET|APP_URL|API_PUBLIC_URL|MAIL_TRANSPORT|SMTP_HOST|EMAIL_ADDRESS|EMAIL_NAME)=" /etc/pegasusbound/pegasusbound.env | xargs) /opt/pegasusbound/bin/pegasusboundctl'
+pegasusboundctl status
+```
+
+[First run](/development/first-run/) covers what to do when the database already has accounts, and unattended provisioning through `PEGASUSBOUND_BOOTSTRAP_EMAIL`.
+
+</Step>
+
+</Steps>
+
+## Workers on other machines
+
+The point of workers is to spread sending across machine identities, so most installs eventually add a worker on another host. Two routes, neither needing Docker on the control plane:
+
+**The join script**, which is what the admin panel's Add a machine flow produces, runs the node as a container on the remote host. It needs Docker and systemd only there. The backend serves it at `GET /join.sh`, and it is embedded in the binary, so there is no path to configure.
+
+**A native worker** is the same binary and env file as above, with the addresses changed. The backend renders a complete env file for a join token, so nothing has to be copied by hand:
+
+```bash
+# On the remote host, with /opt/pegasusbound/bin/worker built for it:
+curl -fsS https://api.yourdomain.com/api/v1/fleet/join \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"<join-token>","role":"worker","region":"eu-central"}' \
+  | sed -n 's/.*"env_b64"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+  | base64 -d | sudo tee /etc/pegasusbound/worker.env >/dev/null
+sudo chmod 0600 /etc/pegasusbound/worker.env
+sudo cp deploy/systemd/pegasusbound-worker.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now pegasusbound-worker
+```
+
+The rendered file already carries this node's `WORKER_ID`, so its placement row and its node row are the same machine. Issue the token with `pegasusboundctl fleet join-token`; it works for any number of machines until it expires (seven days by default, `--ttl` up to 30 days) or another is issued, and the response carries the decryption material, so do this over HTTPS only. Before enrolling anything, set `API_PUBLIC_URL`, `NATS_URL` and `REDIS` on the backend to addresses the remote host can reach, and open those ports to it: the rendered file inherits the backend's own values, and `127.0.0.1` does not resolve to your control plane from another machine.
+
+Opening NATS and Redis to another machine means they stop being protected by the loopback bind, so give both a credential and TLS first. For NATS, extend `/etc/nats.conf` and restart it:
+
+```
+listen: 0.0.0.0:4222
+http: 127.0.0.1:8222
+jetstream { store_dir: /var/lib/nats }
+authorization { token: "<openssl rand -hex 32>" }
+tls {
+  cert_file: "/etc/letsencrypt/live/app.yourdomain.com/fullchain.pem"
+  key_file:  "/etc/letsencrypt/live/app.yourdomain.com/privkey.pem"
+}
+```
+
+Then set `NATS_URL=tls://<token>@nats.yourdomain.com:4222` in `pegasusbound.env` and `worker.env`; the token in the URL is what every service authenticates with. Redis gets `requirepass` and `REDIS=redis://:<password>@redis.yourdomain.com:6379`, ideally over a private network or a tunnel. Restrict both ports at the firewall to the worker's address as well. Use `BLOB_PROVIDER=s3` with a bucket both sides can reach: a worker reads the message body the backend wrote, so the filesystem provider only works when the two share storage and the permissions line up. The [self-hosting guide](/development/deployment-guide/#adding-a-machine) has the same caveats in more detail.
+
+Because the worker is not in a container, the join script's systemd service and update timer do not apply to it. Manage it with `systemctl` and the update steps below, and set its version by hand rather than through `pegasusboundctl fleet version`.
+
+## Upgrading
+
+`scripts/upgrade-bare-metal.sh` is the build steps above in order: build every artifact this host runs as the checkout's owner, then run the root-owned installer `pegasusbound-install-release` through sudo, which installs them, restarts the backend first (migrations are forward-only and apply on its boot), then the rest, keeping each frontend's `config.js` across the copy. Install that one script root-owned once, then run the upgrade as the user who owns the checkout:
+
+```bash
+sudo install -o root -g root -m 0755 /opt/pegasusbound/src/deploy/systemd/pegasusbound-install-release.sh /usr/local/sbin/pegasusbound-install-release
+echo "$USER ALL=(root) NOPASSWD: /usr/local/sbin/pegasusbound-install-release" | sudo tee /etc/sudoers.d/pegasusbound-upgrade >/dev/null
+sudo chmod 0440 /etc/sudoers.d/pegasusbound-upgrade
+cd /opt/pegasusbound/src && scripts/upgrade-bare-metal.sh --pull    # git pull --ff-only, build, install, restart
+```
+
+The sudoers line is what lets the script call the installer without a password prompt; it allows that one root-owned command and nothing else.
+
+To pin a release instead of following the branch, check the tag out first (`git checkout vX.Y.Z`) and run it without `--pull`.
+
+The admin panel can run the same script for you. The version pill at the foot of its sidebar shows when a newer release exists, and with the updater unit installed, **Update and restart** in it pulls, runs the script and reports back. [Updates](/development/updates/#without-docker) has the unit, the sudoers line it needs and the backend variable that points at it.
+
+## Backups
+
+Three things, all three:
+
+```bash
+sudo -u postgres pg_dump pegasusbound > backup.sql       # 1. the database
+sudo tar czf blobs.tgz -C /var/lib/pegasusbound blobs      # 2. uploads and stored message bodies
+sudo cp /etc/pegasusbound/*.env somewhere-safe/            # 3. the env files, above all the two encryption keys
+```
+
+Restore into an empty database before the backend starts, then start it and it applies only what is newer than the dump. See [restoring](/development/deployment-guide/#restoring); replace the `docker compose exec` commands with plain `psql`.
+
+## Troubleshooting
+
+| Symptom | Cause |
+|---------|-------|
+| Backend exits at boot naming `AUTH_SECRET` or another variable | `APP_ENV=prod` refuses the published development defaults; the env file still holds a placeholder |
+| First publish fails with a stream or JetStream error | `/etc/nats.conf` has no `jetstream` block |
+| `go build` or `cargo build` fails with permission denied | The checkout was cloned with `sudo` and is root-owned; `chown -R "$USER"` it and build as yourself |
+| `nginx -t` fails on a missing certificate file | The site was enabled before `certbot certonly` ran, or `--cert-name` does not match the path in the file |
+| `mkdir /var/lib/pegasusbound/blobs/...: permission denied` on the first send | `BLOB_FS_ROOT` is not writable by the `pegasusbound` user, or the unit's `ReadWritePaths` does not cover it |
+| Realtime unit starts and exits immediately | A release only listens when `PHX_SERVER=true`; the shipped unit sets it. Otherwise `journalctl -u pegasusbound-realtime` names the missing variable |
+| Realtime raises `JWT_SECRET ... required` | Prod releases read `JWT_SECRET`, `SECRET_KEY_BASE` and `DATABASE_URL`, not the backend's names; keep both spellings in the file |
+| Dashboard loads but every request is `403` | `CORS_ALLOW_ORIGINS` does not list the origin the browser is on; it must match the `APP_URL` you wrote into `config.js` |
+| Dashboard never goes live, notifications stay silent | `WEBSOCKET_URL` is wrong, or `CHECK_ORIGIN=true` with a `PHX_HOST` that is not the dashboard's host |
+| Worker logs `encryptedkeys.http: ... unexpected status 401` | `ENCRYPTED_KEYS_WORKER_TOKEN` does not equal the backend's `INTERNAL_API_TOKEN` |
+| Sends fail with `email account not found in worker` | The worker booted with a new `WORKER_ID`; the mailboxes still belong to the old one until the reconciler moves them. Pin the id |
+| Opens and clicks are not recorded | `TRACKING_DOMAIN` does not match the host nginx proxies to `:3000`, or `BACKEND_INTERNAL_URL` is unreachable from the tracking service |
+| Mailbox connects, then fails about an hour later | The worker env is missing the `BOX_*` OAuth client; only the worker refreshes tokens |
+
+`pegasusboundctl status` runs the same instance checks the admin panel's **Instance > Setup and health > Services** tab shows and exits non-zero on anything at error severity. The [troubleshooting](/development/troubleshooting/) page covers symptoms that are not specific to running without Docker.
+
+## Quick reference
+
+```
+/opt/pegasusbound/bin/{backend,forms,consumer,worker,tracking,migrate,pegasusboundctl}
+/opt/pegasusbound/realtime/bin/realtime        mix release
+/opt/pegasusbound/web, /opt/pegasusbound/admin      static builds + config.js
+/opt/pegasusbound/src                          the checkout (worker installer is served from here)
+/etc/pegasusbound/pegasusbound.env                  backend, forms, consumer, tracking, realtime
+/etc/pegasusbound/worker.env                   worker
+/var/lib/pegasusbound/blobs                    BLOB_FS_ROOT
+/etc/systemd/system/pegasusbound-*.service     from deploy/systemd/
+/etc/nginx/sites-available/pegasusbound.conf   from deploy/nginx/
+```
+
+```bash
+systemctl status 'pegasusbound-*'
+journalctl -u pegasusbound-backend -f
+pegasusboundctl status                # with the alias above
+pegasusboundctl setup-link
+```
+
+See also: [self-hosting with Docker](/development/deployment-guide/), [configuration reference](/development/configuration/), [pegasusboundctl](/development/pegasusboundctl/), [architecture](/development/architecture/).

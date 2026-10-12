@@ -1,0 +1,68 @@
+[
+  {
+    "id": "title",
+    "text": "Meet Pegasusbound: a cold outbound engine that teaches itself. Every email it sends is an experiment. Every reply is a lesson. And every next email is better than the last."
+  },
+  {
+    "id": "context",
+    "text": "It starts with context. Connect your Company Brain and your CRM over M C P. Attio lists become audiences, and every positive reply lands back in your CRM as a task.",
+    "caption": "It starts with context. Connect your Company Brain and your CRM over MCP. Attio lists become audiences, and every positive reply lands back in your CRM as a task."
+  },
+  {
+    "id": "nobrain",
+    "text": "No Company Brain? No problem. Upload your I C P, product docs, case studies and a few emails that worked. The engine breaks them down into an understanding layer: personas, pain points, proof points, claims it must never make, and your voice.",
+    "caption": "No Company Brain? No problem. Upload your ICP, product docs, case studies and a few emails that worked. The engine breaks them down into an understanding layer: personas, pain points, proof points, claims it must never make, and your voice."
+  },
+  {
+    "id": "approve",
+    "text": "You set hard limits and approve the plan once. From then on, the engine runs by itself, while you sleep."
+  },
+  {
+    "id": "loop",
+    "text": "Here is the loop. It writes variants that differ in exactly one thing: the angle, the call to action, the subject line, or the tone. It sends a small batch through your warmed mailboxes, reads and classifies every reply, scores every variant, keeps the winner, and writes the next challenger. Then it does it again. And again. Every iteration starts from the best email so far."
+  },
+  {
+    "id": "ml",
+    "text": "The decisions are statistics, not guesses. Each email gets a Bayesian beta binomial posterior. Twenty thousand Monte Carlo draws give the probability it is truly the best. Above ninety percent, it scales the winner. Below five percent, it retires the loser. When a difference is too small to matter, it stops spending budget and tests the next idea.",
+    "caption": "The decisions are statistics, not guesses. Each email gets a Bayesian Beta-Binomial posterior. 20,000 Monte Carlo draws give the probability it is truly the best. Above 90%, it scales the winner. Below 5%, it retires the loser. When a difference is too small to matter, it stops spending budget and tests the next idea."
+  },
+  {
+    "id": "memory",
+    "text": "What it learns becomes memory: proven principles, guidelines, and things to avoid, each with its evidence. Every new campaign starts from that memory, and lessons carry across segments."
+  },
+  {
+    "id": "disclaimer",
+    "text": "Now, a test run. The list is dummy data: one thousand synthetic prospects at fictional publishers. The engine ran on a simulation, with a hidden reply model it never sees, to test its capabilities and measure the output.",
+    "caption": "Now, a test run. The list is dummy data: 1,000 synthetic prospects at fictional publishers. The engine ran on a simulation, with a hidden reply model it never sees, to test its capabilities and measure the output."
+  },
+  {
+    "id": "iterations",
+    "text": "Over six simulated weeks, it ran eleven iterations across three campaigns. For audience leaders, the best email's positive reply rate climbed from sixteen point seven percent in iteration one, to twenty five percent by iteration three. Proof led messaging won a controlled test with ninety six percent confidence.",
+    "caption": "Over six simulated weeks, it ran 11 iterations across three campaigns. For audience leaders, the best email's positive-reply rate climbed from 16.7% in iteration 1 to 25.0% by iteration 3. Proof-led messaging won a controlled test with 96% confidence."
+  },
+  {
+    "id": "ranked",
+    "text": "The Best emails view ranks every email from best to worst: delivered, positive replies, meetings, a credible range, and the probability each one is the best, with a plain language reason for its place."
+  },
+  {
+    "id": "across",
+    "text": "Across the workspace, every campaign improved as it iterated. Founders went from ten percent to sixteen percent. Revenue leaders reached twenty one percent. In total: nearly twenty three hundred emails, three hundred and fifteen replies, and thirty five meetings.",
+    "caption": "Across the workspace, every campaign improved as it iterated. Founders went from 10% to 16%. Revenue leaders reached 21%. In total: 2,288 emails, 315 replies and 35 meetings."
+  },
+  {
+    "id": "next",
+    "text": "And the next campaign starts smarter. Product leaders skips the angle test entirely. Memory already proved it, so its first experiment goes straight to the call to action."
+  },
+  {
+    "id": "leads",
+    "text": "Every lead keeps its full thread: sent, followed up, replied, and classified."
+  },
+  {
+    "id": "dark",
+    "text": "In light mode, or dark."
+  },
+  {
+    "id": "close",
+    "text": "Pegasusbound. Approve once. It learns the rest."
+  }
+]

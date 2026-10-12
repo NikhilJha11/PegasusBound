@@ -1,0 +1,71 @@
+---
+title: Zapier
+description: Connect Pegasusbound to thousands of apps with triggers, actions, and searches.
+---
+
+Wire Pegasusbound into thousands of apps without code: start a Zap when a reply lands, push form leads into a campaign, or sync deals onward.
+
+## Connecting
+
+In the Zapier editor, pick Pegasusbound, add any trigger or action, and click **Connect a new account**. You approve access on a Pegasusbound consent screen and return with the connection ready, labelled with your organization and email so multiple workspaces stay distinguishable. Nothing to copy or paste.
+
+It requests only the scopes the modules need (contacts, campaigns, mailboxes, inbox, CRM records, templates, plus read-only analytics). **It never requests billing or team-management access.**
+
+## Triggers
+
+| Trigger | Fires when |
+|---------|------------|
+| New Contact | A contact is added |
+| New or Updated Contact | A contact is created or edited |
+| New Email Received | A message lands in the unified inbox, including campaign replies |
+| New Meeting Booked | A meeting is booked through a connected scheduler |
+| New Deal / Deal Won | A deal is created / moves to won |
+| New CRM Task | A task is created |
+| New Campaign / Campaign Completed | A campaign is created / finishes sending |
+| New Mailbox Connected | An email account is connected |
+
+Triggers poll on Zapier's schedule (frequency depends on your plan). Zapier remembers what it has seen, so a Zap runs once per new item. New or Updated Contact re-runs on change, with the real id in `contact_id`. New Email Received needs the Unibox feature, part of an active trial or paid plan.
+
+## Actions
+
+| Area | Actions |
+|------|---------|
+| **Contacts** | Create or Update, Update, Delete; Add to Campaign, Remove from Campaign; Create, Update, Delete Contact Note |
+| **Inbox** | Send Email, Reply in Inbox, Mark Inbox Emails Seen, Verify Email Address |
+| **Mailboxes** | Update Mailbox, Delete Mailbox, Start / Pause / Resume / Stop Warmup |
+| **CRM** | Create, Update, Delete Deal; Create, Update, Delete CRM Task |
+| **Campaigns** | Create, Update, Start, Stop, Delete |
+| **Templates** | Create, Update, Delete, Render Reply Template |
+| **Meetings** | Log Meeting, Delete Meeting |
+| **Organization** | Create Contact Category (a contact label), Mailbox Tag, or Campaign Folder |
+
+Campaign, mailbox, pipeline, stage, and contact fields use live dropdowns from your workspace, so you pick real records instead of pasting ids.
+
+<Callout type="warn" title="Destructive actions run unattended">
+Delete Campaign and Delete Mailbox are irreversible and execute without confirmation inside a Zap. Delete Mailbox also stops all sending from that account. Add them deliberately.
+</Callout>
+
+## Searches
+
+Find Contact (by exact email), Find Deal, Find CRM Task, Find Campaign, Find Mailbox, Find Meeting, and Find Reply Template look up one record for a later step. Get Campaign Analytics and Get Dashboard Analytics return stats for a campaign or the whole workspace.
+
+Pair a search with an action for idempotent flows: Find Contact, then Create or Update Contact.
+
+## Lead forms and other lead sources
+
+Facebook and Instagram Lead Ads, LinkedIn Lead Gen Forms and TikTok Lead Generation all deliver new form submissions to Zapier in real time, which makes Zapier the shortest route from an ad to a follow-up sent from your own mailbox.
+
+1. **Trigger:** *Facebook Lead Ads: New Lead* (or the LinkedIn or TikTok equivalent), picking the Page and form.
+2. **Action:** Pegasusbound *Create or Update Contact*. Map the form's email and name fields, put every other question into a custom field, and pick the labels. Then *Add to Campaign* with the campaign that follows up. Re-running the same lead updates the contact rather than duplicating it.
+
+Prefer to keep the mapping inside Pegasusbound? Use *Webhooks by Zapier: POST* to an [inbound webhook automation](/guides/automations/#lead-intake) instead, sending the lead as JSON. The automation's **Create or update contact** action maps the JSON keys onto contact fields with templates, and the same flow can tag, notify Slack and open a task.
+
+The follow-up still runs through the campaign's mailboxes, so a burst of leads queues under each mailbox's daily cap and spacing rather than going out at once. Cold email tools do not ship a native Meta connector; this route is what their customers use too.
+
+## Good to know
+
+- **Sending respects your limits.** Send Email and Reply in Inbox honor each mailbox's daily cap and spacing, and support smart and scheduled send modes.
+- **Adding a contact is idempotent by email.** Re-running Create or Update Contact with the same address updates the record and merges custom fields rather than duplicating.
+- If a connection stops working, reconnect in Zapier. Tokens refresh automatically; reconnecting re-runs consent.
+
+For lower-latency, event-driven delivery, use [webhooks](/guides/webhooks/) or the [developer websocket](/api/realtime/).

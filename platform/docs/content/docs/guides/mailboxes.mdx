@@ -1,0 +1,603 @@
+---
+title: Mailboxes
+description: "Connect sender accounts, providers, and how they are assigned to workers."
+---
+
+A mailbox is a sender account you connect to Pegasusbound. Every warmup message and campaign email goes out through one you own.
+
+![The Accounts page: every connected mailbox with its status, cold sends today, warmup progress, inbox rate and health](/guides/accounts.webp)
+
+## Connect a mailbox
+
+<Steps>
+
+<Step>
+
+Open **Accounts** and choose **Add account**.
+
+</Step>
+
+<Step>
+
+Pick **Google**, **Microsoft**, or **Other (SMTP / IMAP)** for any other host.
+
+</Step>
+
+<Step>
+
+On Google Workspace or Microsoft 365, choose the administrator's grant: it connects every mailbox on the domain at once, with no password and no sign-in each.
+
+</Step>
+
+</Steps>
+
+![Add account: Google, Microsoft, any SMTP and IMAP host, a file import, or an inbox vendor](/guides/add-account.webp)
+
+To bring in many at once, choose **Import mailboxes**: up to 5,000 from a CSV, TSV or XLSX file, or a pasted list.
+
+## Good to know
+
+- A mailbox sends at most `50` cold emails a day by default. New mailboxes start on a sending plan of about `30` a day.
+- Mailboxes are unlimited on every paid plan, with a fair-use allowance of one mailbox for every send a day the plan includes.
+- When a provider stops accepting a mailbox's sign-in, the mailbox stops sending and its drawer shows the fix.
+- You never pick a sending worker. Pegasusbound assigns one.
+
+<Fold>
+
+## How the list reports health
+
+Browsing filters, searches and view choices are [remembered in your browser tab](/guides/browsing/) across refreshes and navigation, separately for each user and workspace.
+
+A mailbox is a sender account you connect to Pegasusbound. Every warmup message and campaign email goes out through one you own.
+
+The Accounts list checks mailbox health and, on linked self-hosted instances, Cloud warmup standing separately from the mailbox inventory. While those checks are loading or refreshing, it shows **Checking…** rather than treating missing results as Idle, Healthy, or zero sent. A failed or incomplete check shows **Unavailable**, not a measured zero or a claim that the mailbox recovered. If the mailbox list itself cannot be loaded, or only part of it loaded, the summary counts show **Unavailable** too, rather than an empty account list. A previously reported issue may remain marked **Last observed** for up to five minutes during a refresh; this is historical evidence, not a claim that it is still failing. A newly measured healthy result replaces it. A displayed health score is an account-health assessment, not proof that the provider confirmed a send; check send records and the mailbox's error details when investigating a stopped mailbox.
+
+### Diagnostic participation and stopping
+
+New mailboxes default to diagnostic participation **off**. The organization-authorized mailbox PATCH exposes `test_mode` (`off`, `diagnostic`, `legacy`), separate `test_send_enabled` and `test_receive_enabled` flags, and optional positive `shared_daily_limit`/`rolling_recipient_limit`. These are API controls, not new dashboard switches. Diagnostic mode sends disclosed tests but does not manufacture reads, stars, importance or spam rescue. Existing upgraded mailboxes with NULL participation retain legacy behavior until explicitly changed. Set `test_mode=off` to stop future diagnostic send/receive admission; current protocol-2 workers also recheck queued sends/actions. Already accepted old-worker commands or a provider send underway cannot be recalled. A local Cloud alias unlink stops local authority, not an independently cloud-owned mailbox or provider grant: pause/remove that mailbox on Cloud separately. See [send safety, repair evidence and rollout](/development/send-safety/).
+
+</Fold>
+
+<Fold>
+
+## Filtering accounts
+
+Use the **Tags** dropdown above the mailbox list to show accounts with a particular tag. The selection is kept in the page URL and remembered for your user and workspace in the browser tab, so refreshing, opening a bookmark, or visiting another page and returning keeps the filter. Choose **All accounts** to clear it. A tag that no longer exists in the current workspace falls back to **All accounts**.
+
+Without an explicit column sort, the Accounts list groups the loaded mailboxes by their complete set of tags, both in **All accounts** and when filtering by a specific tag. Mailboxes with **Tag A + Tag B** stay together even when those tags were assigned in a different order, separately from mailboxes with only **Tag A**. Groups follow the workspace's tag order, with untagged mailboxes last; mailboxes within a group are ordered by email address. Selecting a tag narrows the list without changing this order. Each mailbox appears only once. Selecting a column sort takes priority over grouping and remains selected when changing the tag filter.
+
+</Fold>
+
+<Fold>
+
+## Connecting an account
+
+Open **Accounts** and choose **Add account**. Google and Microsoft each have one entry, and choosing it asks how to connect:
+
+| Provider | Method | Notes |
+|----------|--------|-------|
+| Google | **Whole Workspace domain**: an administrator's grant (`gmail`, sign-in method `delegated`) | Recommended for Google Workspace. A super admin authorizes Pegasusbound once, and every mailbox on the domain connects with no password and no sign-in each. Runs on the Gmail API. See [connect a whole Google Workspace domain](/guides/mailbox-import/#connect-a-whole-google-workspace-domain) |
+| Google | **App password** over IMAP + SMTP (`smtp_imap`, sign-in method `app_password`) | Works for personal Gmail and for Workspace. The dialog walks you through it in three steps, see [Gmail and Google Workspace](#gmail-and-google-workspace) below |
+| Google | **Sign in with Google**: OAuth for one mailbox (`gmail`, sign-in method `oauth`) | Offered where the dashboard deployment enables it and the backend supports it. No app password needed |
+| Microsoft | **Whole organization**: an administrator's grant (`outlook`, sign-in method `delegated`) | Recommended for Microsoft 365. A Global Administrator approves Pegasusbound once, and every licensed mailbox connects with no sign-in each. Runs on Microsoft Graph. See [connect a whole Microsoft 365 organization](/guides/mailbox-import/#connect-a-whole-microsoft-365-organization) |
+| Microsoft | **Sign in one mailbox**: OAuth (`outlook`, sign-in method `oauth`) | No password stored. Runs on Microsoft Graph. The way to connect Outlook.com and a single Microsoft 365 mailbox |
+| Any other server | IMAP + SMTP (`smtp_imap`) | Custom domains, self-hosted, or providers without OAuth. Any IMAP server that accepts a password works, including Yahoo, Fastmail, Zoho, Seznam.cz, cPanel and self-hosted Dovecot. Exchange Online (Microsoft 365 and Outlook.com) no longer accepts passwords over IMAP, so connect those with Microsoft |
+
+On a self-hosted instance the two whole-domain methods are shown switched off until the operator sets them up; see [whole-domain mailbox connects](/development/whole-domain-connect/).
+
+Once you press **Connect**, the connect finishes on the server even if you refresh or close the page: the credentials are checked, and the mailbox is either saved, placed on a worker and added to your list, or not saved at all. It appears in the list on its own when it is done. Pressing **Connect** again meanwhile cannot add the address twice.
+
+<Callout title="Existing Google sign-in mailboxes stay connected">
+  A mailbox connected with **Sign in with Google** keeps sending and syncing even when a deployment hides that option for new mailboxes. If Google invalidates its token, the **Re-authorize** button in its drawer still works. You can optionally switch to a domain grant (Google Workspace) or an app password without losing history. See [moving off per-mailbox Google sign-in](#moving-off-per-mailbox-google-sign-in).
+</Callout>
+
+**OAuth** sends you to your provider's consent screen and returns a token instead of a password. Both OAuth providers use the provider's native API, never IMAP or SMTP, so consent asks to send mail and to read and organize your mailbox. Google additionally asks to read your mail settings, which is what lets Pegasusbound offer the addresses Google has verified you to send as and import the signature you already wrote there. It needs no app passwords or server settings. Note that Google revokes Gmail tokens when the account's password changes, so a password change there means [re-authorizing the mailbox](#reconnecting-an-account) once.
+
+#### What each provider is asked for
+
+Exactly these, and nothing beyond them:
+
+| Provider | Scope | What it is for |
+|----------|-------|----------------|
+| Google | `https://www.googleapis.com/auth/gmail.modify` | Send campaign and warmup mail, read replies, and move messages between folders |
+| Google | `https://www.googleapis.com/auth/gmail.settings.basic` | Read the send-as addresses Google has verified for the account, and the signature already set there |
+| Microsoft | `https://graph.microsoft.com/Mail.Send` | Send mail |
+| Microsoft | `https://graph.microsoft.com/Mail.ReadWrite` | Read replies and move messages |
+| Microsoft | `https://graph.microsoft.com/User.Read` | Read the signed-in address, so the mailbox is filed under the right one |
+| Microsoft | `offline_access` | Keep the connection alive without asking again |
+
+Google's scopes nest, so `gmail.modify` already covers reading, sending, composing and metadata. Pegasusbound used to ask for those four by name as well, which widened the consent screen without granting anything extra; it no longer does. A mailbox connected under the older, broader consent keeps working and does not need reconnecting.
+
+A consent screen lets you untick individual permissions. Pegasusbound checks what was actually granted and refuses a half-granted mailbox at connect time, naming the missing permission, rather than storing one that looks connected and fails on its first send days later.
+
+#### When Microsoft asks for admin approval
+
+Many Microsoft 365 organizations let only an administrator approve a new app, and then Microsoft answers the sign-in with **Need admin approval** instead of its consent screen. Mailboxes bought from an inbox provider are usually in such an organization, run by the provider. Nothing you choose in Pegasusbound changes that, but one approval fixes it for everyone: after a first try, the **Sign in one mailbox** panel shows an approval link. Send it to the organization's administrator (for a provider's mailboxes, the provider). It approves exactly the four permissions above for the whole organization, and afterwards every mailbox in it signs in on its own, with no administrator involved. On a self-hosted instance, the operator verifying the publisher of their Microsoft app removes this step for most organizations; see [Outlook and Microsoft 365](/development/deployment-guide/#outlook-and-microsoft-365).
+
+**IMAP / SMTP** needs host, port, username, and password for each direction:
+
+```text
+SMTP   host: smtp.yourprovider.com   port: 465   username: you@yourdomain.com
+IMAP   host: imap.yourprovider.com   port: 993   username: you@yourdomain.com
+```
+
+Each side also has a **security** setting, which is what decides how the connection is encrypted:
+
+| Security | What happens | Usual ports |
+| --- | --- | --- |
+| SSL / TLS | Encrypted from the first byte | SMTP `465`, IMAP `993` |
+| STARTTLS | Connects in the clear, then upgrades in place before anything sensitive is sent | SMTP `587` or `2525`, IMAP `143` |
+| None | No encryption. Only offered for a mail server on the same machine as the worker | SMTP `1025`, IMAP `1143` |
+
+If port 465 never answers (many hosting networks block outbound 465 while 587 stays open), the worker dials 587 with STARTTLS on the same server alongside it and uses whichever connects first. A connect that succeeds that way is stored with port 587 and STARTTLS, and the mailbox settings show that. A refusal or a name that does not resolve is an answer from the network, not silence: one that arrives before 587 has been dialled is reported as is, and the fallback is only for a port that never answers.
+
+A server that accepts submission only on 465 has no 587 to fall back to. When the worker's own network is the one blocking 465 (it learns that from several servers leaving 465 silent while answering on 587), the mailbox's error says so: the block is on the sending side, your server needs no change, and sending resumes on its own once the port is open. Turning on submission on 587 with STARTTLS at your server gets the mailbox sending sooner.
+
+The form picks TLS or STARTTLS from the port as you type, so standard setups need no thought. It never picks **None**, on any port: dropping encryption is always something you ask for. Change the mode yourself when your server is unusual: any port from 1 to 65535 works, so a submission relay on `2525` or IMAP on a custom port is fine as long as the security setting matches what the server actually speaks.
+
+Encryption is not optional over a network. Pegasusbound will not send credentials over an unencrypted connection to anything but this machine, which is why **None** only appears once the host is `localhost`, an address in `127.0.0.0/8`, or `::1`, and only on a [self-hosted instance](/development/install/). See [local mail relays](#local-mail-relays-proton-bridge) below.
+
+If a mailbox fails to connect with a server-unreachable error and the host and port are definitely right, the security setting is the first thing to check. A server expecting STARTTLS looks unreachable to a client attempting implicit TLS, and vice versa.
+
+The error says which step failed and what the server or the network answered, so the two cases read differently: `dial smtp.example.com:465: connect: connection refused` never reached the server, `dial smtp.example.com:465: tls: first record does not look like a TLS handshake` reached a server that does not speak implicit TLS on that port, and `mail from: 451 4.7.1 try again later` is the server deferring a message. A connection that is refused or times out on `465` while `587` works is a network between the sender and the server that does not allow implicit TLS submission; switching that mailbox to `587` with STARTTLS is the fix. An error that starts with "Pegasusbound's sending network currently blocks outbound port 465" is that block on the worker's side, not a fault on your server.
+
+When a mail server goes down or stops answering, the mailbox is not deactivated. Pegasusbound says so once in the drawer, retries on a widening interval, and picks up where it left off when the server comes back. Nothing that arrived meanwhile is skipped, and the error clears itself on the first pass that reaches the server again.
+
+The same holds for a server that answers but refuses what Pegasusbound asked. The drawer shows one row carrying the server's own wording, not one row per retry, and it clears on the first pass that completes.
+
+With two-factor authentication on, generate an app password in your provider's security settings and use that.
+
+Pegasusbound signs in with whichever method your server offers, preferring CRAM-MD5, then LOGIN, then PLAIN. Servers that accept only one of these, which includes Microsoft 365 relays and most appliance relays, work without any setting to change.
+
+### Gmail and Google Workspace
+
+Where your deployment enables it, choose **Add account > Google > Sign in with Google** to connect one mailbox through Google's consent screen. This option is deployment-dependent; an administrator can enable it with the [dashboard configuration flag](/development/configuration/#google-sign-in-per-dashboard-deployment). If it is hidden, use an app password or a Workspace whole-domain grant instead. Existing Google sign-in mailboxes keep working and can re-authorize even when new Google sign-in connects are disabled.
+
+Choose **Add account**, then **Google**, then **App password**. The dialog walks through three steps, and the only things you type are the address and the app password; the server settings are Gmail's own and are filled in for you.
+
+1. **Turn on 2-Step Verification** on the Google account, under [Google Account, Security](https://myaccount.google.com/security). Google only offers app passwords once it is on, and only alongside a second-step method other than a security key (a phone prompt, an authenticator app or a text message). Already on? Continue.
+2. **Create an app password** at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords): name it Pegasusbound, press **Create**, and copy the 16 characters. Google shows them once; the spaces between the groups do not matter, Pegasusbound drops them wherever the password arrives (the dialog, the [mailbox import](/guides/mailbox-import/), the API).
+3. **Connect**: enter your name, the full address (including `@gmail.com` or your Workspace domain) and the app password. Pegasusbound checks it against Google before saving anything. The address has to be the one the Google account signs in with: Google refuses an app password presented with an alias or a group address, and one created while signed in to a different account.
+
+The settings the dialog uses, in case you connect the same mailbox through **Other (SMTP / IMAP)** or the [mailbox import](/guides/mailbox-import/):
+
+```text
+SMTP   host: smtp.gmail.com   port: 587   security: STARTTLS
+IMAP   host: imap.gmail.com   port: 993   security: SSL / TLS
+```
+
+The username is the full address on both. The password is the app password, never the account password. There is nothing to turn on for IMAP: Google removed that setting in January 2025 and personal Gmail accounts have it on permanently. Deleting the app password in the Google account disconnects the mailbox, which is the same revocation an OAuth token gives you.
+
+On Google Workspace the administrator decides. They can switch IMAP off for the organization under **Apps**, **Google Workspace**, **Gmail**, **End user access**, and control app passwords under **Security**, **Authentication**, **2-Step Verification**, where **Allow users to generate app passwords** is the setting and enforcing security keys as the only second step removes them regardless. Some accounts cannot have an app password at all: enrolling in Google's [Advanced Protection Program](https://landing.google.com/advancedprotection/) revokes them and hides the page. Ask the administrator to allow app passwords for the mailboxes you send from.
+
+<Callout type="warn" title="Authentication runs on connect">
+  Credentials and both connections are validated when you add the account, so wrong settings fail immediately rather than silently at send time. When the check fails, the message says which server (SMTP or IMAP) failed and why, quoting the server's reply when there is one, so a refused password, an unreachable host and a failed secure connection each read differently. Tokens and credentials are sealed with envelope encryption before they touch storage.
+</Callout>
+
+### Moving off per-mailbox Google sign-in
+
+Switching from per-mailbox **Sign in with Google** is optional. A mailbox on it keeps sending, syncing and warming, and re-authorizing it still works. The alternatives need no per-mailbox Google token: a whole-domain grant is authorized once by a Workspace administrator and survives password changes, and an app password works for Google accounts where app passwords are available.
+
+The **Accounts** page shows a banner while any mailbox is still on per-mailbox Google sign-in, each such mailbox carries a chip in the list, and its drawer shows a notice with the move for it. Mailboxes whose sign-in is held by [Pegasusbound Cloud](/guides/pegasusbound-cloud/) are not included; the cloud keeps their sign-in.
+
+**A Google Workspace mailbox moves onto its domain's grant.**
+
+1. Choose **Add account > Google > Whole Workspace domain** and set up the grant for the domain, as in [connect a whole Google Workspace domain](/guides/mailbox-import/#connect-a-whole-google-workspace-domain). Skip this when the domain already has an active grant.
+2. In the grant's user list, the mailboxes still on their own sign-in are marked as ones to move. Pick them, or connect everyone, which includes them.
+
+Connecting the address converts the existing mailbox in place: it is the same mailbox, with the same history, campaigns, warmup progress and settings, and the stored Google token is deleted. Converting does not add a mailbox, so it never counts against the [mailbox allowance](#mailbox-allowance). The same optional switch works for a mailbox on per-mailbox Microsoft sign-in under a Microsoft 365 organization grant.
+
+**A personal Gmail mailbox moves to an app password.** This works for a Workspace mailbox too, when a grant is not an option.
+
+1. Turn on 2-Step Verification for the Google account and create an app password at [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords), as in [Gmail and Google Workspace](#gmail-and-google-workspace).
+2. In the notice in the mailbox's drawer, choose to switch to an app password and paste the 16 letters. Spaces do not matter.
+
+Pegasusbound checks the app password against Gmail's IMAP and SMTP servers before anything is stored. A refusal changes nothing, and the message says which server refused and why. Once it passes, the mailbox becomes an IMAP and SMTP mailbox in place (`smtp_imap`, sign-in method `app_password`) and its Google token is deleted. Mail already imported stays, and sync carries on with new mail from that point; the history is not imported a second time. The mailbox keeps its campaigns, warmup and settings. The **Sending identity** list is read from Gmail's API, so it is not offered on an app password, as for any IMAP mailbox.
+
+### Local mail relays (Proton Bridge)
+
+Some mail is only reachable through a program running on your own machine. [Proton Bridge](https://proton.me/mail/bridge) is the common one: it signs in to Proton Mail for you and re-serves the account as ordinary IMAP on `127.0.0.1:1143` and SMTP on `127.0.0.1:1025`. It speaks no TLS a client can verify, because it never listens on a network interface in the first place.
+
+Pegasusbound connects to one of these with the **None** security mode, under two conditions that are checked when you save the mailbox and again every time the worker dials it:
+
+- the host is a loopback literal: `localhost`, an address in `127.0.0.0/8`, or `::1`. A hostname that merely resolves to one is refused, because what a name resolves to can change after it is checked
+- the instance is self-hosted, and the [worker](/development/architecture/) runs on the same machine as the relay
+
+Both are about the same thing: the credentials never leave the machine, so there is no wire to intercept them on. On hosted Pegasusbound the worker is in our infrastructure, never on your computer, so a local relay is not reachable from it and the mode is not offered. Run a [self-hosted instance](/development/install/) on the machine the Bridge is on if you need it.
+
+Set the Bridge's own username and password, which it shows in its interface, not your Proton account password. The same applies to any relay on the machine: a Dovecot sharing a host with its worker, or a local sink used for testing.
+
+</Fold>
+
+<Fold>
+
+## Mailbox allowance
+
+Mailboxes are unlimited on every paid plan. What keeps that honest is a fair-use allowance derived from the plan's sending volume: one mailbox for every send a day the plan includes.
+
+| Plan | Sends per day | Mailboxes |
+| --- | --- | --- |
+| Free workspace | none | `10` |
+| Starter | `150` | `150` |
+| Grow | `3,000` | `3,000` |
+| Business | `15,000` | `15,000` |
+| Enterprise | custom | as many as the volume needs |
+
+That is deliberately far more than safe sending ever needs: at the recommended `30` to `50` sends a day per mailbox, a Business workspace fills its volume with a few hundred mailboxes and still has room for tens of thousands. The allowance exists so that it is never the reason to run a mailbox hotter. A plan whose daily sends are uncapped holds unlimited mailboxes, and a self-hosted instance without billing never counts.
+
+**A free workspace.** Two ways past the `10`: subscribe to any plan and keep every mailbox here, or [self-host Pegasusbound for free](/guides/pegasusbound-cloud/) and link that instance so its mailboxes warm in the same pool. Both are offered on the Accounts page while the workspace is free, and neither is required over the other.
+
+The connect dialog shows the allowance up front: a quiet count while there is room, a warning near the cap, and a clear full state that leads to the request flow instead of letting you type credentials that would be refused. When a connect is refused the answer is the same dialog, not an error toast.
+
+**Getting more.** Two paths, both in the dialog:
+
+- **Move to a bigger plan.** The dialog names the next plan and how many mailboxes it holds; the change is prorated and takes effect immediately.
+- **Request an increase.** Keep your plan and ask for a higher allowance with a sentence on what you are sending. An operator reviews it, usually within a business day, and the new allowance applies to the workspace straight away. The dialog shows the open request while it is pending and lets you withdraw it. History lives under **Settings > Limits**.
+
+Nothing is ever removed for being over the allowance. A workspace that moves to a smaller plan keeps every mailbox sending and warming; it simply cannot add more until it is back under, or the allowance is raised.
+
+There is no daily cap on how many mailboxes you connect: a Business workspace can connect thousands in one afternoon, and the [mailbox import](/guides/mailbox-import/) exists for exactly that.
+
+</Fold>
+
+<Fold>
+
+## Connecting many mailboxes at once
+
+Choose **Import mailboxes** in the connect dialog to connect up to 5,000 mailboxes from a CSV, TSV or XLSX file, a vendor export, or a pasted list of `address:password` pairs. Only an address and a password are needed: the columns are recognised and each domain's servers are found from DNS. Microsoft 365 and Outlook.com rows wait for a Microsoft sign-in each. Google rows use an app password, an admin grant, or Google sign-in where enabled. The import runs on the server, verifies every credential before saving it, and groups whatever fails by cause with the fix.
+
+The same dialog imports straight from an [inbox vendor](/guides/mailbox-import/#import-from-an-inbox-vendor) with an API key, and connects a whole [Google Workspace domain](/guides/mailbox-import/#connect-a-whole-google-workspace-domain) (**Google > Whole Workspace domain**) or [Microsoft 365 organization](/guides/mailbox-import/#connect-a-whole-microsoft-365-organization) (**Microsoft > Whole organization**) through one administrator's grant.
+
+See [Import mailboxes](/guides/mailbox-import/) for the columns, what each provider needs, and what is kept, and [sending domains](/guides/sending-domains/) for setting a tracking host and a root redirect per domain.
+
+</Fold>
+
+<Fold>
+
+## Reconnecting an account
+
+When the provider stops accepting a mailbox's stored credential (a password change, a revoked grant, an expired app password), the mailbox is taken out of sending and syncing and its drawer shows the reason under **Needs attention**, with the fix right on the error:
+
+- **Gmail (connected with Google sign-in) and Outlook**: a **Re-authorize** button re-runs the provider consent in a popup, preselecting the mailbox's own address. This works for an existing Gmail mailbox even where per-mailbox Google sign-in is no longer offered for new ones. The consent must be for that same address; signing in with a different account is refused instead of quietly connecting the wrong mailbox.
+- **SMTP / IMAP**: an **Update credentials** button opens a form for the new password (or new host and port). The replacement is validated against your server before it is saved, the same as at connect time.
+- **Connected through an admin grant** (sign-in method `delegated`, shown as **Admin grant**): there is no **Re-authorize** action, because the mailbox holds no credential of its own; asking to re-authorize one answers `mailbox_reauth_delegated`. It follows its grant: when the grant stops working, every mailbox under it stops, and when the grant's hourly check (or **Check again**) succeeds again, the mailboxes that stopped because of it restart on their own. One you switched off yourself stays off. Check the grant from **Add account > Google or Microsoft > Whole domain**, and fix it in the Google Admin console or with a Microsoft 365 Global Administrator, as described in [Import mailboxes](/guides/mailbox-import/#connect-a-whole-google-workspace-domain).
+
+A successful reconnect stores the new credential, clears the authentication error, reactivates the mailbox on its existing worker, and it resumes syncing from where it stopped. Nothing else changes: settings, history, warmup progress, and campaign membership all stay.
+
+Reconnecting never counts against the mailbox allowance, so a workspace at its cap can still fix a broken mailbox. A mailbox whose sign-in is held by Pegasusbound Cloud is reconnected from your cloud workspace instead; the button says so if you try locally.
+
+</Fold>
+
+<Fold>
+
+## What gets synced
+
+Connecting a mailbox does two things: it imports the mailbox's recent history, and from then on it follows new mail as it arrives. Both are the same on every provider.
+
+**The import** brings in the last `90` days, newest first, up to `5,000` messages per mailbox (the defaults; a self-hosted instance can change both under Instance settings). It reads the inbox, sent mail and archive (plus your own folders on Gmail and IMAP), and skips trash, drafts, spam and Gmail's "All Mail". You can watch it in the mailbox drawer's **Sync** card: a progress bar with a running count while it works, then "Up to date" with what was imported. Because it runs newest first, the mail you would look for is there within the first minute; a large mailbox finishes over the next while at a steady pace. A few IMAP servers (Seznam.cz, for one) refuse to search a folder by date; on those the import reads each message's arrival date instead, which makes the first pass over a large folder a little slower and changes nothing else.
+
+**Live sync** follows the provider's supported folders, including junk (so placement problems are visible) and sent mail (so a conversation shows both sides). Outlook follows Inbox, Sent, Junk, Drafts and Archive where Archive is available; it does not follow every custom Graph folder. Read state, flags, deletions and moves are mirrored too.
+
+The Sync card distinguishes a completed history import from a recent successful live check. An unfinished pass, provider failure, recovery scan or budget hold does not refresh the last successful check or erase the last observed deferred count. That count is an observation from sync, not a measurement of all mail still on the provider. A worker heartbeat alone is not evidence that a mailbox is current. Repeated connection failures refresh the warning's observation time without generating a new notification each pass; no later successful check means recovery is unverified.
+
+Sync respects an explicit provider retry window for temporary service failures as well as rate limits. On IMAP, an incomplete folder-status response or a temporary status failure keeps the existing folders and their sync positions for the next pass. Missing status metadata is requested separately, not treated as proof that a folder was deleted.
+
+The IMAP folder cap limits which folders are opened, not which folders exist. Folders outside the cap keep their saved sync positions. A capped pass cannot establish a rename or refresh the last successful live check. Folder retirement requires a complete name listing showing absence, an explicit provider not-found response, or your folder exclusion setting. On Outlook, an explicit retry window stops the remaining folder requests in that pass, even if an earlier folder failed without a retry window.
+
+If Gmail rejects an ordinary import continuation token, the import restarts inside its original fixed date window. Already mapped mail is deduplicated, and the existing message cap and sync budgets still apply. Outlook recovers an expired delta checkpoint by replaying the configured recent-history window, reconciling known messages and following changes from a fresh checkpoint only after recovery completes. Older messages never imported are outside that recovery window. Authentication failures, throttles and transport errors are not treated as expired checkpoints.
+
+On IMAP, discovering a new folder or a changed UIDVALIDITY generation during or after the initial import schedules a bounded recent-history scan. Generation recovery reconciles known message handles and read state without restarting the global import count. In folders excluded from history imports, such as Junk and Trash, recovery updates only known messages and does not import unseen history. An unreadable or incomplete message body remains retryable rather than being stored as a successful empty message. A folder without usable modification sequences falls back to UIDNEXT checks and periodic flags even if the server advertises CONDSTORE. Changes are read with the standard CONDSTORE fetch. If a server answers that in a form Pegasusbound cannot read, the worker asks the other supported ways, and when none can be read it uses the same UIDNEXT checks. The mailbox keeps syncing either way. Failed flag publication keeps the previous baseline so it can retry. Background lookups do not mark unread messages as seen.
+
+On upgraded instances, a newly admitted provider message is recorded together with an encrypted pending arrival before sync advances. The consumer replays that arrival under its original identity after a restart, including related bounce or complaint processing, and provider updates wait for an unresolved arrival. This is an at-least-once recovery path, not a promise that all historical mail can be reconstructed. Old map-only records have no replay payload, and mixed-version instances retain their legacy behavior. See the [self-host upgrade order and limits](/development/install/#mailbox-sync-upgrade-order).
+
+If Gmail expires its history checkpoint after a mailbox has been offline, Pegasusbound automatically scans the configured recent-history window for missed messages and checks every stored Gmail message for deletions, moves and read-state changes. Recovery resumes across worker restarts and respects the normal sync budget. Messages older than the configured import window that were never stored are not imported by recovery. Once the scan completes, changes made during recovery are followed from a fresh history checkpoint; no reconnection is needed.
+
+Nested folders are followed as well, so mail in a subfolder of the inbox or under a label group arrives like anything else. Up to `100` folders per mailbox are synced. Past that the inbox, sent, drafts, spam, trash and archive are always kept and the rest are taken in the order the server lists them, with a note in the mailbox drawer's **Sync** card saying how many were left out. The note goes away by itself once the mailbox is back under the limit.
+
+On IMAP, folders are identified by the standard attributes a server publishes, and by name when it publishes none. The common names are recognized in a dozen languages, so a mailbox whose Sent folder is called "Gesendete Elemente" or "Éléments envoyés" still files sent mail as sent rather than as inbox.
+
+### Folders you do not want synced
+
+A folder the sync does not recognize files as inbox, so its mail shows up in the [unified inbox](/guides/unibox/). That is right for a folder you sort real mail into and wrong for one another tool fills: a second warmup service running out of its own folder, for example, puts machine mail in your inbox, spends the mailbox's sync budget on it, and has it classified like a reply.
+
+On an IMAP mailbox, the drawer's **Sync** card lists the folders the worker has seen under **Folders not synced**. Tick one and the sync stops opening it on its next pass, within a minute; mail already imported from it is removed from Pegasusbound, and mail that later moves into it from a synced folder is removed too. The mail itself is never touched at the provider. A folder that is not listed yet, because the mailbox has not synced or the folder was just created, can be typed in by name, exactly as your mail server lists it (`Warmer`, or `INBOX/Warmer` on a server that nests everything under the inbox). Case does not matter, and a skipped folder covers its subfolders.
+
+The inbox, sent, drafts, spam, trash and archive folders cannot be skipped: a sync without them is a broken mailbox, not a quieter one. Un-ticking a folder brings it back with a bounded scan of the configured recent-history window; older mail outside that window is not imported. Up to `50` folders can be skipped per mailbox. Gmail and Outlook mailboxes have no such list.
+
+The same setting is `PUT /emails/:id/sync` in the [API](/api/endpoints/) and `pegasusbound mailbox skip-folders` in the CLI.
+
+<Callout type="info" title="Read state on older IMAP servers">
+  Some IMAP servers, including Outlook.com, Microsoft 365 over IMAP and Yahoo, cannot tell a client what changed since it last looked. Pegasusbound checks for new mail on each sync pass and scans read state and flags about every ten minutes. Those changes may take longer to appear than on a provider with usable modification sequences. Provider availability and sync budgets still apply.
+</Callout>
+
+<Callout type="info" title="Fair use, not a hard cap">
+  There is a budget on how much new mail one mailbox stores per day (`2,000` by default) and how much a whole workspace stores per day (`25,000`), plus a short burst limit so a mailing-list storm cannot swamp the workers. Mail over a budget is not dropped: it waits on the server with the sync cursor held, and comes in when the window rolls. Replies to your own outreach have their own budget and are never held behind ordinary inbound mail. The drawer says "Waiting on the sync budget until ..." while this is happening, and the mailbox checks back less often until then.
+</Callout>
+
+Only two patterns deactivate a mailbox's sync, and both mean something is wrong upstream: a flood (thousands of new messages in a single hour, more than any real inbox produces) or exceeding the daily budget on three of the last seven days. The mailbox then shows the reason under **Needs attention**; fix what is delivering that volume into it, or ask your administrator to raise the budget, and reactivate it.
+
+</Fold>
+
+<Fold>
+
+## Sending controls
+
+Set these on the mailbox's **Settings** tab. They apply to the next scheduled send, not retroactively.
+
+| Control | Default | Range |
+|---------|---------|-------|
+| Daily campaign cap | `50`/day | `0` to `5000` |
+| Minimum gap between sends | `600s` (10 minutes) | A hard floor, with jitter added on top |
+
+The `50` default is a safety ceiling, not a daily target. Newly connected mailboxes use a configurable [variable sending plan](/guides/sending-behavior/) with a target range of `28` to `32` per local working day, about `30`. Existing mailboxes keep their settings. Tune or disable the plan in the **Sending** tab; raise the separate ceiling only with proven reputation and low complaint and bounce rates. A fresh mailbox should start lower and ramp; randomized volume does not replace warmup or guarantee deliverability.
+
+The range goes up to `5000` so a high-capacity mailbox (a warmed Google Workspace account allows `2000`/day, Microsoft 365 more) is not artificially blocked, and the dashboard shows a warning on anything above `100`. A high cap only raises the ceiling: the campaign's own daily limit, the ramp, sending behaviour, and your workspace's daily send limit all still apply, and the smallest one wins. The minimum gap is a throughput bound of its own: at the default `600s` a mailbox tops out around `144` sends in a `24`-hour window, so a cap above that only takes effect together with a shorter gap.
+
+<Callout type="warn" title="Do not jump a new mailbox to a high cap">
+  A new mailbox has no reputation. Sudden high volume from a cold inbox is one of the fastest ways to land in spam. Scaling cold outreach means adding mailboxes, not cranking one mailbox's cap.
+</Callout>
+
+### Keeping a copy of sent mail
+
+SMTP mailboxes get a **Keep a copy of sent mail** toggle, on by default. SMTP submission puts nothing in your own account, so without it a message Pegasusbound sends exists only in the recipient's inbox: it shows up in neither your mail client nor the unibox thread. With it on, Pegasusbound files each message in the mailbox's Sent folder as it goes out, flagged read and dated when it was sent.
+
+Turn it off when your provider already saves its own copy of anything submitted over SMTP, which Gmail, Fastmail and Zoho do, or the folder ends up with two of every message. Gmail and Outlook mailboxes connected with OAuth never show the toggle: their APIs file the copy themselves. Warmup mail is never filed, since it would bury your real sent mail.
+
+### Filing in the mailbox
+
+**Mirror Archive and Delete** is on by default for every mailbox. With it on, Archive, Delete and Move to inbox in the [unibox](/guides/unibox/#filing-in-the-mailbox-too) move the message in the mailbox too: Gmail gains or loses its Inbox label or goes to Trash, Outlook moves it to Archive, Deleted Items or Inbox, and an IMAP mailbox moves it between its Archive, Trash and INBOX folders. Delete always lands in the mailbox's own trash, never a permanent delete. Turn it off to keep filing inside Pegasusbound for this mailbox; the conversation still leaves the unibox view you filed it from, and the mailbox keeps it where it was.
+
+The same tab sets the **display name**, **reply-to** (empty uses the mailbox address, see [a shared reply inbox](#a-shared-reply-inbox)), **signature** in plain text and HTML, and **tags** for grouping. Tags belong to the workspace: one anybody creates is there for every teammate, on every mailbox. A new display name is on the From header of the next message the mailbox sends, campaign, reply or warmup alike; nothing needs to be reconnected. Warmup shows it in other workspaces' inboxes, so it follows the [naming rules](/api/error-codes/#name-refusals): no links, web or email addresses, and no hidden characters. A name connected through a form or an import file that breaks them is replaced with one taken from the address, and warmup mail from a mailbox whose older name breaks them goes out under that address-derived name.
+
+The HTML signature is placed in a block of its own one line below the body, so it arrives without the stack of blank lines above it that Apple Mail and Outlook used to show. Put any extra spacing you want inside the signature itself. On a body laid out in HTML it goes inside the container the email was built in, so it lines up with the copy it signs off rather than sitting under it at the left edge of the window (the same placement as the [opt-out line](/guides/unsubscribe/#where-it-appears)). The plain-text signature follows the body after a single blank line.
+
+The signature editor has four views. **HTML** is the visual surface with bold, italic, underline, links and images. The `</>` button next to it swaps that for the raw markup, which is sent exactly as written, so a table-based signature from another tool can be pasted in whole. **Preview** renders it the way a mail client will, in its own frame. **Plain** holds the plain-text version, generated from the HTML while **Sync** is on.
+
+A signature carrying a `<style>` block, a whole HTML document, or an event handler is always edited as markup and the visual toggle is greyed out. The visual surface works by putting the markup into the page, and a signature is workspace data your teammates also see, so that markup is never given a live element to run in. Preview is how you look at it. Any `<style>` block in a signature is inlined onto the elements it matches when the email sends, the same as a campaign body.
+
+### A shared reply inbox
+
+**Reply-to** puts a `Reply-To` header on the mailbox's campaign mail, unibox replies, test sends and placement tests, so answers land in another address instead of the one that sent them. Leave it empty, or set it to the mailbox's own address, and no header is added. Warmup mail never carries it: the warmup exchange reads its replies back in the mailbox that sent them.
+
+Point several sending mailboxes at one mailbox you have connected here, one that only receives, and every reply collects in one place while Pegasusbound keeps track of who sent what:
+
+- the reply counts for the campaign. It stops the sequence when **Stop on reply** is on, runs the reply branch of the email it answers, and is credited to the mailbox that sent that email, in campaign stats and in the dashboard's recent activity ("Reply from lead@acme.com to alex@yourco.com")
+- a reply from someone copied on the lead's emails counts for the lead, as it would at the sending mailbox
+- in the unibox the message shows which mailbox's email it answers, and **Reply** starts from that mailbox, as does a reply the [inbox agent](/guides/inbox-agent/) drafts, so the contact keeps hearing from the address they wrote to. Your answer carries the same reply-to, so their next reply comes back to the shared inbox too. See [choosing the sending mailbox](/guides/unibox/#choosing-the-sending-mailbox)
+- the `campaign.reply_received` webhook names both: `email_account_id` is the mailbox the reply landed in and `sender_email_account_id` the one that sent the email it answers
+
+Replies are only tracked where Pegasusbound can read them. A reply-to naming an address that is not a mailbox in this workspace still routes replies there, but none of it is counted, and the field says so. The reply inbox has to be in the same workspace as the mailboxes pointing at it.
+
+Keep the reply-to on the sending domain where you can. A `Reply-To` on a different domain from the `From` is a mild spam signal to some filters, and one on the same domain is not.
+
+Reply-to only applies to mail sent after it is set: an email sent before carried no header, so an answer to it still arrives at the mailbox that sent it.
+
+### Sending identity
+
+A Gmail mailbox connected with Google sign-in can send as more than one address. Anything you have added under "Send mail as" in Gmail and finished verifying, a role address like hello@ or an address on a second domain you own, is an address Pegasusbound can put on the From header.
+
+Pick it under **Sending identity** on the mailbox's Settings tab. The list is read from Google, so it holds exactly what Google will accept: an alias still waiting on its verification email is shown but cannot be chosen, because Google would refuse the send. Press **Refresh addresses** after adding one in Gmail. Leaving the selection on the mailbox address, which is where every mailbox starts, changes nothing.
+
+The choice applies to campaign mail and to replies you send from the unibox. It never applies to warmup, which always uses the mailbox's own address: warmup pairs mailboxes by that address and verifies its own token against it, so an alias there would break the pairing it exists to prove.
+
+Two things worth knowing before you use one:
+
+- the alias is a From header, not a mailbox. Replies come back to the alias, which Google delivers into the same inbox, and Pegasusbound syncs them as usual
+- authentication follows the alias's domain, not the mailbox's. An alias on a domain with no SPF or DMARC record sends from a domain Pegasusbound has not checked, so set those up first and watch the mailbox's [domain authentication](/guides/deliverability/#domain-authentication) after the change
+
+**Import signature from Gmail** on the same card replaces the mailbox's signature with the one configured in Gmail, for whichever address the mailbox sends as. It writes straight away rather than waiting for the save bar, and the editor below updates to show what was stored. An empty signature in Gmail changes nothing, and one larger than Pegasusbound stores is refused rather than cut in half. Editing the signature here afterwards makes it yours again: nothing re-imports on its own, so a signature you have since adjusted is never overwritten behind your back.
+
+Outlook and SMTP/IMAP mailboxes have no equivalent list to read, so the card is absent for them. Their signature is written in Pegasusbound.
+
+### Profile photo
+
+The mailbox's own profile photo shows at the top of its drawer, with its provider's logo in the corner. Pegasusbound reads it where it can without asking for any extra permission:
+
+- a Microsoft 365 or Outlook.com mailbox, when it connects or reconnects
+- a mailbox connected through a Google Workspace or Microsoft 365 [admin grant](/guides/mailbox-import/), from the organization's directory
+- a mailbox imported from an inbox vendor that publishes one, such as Zapmail
+
+Grant and vendor photos are checked again every week, so a new photo appears on its own and a removed one goes away. A Google mailbox signed in on its own and any SMTP/IMAP mailbox shows its initials instead, because nothing Pegasusbound is allowed to read carries a photo for it.
+
+### Custom tracking domain
+
+Open pixels and click links go out on a shared tracking host by default, which means their reputation is the sum of everyone else using it. Pointing a subdomain of the domain you send from at that host puts them on your own name instead.
+
+Type the subdomain into **Custom tracking domain** in the mailbox's Settings tab. Pegasusbound shows the exact `CNAME` to add, with the value taken from the host this Pegasusbound install serves tracking on (on a self-hosted install, that is whatever the operator set `TRACKING_DOMAIN` to). Add the record at your DNS provider, then press **Save & verify**.
+
+Verification resolves the record live and reports what it finds:
+
+| What it says | What it means |
+| --- | --- |
+| **Verified** | The subdomain resolves to the tracking host. New sends use it. |
+| No DNS record yet | The name does not exist. The record has not been added, or has not propagated; usually minutes, up to an hour. |
+| Points at something else | The record exists but its value is another host. The message names what it found so you can compare it with what you typed. |
+| Nothing to point at | This install has no tracking host configured. Nothing can verify until an operator sets `TRACKING_DOMAIN`. |
+
+A provider that flattens `CNAME` records (ALIAS records, apex flattening, proxied records) still verifies: Pegasusbound compares the addresses when there is no `CNAME` to read.
+
+A tracking domain belongs to one workspace on an instance. Once a workspace has verified it, on a mailbox or as a campaign's override, no other workspace on the same instance can save or verify it (`409 tracking_domain_taken`). The workspace's own mailboxes and campaigns can all share it.
+
+Press **Check again** any time to re-resolve without changing the value. Pegasusbound also re-checks every custom tracking domain on its own, hourly, so a record that finishes propagating after you saved starts being used without you doing anything, and one that later stops pointing at the tracking host stops being used instead of quietly breaking every link.
+
+Until it verifies, tracking falls back to the shared host, so an unverified domain never breaks sending: links keep working, they just are not on your name yet. Links already sent keep working after a change; new sends pick up the new domain.
+
+A verified domain also serves the [unsubscribe link](/guides/unsubscribe/#which-address-the-link-points-at) in that mailbox's campaign mail, so the opt-out a recipient reads sits on your name like every other link in the message. An unverified one changes nothing: the opt-out stays on the instance's API address, which always serves it.
+
+Verification proves DNS, not HTTPS, and the two are separate steps. That matters more now that the opt-out rides the same host: a certificate the recipient's browser rejects costs a spam complaint, not just a click. On Pegasusbound Cloud the certificate is handled for you. On a self-hosted instance installed with the bundled Caddy it is handled too: Caddy obtains one for your domain the first time a recipient loads a link on it. Behind an operator's own proxy it depends on that proxy, so a domain that verifies here but serves a certificate warning is something to raise with the operator.
+
+### Tracking direct mail
+
+Campaign mail carries an open pixel and tracked links. Mail you write by hand in the [unified inbox](/guides/unified-inbox/) does not, unless you ask for it.
+
+Turn on **Track opens and clicks on direct mail** in the mailbox's Settings tab to opt that mailbox in. From then on, HTML replies and new messages you send from that mailbox get the same open pixel and tracked links as campaign sends. Plain-text-only messages remain untracked. The results appear under [Direct mail](/guides/analytics/#direct-mail) in Analytics.
+
+It is off by default on purpose. A pixel in a one-to-one reply is a different proposition from one in a cold sequence: it costs a little deliverability, and it tracks mail to colleagues and customers who are not campaign contacts. Leave it off for a mailbox you use as a personal inbox.
+
+Two limits worth knowing before you read the numbers:
+
+- It applies to mail sent from now on. Messages already delivered carry whatever they carried when they left, so the figures start from the moment you switch it on rather than covering your history.
+- It covers mail sent through Pegasusbound. A reply you write in Gmail or on your phone still counts towards the sent and reply figures, because those are read from the mailbox itself, but it cannot be opened-tracked.
+- It needs an HTML part. A plain-text-only message has nowhere to place a pixel or wrapped link, so it is sent without tracking.
+
+Clicks are counted per message, not per link: Direct mail reports how many messages were clicked and when, without the per-link breakdown campaigns get.
+
+Tracking uses the same host as everything else, so a [custom tracking domain](#custom-tracking-domain) on this mailbox applies here too. On an install with no tracking host configured, direct mail goes out untracked rather than carrying a pixel that points nowhere.
+
+</Fold>
+
+<Fold>
+
+## Warmup
+
+New mailboxes should warm up before carrying campaign volume. Defaults are `10`/day starting volume, `+1`/day ramp, and a `40`/day ceiling.
+
+Start, pause, resume, or stop from the mailbox's **Warmup** tab, or for several mailboxes at once from the Accounts selection bar. **Pausing keeps your ramp progress; stopping resets it**, so a restart begins at the base volume again.
+
+The same tab decides where warmup mail lands **in your own mail client**: its own folder (`Pegasusbound` by default), left in the inbox, or archived. It covers both directions, the warmup this mailbox receives and the copy of what it sends, so neither Inbox nor Sent fills with it. See [keeping warmup out of your inbox](/guides/warmup/#keeping-warmup-out-of-your-inbox).
+
+Pegasusbound retries filing until the worker confirms success, including after a worker restart or reassignment. Reconnecting also files recognized warmup mail left behind while access was unavailable, using your current placement setting. Choosing **Inbox** deliberately leaves it in place.
+
+On Outlook, a failed, ambiguous or incomplete lookup of a warmup message's stable identity stops deletion before removing the provider message or its stored body. Unavailable lookup is not proof that the message is missing. Each lookup uses one request. Missing or null message collections, invalid identities and responses containing a continuation return a temporary error without following the continuation. Only an explicit terminal empty collection proves absence. A completed empty lookup and a provider-confirmed missing item retain the existing idempotent cleanup behavior. This safeguard needs no schema change or backfill and does not change the existing command retry limit. If the lookup remains incomplete through that limit, the stored body remains in place rather than being deleted on uncertain evidence.
+
+If Outlook asks an upgraded worker to wait after a failed warmup filing, the pending filing stays in the retry queue until that provider-specified time, even if the worker restarts or the mailbox moves to another worker. The retry time cannot be shortened by a repeat error or an earlier queue attempt. Other mailboxes continue working; an older worker does not gain this protection until it upgrades.
+
+Keep warmup running after campaigns begin rather than switching it off once a mailbox looks ready. See [Warmup](/guides/warmup/).
+
+A mailbox marked as a [placement seed inbox](/guides/placement-tests/#your-own-seed-inboxes) is the exception: it never warms up (starting warmup on it is refused until it is unmarked) and never sends campaign mail, because a test inbox has to stay a stranger to your senders.
+
+<Callout type="info" title="Warmup is a paid feature">
+  The model still supports separate free and premium pools, but access is gated to paid workspaces today.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Pausing and disconnecting
+
+A mailbox can be switched off when you want it to stop without losing its settings, its history, or its place in the fleet. Use **Switch off** on its row's **More** menu, the **Mailbox on** switch on its **Settings** tab, or the selection bar for several at once. Over the API it is `PATCH /emails/{id}` with `status` set to `inactive`, and `active` turns it back on.
+
+Off means the whole mailbox: it sends no campaign mail, sends and receives no warmup, and syncs nothing, whatever its warmup setting says. The list shows it as **Off**, and its warmup column reads **Stopped** when warmup is still set to run. To stop cold sending while the mailbox keeps warming, which is what a mailbox recovering from spam placement needs, use [Hold from campaigns](#holding-a-mailbox-yourself) instead.
+
+A switched-off mailbox is turned back on the same ways: **Switch back on** on the row's **More** menu or its warmup menu, the **Switch back on** button at the top of its Overview tab, the **Mailbox on** switch, or **Switch on** in the selection bar. Warmup that was set to run starts again straight away. To bring a mailbox back for warmup only, turn on **Hold from campaigns** on its Overview tab before switching it on, so campaigns cannot pick it in between. A mailbox whose provider access was revoked shows **Reconnect** rather than **Off**, and is turned back on by reconnecting it.
+
+Switching it off takes effect immediately: the machine syncing it is told to drop it, so it stops importing mail and stops being picked for campaign sends and warmup within seconds rather than at that machine's next restart. Warmup pool membership is dropped, and any warmup chain it had winds down on its next step. A campaign email already handed over is answered as a failure and the step is retried later on a mailbox that is still active, so nobody receives it twice and no lead is stranded.
+
+Leads mid-sequence on that mailbox move to another one in their campaign as they reach their next step, rather than going silent waiting for it. Each campaign's activity log records the change. See [senders and rotation](/guides/campaigns/) for how a lead's mailbox is chosen and when it changes.
+
+It keeps its worker assignment while off, so switching it back on puts it back on the same machine, sending from the same IP, and it resumes syncing from where it stopped instead of re-importing.
+
+**Disconnecting** removes the mailbox for good. It is on the mailbox's own **More** menu in the list, as **Disconnect mailbox**, and at the bottom of its **Settings** tab under Danger zone. To remove several at once, tick their rows and use the selection bar. The machine syncing it is told to drop it before the record is removed, because afterwards there is nothing left to tell. If that instruction cannot be delivered, the disconnect fails with a `503` and nothing is removed, so retry it in a moment rather than assuming it worked.
+
+A mailbox belongs to the workspace, not to the member who connected it. Anyone with the **Manage mailboxes** permission can switch any of the workspace's mailboxes off, change its warmup, or disconnect it, including ones a teammate added and ones whose owner has since left. That is the same permission the list itself is behind, so a mailbox you can see is a mailbox you can act on.
+
+Everything belonging to that mailbox goes with it: its imported mail in the unibox, its warmup history and pool membership, its credentials, its sender links, and any send still scheduled for it. A campaign that was using it keeps running on its remaining senders, and the leads it had been writing to move onto them at their next step. Export the workspace first if you want a copy. Disable the mailbox instead when you only want it to stop.
+
+Before the worker closes a connected mailbox, it attempts to file up to 200 recent known warmup messages, with a 20-second time limit. Disconnect still completes if provider access has already stopped working. Pegasusbound retains only hashed recognition identifiers for up to 90 days from the warmup message or token being recorded, scoped to the mailbox address and workspace, so removing and adding the same address again can recover warmup mail during the normal history import. These identifiers contain no message content or credentials and disappear when the workspace is deleted. Mail whose identifiers were already erased before this recovery was introduced cannot always be identified safely; Pegasusbound does not hide mail just because its sender or subject resembles warmup.
+
+### What disconnecting erases
+
+Disconnecting is a deletion, not a hiding. Two parts of it finish just after the mailbox disappears from your list, because neither can be done in the instant the record goes.
+
+**The connection to your provider is handed back.** For a Gmail mailbox, Pegasusbound calls Google's revocation endpoint with the refresh token it held, which invalidates that token and every access token issued from it, and removes Pegasusbound from the third-party access list on your Google account. You do not have to go and remove it yourself. Deleting our copy of a token would not have done this; the grant would have stayed on your account.
+
+Microsoft publishes no equivalent endpoint for a single application, so an Outlook or Microsoft 365 mailbox is different: the stored tokens are destroyed here and stop being usable by Pegasusbound, but removing the app from your account is done by you, under [Microsoft account privacy settings](https://myaccount.microsoft.com/privacy). The only Microsoft call that ends sessions signs you out of every application you use, which is not something to do because you disconnected one mailbox.
+
+**The message bodies are deleted.** Mail Pegasusbound imported is stored outside the database, and those files are removed too. The rows that index them go with the mailbox immediately; the files follow within about a minute.
+
+If either step cannot finish, because a provider is down or storage is briefly unreachable, it is retried until it does rather than being given up on. Nothing else is left: the thread labels and snooze timers on conversations that existed only in that mailbox go as well, and a conversation that also ran through a mailbox you kept keeps its labels.
+
+Closing the whole workspace does the same thing for every mailbox in it, for the same reasons.
+
+</Fold>
+
+<Fold>
+
+## Worker assignment
+
+You never pick a worker. Pegasusbound assigns each mailbox to a sending worker automatically and can move it later.
+
+Workers are the machines that connect to your mailbox provider. They are not the address your recipients see: your provider delivers the mail from its own infrastructure, and it strips the connecting client's address on the way out. What the worker's address does decide is how your provider sees the sign-in, which is why Pegasusbound optimises for **keeping a mailbox on the same worker** rather than spreading it around. A mailbox whose connecting address keeps changing collects security challenges and authentication throttles for nothing.
+
+Every worker is the same kind of worker. There are no tiers to qualify for and no pools to be sorted into. Placement scores the fleet on live signals and picks the best fit:
+
+- how much capacity a worker has left, so the fleet fills evenly
+- whether the mailbox is already there, which counts for more than anything else
+- whether the worker sits near where your provider expects your sign-ins
+- how much of your workspace is already on that one machine, so a single failure never stops all of your sending
+- how many other mailboxes on the same provider already sign in from that address
+
+Each assigned mailbox counts as one unit against the worker's configurable planning target. Provider sending budgets remain attached to each mailbox and do not reduce the worker target.
+
+**Mailboxes move only when there is a reason.** A worker going offline or running hot (above 85% of its planning target) will move yours. Pegasusbound also corrects workspace or provider concentration across the live fleet. A settled mailbox has to have been in place for three days before an ordinary rebalance is considered, and the alternative has to be meaningfully better. A mailbox that never needs to move is the ideal, not a stuck one.
+
+Plans that include reserved sending give your workspace a worker no other customer sends from, so your mailboxes always sign in from an address that is yours alone. It is a preference, not a lock: if that machine goes down your mailboxes keep working on the rest of the fleet and return when a replacement is ready.
+
+</Fold>
+
+<Fold>
+
+## Resting a tired mailbox
+
+Cold sending used to run at full volume until a mailbox crossed a hard health band, with nothing in between. A mailbox showing early fatigue either kept going or was quarantined.
+
+A mailbox now has a cold-rotation state, separate from its health:
+
+| State | Meaning |
+|-------|---------|
+| `active` | In cold rotation. The default, and where every mailbox starts |
+| `resting` | Out of cold rotation to recover. Warmup keeps running, so its reputation stays alive. Leads mid-sequence on it move to another mailbox at their next step |
+| `reserve` | Held back by you. Never entered or left automatically |
+
+A mailbox rests when it is quarantined or blocked from warmup, and returns on its own three days after that lifts. One good hour does not put it back in rotation. Spam placement never rests a mailbox: a `watch` or `throttled` mailbox stays in rotation with its daily cold volume dampened (to 70% and 50%) until placement recovers.
+
+Resting only makes sense while the mailbox is in a warmup pool, because pool health is the signal it recovers on. If a resting mailbox leaves its pool (the workspace loses warmup when a trial ends or a plan changes), there is no health signal to wait for, so the mailbox returns on its own three days after its last rest stamp rather than staying out indefinitely. Pausing warmup on the mailbox does not remove it from the pool, so its health keeps being tracked and the normal three days after it lifts still apply.
+
+### Putting a resting mailbox back yourself
+
+You do not have to wait. A resting mailbox's notice in the drawer has a **Put back into campaigns** button. It lands in `active` unless it is still quarantined or blocked from warmup, in which case it stays resting and the drawer says so: a mailbox the pool has taken out should not send cold mail, and there is no override for that short of the standing lifting.
+
+API keys get the same exit through `POST /emails/:id/release`, which works on a resting mailbox as well as a held one.
+
+It does not rest on the `watch` band. That band is deliberately the one that changes nothing you can feel, and leaving cold rotation is very much something you feel.
+
+### Holding a mailbox yourself
+
+To keep a mailbox out of campaigns on your own terms (a domain you are moving, an inbox you want to keep for replies only, a sender you are about to retire), open its drawer and turn on **Hold from campaigns** on the Overview tab. The mailbox goes into `reserve`: campaigns stop picking it, warmup carries on as before, and nothing automatic ever releases it. Turn the hold off to put it back; if its warmup health is still poor at that point, it rests until it recovers rather than returning straight to full volume.
+
+The same hold is available to API keys as `POST /emails/:id/hold` and `POST /emails/:id/release`. Releasing a mailbox that is `resting` rather than held works the same way and is the manual exit from a rest.
+
+<Callout type="info" title="Separate from where a mailbox runs">
+This is not the same as the risk band that decides which sending worker and IP host a mailbox. A resting mailbox is usually still on a clean worker; it is simply not being offered campaign sends. The mailbox drawer says which state it is in and why.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Health
+
+The Accounts list groups mailboxes as **Healthy** (sending normally), **Warming** (ramping through warmup), or **Needs attention** (paused, failing, or not sending). Each row shows the mailbox with how it connects and its tags, a **Status** that says what it is doing (**Sending**, **Warming**, **Active** when it does both, **Resting**, or **Idle**, and **Error**, **Off** or **Reconnect** when something stops it), campaign emails sent today against its cap, warmup sent today against the ramp target, the inbox rate, and the health score. Hover a status for the reason, and click any column header to sort. A drop in health between refreshes notifies you rather than waiting to be noticed.
+
+The **Inbox** column is the share of the mailbox's warmup mail that reached partners' inboxes at Google, Microsoft and Yahoo over the last seven days (smaller mail hosts run their own filters and are never counted), and the score is capped at it, so a mailbox landing some mail in spam no longer reads `100`. Click it, or open the drawer's **Deliverability** tab, for the day-by-day history and the split per provider. See [seeing where warmup lands](/guides/warmup/#seeing-where-warmup-lands).
+
+The detail drawer runs a live `SPF`, `DKIM`, and `DMARC` check on your sending domain. Confirm it is green before sending; major providers require alignment for bulk and cold mail. A domain that stays Failing eventually stops cold sending and warmup from every mailbox on it, so fix the records and press **Check** to clear it straight away; for anyone who can manage mailboxes, the check records its verdict. A lookup DNS did not answer shows the records as Not verified and is never held against the domain. DKIM reads **Not verified** rather than Missing when no key answers, because its selector is not something DNS can be asked for; that never gates sending. See [Deliverability](/guides/deliverability/) for the grace period and exactly what is stopped.
+
+Underneath, health moves through `healthy`, `watch`, `throttled`, `quarantined`, and `blocked`. These feed warmup pool selection, which only picks healthy mailboxes as partners, so an unhealthy one can be lowered in volume, removed from the pool, or blocked entirely. A blocked mailbox shows the reason and any appeal option on the Warmup tab, and must requalify on a fresh probation sample rather than waiting out the clock.
+
+Health is judged only on what happened while the mailbox was in the pool: signals recorded before it joined are never counted against it.
+
+<Callout type="info" title="Health protects the pool">
+  These controls act earlier than the point where providers start penalizing senders. Low complaint rate and low spam placement matter more than maximum throughput.
+</Callout>
+
+</Fold>
+
+## Related guides
+
+<Cards>
+  <Card title="Import mailboxes" href="/guides/mailbox-import/" />
+  <Card title="Deliverability" href="/guides/deliverability/" />
+  <Card title="Personalization & Expressions" href="/guides/expressions/" />
+</Cards>

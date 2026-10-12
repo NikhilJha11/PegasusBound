@@ -1,0 +1,263 @@
+---
+title: "Security"
+description: "Two-factor authentication, passkeys, and sessions."
+---
+
+**Settings > Security** is where you protect how you sign in to Pegasusbound: two-factor authentication, passkeys and your signed-in devices.
+
+## Secure your account
+
+<Steps>
+
+<Step>
+
+Open **Settings > Security**.
+
+</Step>
+
+<Step>
+
+Choose **Add a passkey** so daily sign-in is fast and phishing-resistant.
+
+</Step>
+
+<Step>
+
+Turn on two-factor authentication with any standard authenticator app, and store the recovery codes safely.
+
+</Step>
+
+<Step>
+
+Review **Sessions** now and then, and sign out anything unfamiliar.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- Recovery codes are shown only once, and each one works once.
+- A passkey skips the emailed code, because unlocking your device already proves it is you.
+- Changing your password ends every session. The device you are on is signed straight back in.
+- Some sensitive changes ask for your password or an authenticator code again. The confirmation lasts five minutes.
+- A password has to be 8 to 128 characters, and commonly breached passwords are refused.
+
+<Fold>
+
+## Where these settings live
+
+Everything here lives under **Settings > Security** and concerns signing in to Pegasusbound. For authenticating the domains you send from (SPF, DKIM, DMARC), see [Deliverability](/guides/deliverability/).
+
+</Fold>
+
+<Fold>
+
+## How signing in works
+
+| Method | Steps |
+|--------|-------|
+| Password | Email, password, a 6-digit emailed code, then your authenticator code if 2FA is on |
+| Passkey | Pick the passkey and unlock with Touch ID, Face ID, Windows Hello, or a security key. No password, no emailed code |
+| Google / Apple | One tap, natively in the iOS app. No emailed code, since the provider already verified you |
+
+A first sign-in with a new address via Google or Apple creates your account, workspace, and free trial automatically.
+
+If the address already has a Pegasusbound account with a password, the first Google, Apple or single sign-on with it asks for that password before the provider is attached to the account. The provider confirms the address is yours; the password confirms the account is. Once linked, later sign-ins with that provider go straight through. An account that never set a password (created through a provider or an invitation) is linked on the first sign-in.
+
+Accounts created through an external sign-in provider have no password initially. Trying password sign-in returns the same invalid-credentials response as an incorrect password. Continue with your provider, or use **Forgot password** to set a password before signing in with it. A reset link works once and only for the password it was requested against: changing your password by any route, including using another reset link, makes every earlier link invalid before it expires.
+
+<Callout type="info" title="Passwordless by design">
+A passkey is tied to your device and unlocked with biometrics or a PIN, so it already proves both something you have and something you are or know. That is why it skips the emailed code. Pegasusbound requires that unlock: a security key with no PIN set cannot be added, and cannot sign in, until you set one on the key.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Two-factor authentication
+
+2FA (TOTP) adds a rotating 6-digit code to every password sign-in, so a stolen password alone is not enough. Any standard authenticator works: Google Authenticator, Microsoft Authenticator, 1Password, Authy, Bitwarden.
+
+**Set up** walks through three steps:
+
+1. **Scan.** Point your authenticator at the QR code. If you cannot scan (a desktop password manager, say), open **Can't scan it? Enter the key manually** and copy the setup key; the account, issuer, digit count, interval and algorithm are listed beside it for apps that ask.
+2. **Verify.** Type the 6-digit code the app now shows for Pegasusbound. It verifies as soon as the sixth digit lands, and a wrong code clears the field so you can try the next one.
+3. **Save codes.** Ten recovery codes appear once. **Download** saves them as a text file, **Copy** puts them on the clipboard, and **Print** opens a printable sheet. The wizard cannot be closed until you confirm you have saved them.
+
+<Callout type="warn" title="Recovery codes are shown only once">
+Each works once, and they are your way back in if you lose your authenticator. Store them in a password manager before closing the wizard. With no codes and no authenticator you are locked out of your account.
+</Callout>
+
+Once 2FA is on, the Security page shows when it was enabled and how many recovery codes are left. **Regenerate** issues a fresh set of ten after a current code; every previous code stops working the moment the new ones are shown. The row turns amber when three or fewer remain.
+
+At sign-in, the code submits automatically once six digits are in. Without your authenticator, choose **Use a recovery code**.
+
+Each code works once. An authenticator code stays valid for about a minute so a slow connection still works, but once it has signed you in, that same code is spent and cannot be used again.
+
+Wrong codes are limited three ways: five per sign-in attempt, after which you sign in again from the start; twenty per network address in fifteen minutes; and ten per account in fifteen minutes, however many times the password is entered in between. A correct code clears the account count.
+
+**Turn off** asks for a current code or a recovery code first, then an explicit confirmation. With 2FA off you are protected only by your password plus the emailed code, your recovery codes stop working, and setting it up again issues a fresh secret and new recovery codes.
+
+</Fold>
+
+<Fold>
+
+## Passkeys
+
+A passkey signs you in with whatever unlocks your device. Nothing is phishable, because the credential never leaves the device. Current Chrome, Safari, Edge, and Firefox all support them; if yours does not, the Security page says so and you keep using your password.
+
+**Add a passkey** prompts your device to confirm, then asks you to name it ("MacBook Touch ID", "YubiKey"). Add one per device you sign in from. A passkey syncing through iCloud Keychain or Google Password Manager is marked **Synced** and works on your other signed-in devices.
+
+If your device refuses because it already has a passkey for your account, Pegasusbound tells you instead of silently dismissing enrollment. Keep using the existing passkey, or choose another device to add one.
+
+Each entry shows when it was added and last used, and can be renamed or removed.
+
+<Callout type="info" title="No passkey on this device?">
+Unsynced passkeys live only on the device that created them. On a device without one, Pegasusbound says none was found and you sign in with your password, then add a passkey there.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Confirming sensitive changes
+
+Some changes ask you to confirm it is you even though you are already signed in:
+
+- creating an API key
+- adding or removing a passkey
+- turning on two-factor authentication
+- inviting a member or changing a member's role
+- exporting or importing a whole workspace
+- approving a self-hosted instance's warmup pool link
+- revealing or rotating a webhook or OAuth app signing secret
+- transferring a workspace to someone else
+- scheduling a workspace or account for deletion
+
+Enter your password or a code from your authenticator, whichever your account has. The confirmation lasts five minutes, so a run of related changes only asks once.
+
+If you signed up with Google, Apple or your company's single sign-on, your account may have neither a password nor 2FA yet. There is nothing to confirm with in that case, so your sign-in is the confirmation: 2FA can be turned on within five minutes of signing in. If more time has passed, sign out, sign in again, and set it up straight away. From then on you confirm with your authenticator.
+
+This exists because the things on that list either hand out a credential that outlives the session that made it, reveal a secret, change who can get in, or cannot be undone from your side. Someone who got hold of a signed-in browser should not be able to do any of them without knowing something you know.
+
+</Fold>
+
+<Fold>
+
+## Sessions
+
+Every signed-in device appears under **Sessions** with its device (`Chrome on macOS`), location where known, sign-in method (Email, Google, Apple, or Passkey), and last activity. Your current device is tagged **This device**.
+
+**Sign out** ends one session; **Sign out other sessions** clears everything except where you are now. Signing out everywhere, changing or resetting your password, and an account ban end every session at once, and close any live connection the dashboard or an API client has open to the realtime service.
+
+A session renews itself in the background, and each renewal replaces the credential that keeps it alive. If an old one is ever presented, a copy of it exists somewhere else, so Pegasusbound ends that session on the spot and you sign in once more on that device.
+
+<Callout type="warn" title="If something looks wrong">
+Sign out the session, change your password, and make sure 2FA is on. Signing out other sessions is the fastest way to cut off access.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Choosing a password
+
+A password has to be between 8 and 128 characters, and it is checked against a list of the 100,000 most commonly breached passwords published by the UK National Cyber Security Centre. If yours appears there, it is refused and you are told why. The check is case-insensitive, so capitalising the first letter of a known password does not get past it.
+
+There is no rule about mixing upper case, digits and symbols. A long passphrase you can remember beats a short one with a symbol bolted on, which is what current guidance from NIST and the NCSC both say. The dashboard shows a strength meter as you type.
+
+Repeated wrong passwords are counted per account, not just per device, so guessing one account from many addresses does not buy an attacker more attempts. After fifty failures in an hour the account stops accepting password attempts until the hour is up. Signing in correctly or completing a password reset clears the count. The current password asked for when you change it, and the password you confirm a sensitive change with, share a separate budget of the same size.
+
+</Fold>
+
+<Fold>
+
+## Names
+
+Your name and your workspace's name appear in emails Pegasusbound sends to other people, such as invitations. They are plain text only: a name that contains a link, a web address, an email address or invisible formatting characters is refused, and the field tells you why. The full rules are in [Name refusals](/api/error-codes/#name-refusals).
+
+</Fold>
+
+<Fold>
+
+## Password and alerts
+
+Change your password under **Password**: current password, then a new one. **Changing it ends every session, including the one you change it from.** The device you are on is signed straight back in with a new session, so you notice nothing, while anything that held your old session, on any device, is signed out. Accounts that only use Google, Apple, or a passkey have no password to change.
+
+**Sign-in alerts** notify you when your account is accessed from a new browser and OS combination, naming the device and location with a reminder to act if it was not you. They appear in your in-app feed by default; enable email under **Settings > Notifications**, Security section, Email channel. Your first sign-in is never alerted, as there is nothing to compare against.
+
+</Fold>
+
+<Fold>
+
+## What is recorded when you sign up
+
+Creating an account records the address it was created from, the browser's user-agent string, and a score for how the email address itself reads. This is anti-abuse evidence: it is what lets the platform notice one person opening many accounts, or a wave of signups from one place, without which every account looks unrelated to every other.
+
+- The email address is also stored in a normalized form, with plus-tags and Gmail dots collapsed, so `ada.lovelace+trial@gmail.com` and `adalovelace@gmail.com` are recognisable as the same person. This form is used only for correlation and never for signing in.
+- It is recorded for every signup, not only suspicious ones. Keeping it only for accounts that already look risky would leave exactly the patterns it exists to find half-empty.
+- It stays on the instance the account was created on. Workspace archives do not carry it.
+
+Nothing here refuses a signup on its own. A single weak signal is wrong too often, and turning a false positive into a rejected account leaves a real customer with no way through.
+
+</Fold>
+
+<Fold>
+
+## Sign-ins from an impossible place
+
+A hijacked workspace owns warmed mailboxes and decryptable sending credentials, so it is worth more to an attacker than an ordinary account. Sign-in alerts tell you after the fact; this stops the sign-in.
+
+Pegasusbound keeps a short window of where your account was recently used and compares each new sign-in against the last. When the two could not physically be the same person travelling, faster than about `1000` km/h, the sign-in has to pass an emailed code even from a browser you have used before. That is exactly the case a remembered device cannot catch, because an attacker holding your cookie looks like a familiar device.
+
+What it deliberately does not do:
+
+- **It does not judge your first sign-in.** There is nothing to compare against, and challenging it would challenge every new account.
+- **It ignores short hops.** Locations come from a city database, so two sign-ins from opposite sides of one city are not a journey.
+- **It ignores intervals under two minutes.** Two sign-ins seconds apart from different cities are far more likely a proxy than travel, and dividing by that interval makes any distance look impossible.
+- **A real flight passes.** London to New York in nine hours is ordinary and is never challenged.
+- **It respects your login-code setting.** Where an operator has turned emailed codes off entirely, anomalies are recorded for review but no code is demanded, since that deployment may have no working mail.
+
+Repeated anomalies inside a fortnight are recorded against the workspace's posture. One unusual trip is not a pattern.
+
+<Callout type="info" title="Needs a location database">
+This uses the optional MaxMind city database. Without it configured, sign-ins are recorded but never judged, which is the safe direction: a false challenge locks a real person out of their own account.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## Cross-account patterns
+
+Individually, every abuse control watches one thing: a rate limit watches one account, warmup health one mailbox, verification one address. Someone spreading the same behaviour across several accounts stays under all of them.
+
+A nightly sweep looks at the group instead. It groups workspaces that were opened from the same address, or by the same email identity once plus-tags and Gmail dots are collapsed, and notices a workspace that connects an unusual number of mailboxes at once.
+
+Findings are recorded as evidence on the [workspace posture](/guides/deliverability/), never acted on alone:
+
+- **Three workspaces is the floor.** Two sharing an address is a coincidence.
+- **Private and loopback addresses are ignored**, since every self-hosted install signs up over a LAN.
+- **Sharing an address carries little weight** on its own. Offices, co-working spaces and VPNs all produce it honestly.
+- **Only the last 30 days count.** Two workspaces opened from one office a year apart are not related.
+
+</Fold>
+
+<Fold>
+
+## Strongest setup
+
+1. **Add a passkey** so daily sign-in is fast and phishing-resistant.
+2. **Turn on 2FA** and store the recovery codes safely, so password sign-ins keep a second factor.
+3. **Review sessions** periodically and sign out anything unfamiliar.
+
+</Fold>
+
+## Related guides
+
+<Cards>
+  <Card title="Deliverability" href="/guides/deliverability/" />
+  <Card title="Mailboxes" href="/guides/mailboxes/" />
+  <Card title="Team & roles" href="/guides/team-roles/" />
+</Cards>

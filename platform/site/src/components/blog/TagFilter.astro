@@ -1,0 +1,29 @@
+---
+interface Props {
+  tags: { tag: string; count: number }[];
+  total: number;
+  /** Currently active tag, or undefined on the unfiltered archive. */
+  active?: string;
+}
+const { tags, total, active } = Astro.props;
+
+const base = 'inline-flex items-center gap-1.5 h-9 px-4 rounded-full text-[14px] ring-1 transition-colors';
+const on = 'bg-slate-900 text-white ring-slate-900';
+const off = 'bg-white text-slate-600 ring-slate-200 hover:text-slate-900 hover:ring-slate-300';
+---
+<div class="flex items-center gap-2 flex-wrap">
+  <a href="/blog/" class={`${base} ${active ? off : on}`} aria-current={active ? undefined : 'page'}>
+    All
+    <span class={`tabular-nums text-[12.5px] ${active ? 'text-slate-400' : 'text-white/60'}`}>{total}</span>
+  </a>
+  {tags.map(({ tag, count }) => (
+    <a
+      href={`/blog/tag/${tag}/`}
+      class={`${base} ${active === tag ? on : off}`}
+      aria-current={active === tag ? 'page' : undefined}
+    >
+      {tag}
+      <span class={`tabular-nums text-[12.5px] ${active === tag ? 'text-white/60' : 'text-slate-400'}`}>{count}</span>
+    </a>
+  ))}
+</div>

@@ -1,0 +1,153 @@
+---
+title: "Website tracking"
+description: "Install the tracking snippet, see which pages a contact visits, and control consent and retention."
+---
+
+Website tracking adds visits to your own site to a contact's activity timeline: which pages they saw, where they came from and which campaign brought them. It is off until you turn it on.
+
+## Turn on website tracking
+
+<Steps>
+
+<Step>
+
+Open **Settings > Website tracking** and switch on **Record website visits**.
+
+</Step>
+
+<Step>
+
+Add the hosts your site runs on under **Your website hosts**.
+
+</Step>
+
+<Step>
+
+Paste the snippet from the settings page before the closing `</head>` tag on every page.
+
+</Step>
+
+<Step>
+
+In the default **Ask first** mode, call `pegasusbound('consent', 'granted')` from your cookie banner once a visitor accepts.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- A visit is tied to a contact only after they click a campaign email link that leads to one of your hosts.
+- Visits are kept for 90 days by default, adjustable from 7 to 365.
+- The IP address is never kept, and a browser sending Global Privacy Control or Do Not Track is never recorded.
+- Visits show in a contact's **Activity** tab under the **Website** filter.
+
+<Fold>
+
+## What website tracking records
+
+Website tracking adds page views on your own site to a contact's activity timeline: which pages they landed on, where they came from, which campaign or UTM brought them, and what device they used. It is off until you turn it on, and the consent mode, location precision and retention window are yours to set.
+
+</Fold>
+
+<Fold>
+
+## Installation
+
+Open **Settings > Website tracking**, switch on **Record website visits**, add the hosts your site runs on, and paste the snippet before the closing `</head>` tag on every page:
+
+```html
+<script>window.pegasusbound=window.pegasusbound||function(){(window.pegasusbound.q=window.pegasusbound.q||[]).push(arguments)};</script>
+<script async src="https://TRACKING_HOST/tracking.js" data-site="SITE_KEY"></script>
+```
+
+The settings page renders the exact snippet for your workspace, with your tracking host and site key filled in. The first line is a small stub so your page can call `pegasusbound()` before the script has loaded; the calls are queued and run once it has.
+
+The script is around 3 KB, has no dependencies, and reports through a single request per page view. Single-page applications are covered: a navigation that pushes a history entry counts as a page view, and so does the back button.
+
+<Callout type="info" title="The site key is public">
+It only says which workspace a page view belongs to. If a copy of the snippet ends up somewhere it should not be, rotate the key from the settings page; the old key stops working at once and every installed snippet has to be updated.
+</Callout>
+
+### Hosts
+
+The **Your website hosts** list does two things. Page views reported from any other host are ignored, so nobody can point your site key at a site you do not run. And links in your campaign emails only identify a visitor when they lead to one of these hosts, so the identification ticket is never handed to a third-party site. A host covers its subdomains: `example.com` admits `www.example.com` and `app.example.com`.
+
+Leave the list empty and page views from any host are recorded, but none are ever tied to a contact.
+
+</Fold>
+
+<Fold>
+
+## How a visitor becomes a contact
+
+Every link in a campaign email is already a [tracked ticket](/guides/campaigns/) that resolves server-side to the recipient. When a recipient clicks one and the destination is one of your hosts, the redirect appends that ticket to the landing URL as `wbly_t`. The snippet reads it, removes it from the address bar immediately, and sends it with the page view. The server checks that the ticket belongs to a campaign in the same workspace as the site key and, only then, ties the browser to that contact.
+
+That is the only way a visit reaches a contact. There is no `identify(email)` call, because a public endpoint that accepted an email address would let anyone write page views into anyone's timeline. A ticket is unguessable and only ever in the hands of the person the email went to.
+
+Once a browser is tied to a contact, the page views it reported before identification, back to the start of the retention window, appear on that contact's timeline too. Views after it are attributed as they arrive.
+
+### Two people on one browser
+
+If a second contact's ticket arrives on a browser already tied to someone else, the records are split rather than merged: the earlier contact keeps the history up to that click, the browser gets a fresh visitor id, and everything from then on belongs to the second contact. Neither inherits the other's pages.
+
+On a shared device, call `pegasusbound('reset')` when it changes hands to drop the visitor and session ids.
+
+</Fold>
+
+<Fold>
+
+## Consent
+
+Choose the mode on the settings page:
+
+- **Ask first** (the default): the snippet stores nothing and sends nothing until your page calls `pegasusbound('consent', 'granted')`, typically from your cookie banner once the visitor accepts. The grant is remembered in the browser, so it is asked once. `pegasusbound('consent', 'denied')` withdraws it and clears the visitor id.
+- **Record on load**: page views are recorded as soon as the page loads. Choose this only where you have a lawful basis without a prior opt-in.
+
+The mode is enforced on the server as well as in the snippet, so a stale snippet cannot downgrade a workspace that requires consent. In both modes a browser that sends Global Privacy Control or Do Not Track is never recorded.
+
+</Fold>
+
+<Fold>
+
+## What is collected
+
+| Reported by the browser | Derived on the server | Never kept |
+|---|---|---|
+| Page URL and title | Device type, operating system, browser and version, device brand (from the request's user agent) | The IP address |
+| Referrer and referring domain | Country, and optionally region and city (from the IP address, at the precision you choose) | Anything typed on the page |
+| UTM source, medium, campaign, term and content | | Email addresses or names |
+| Language, timezone and screen resolution | | |
+| Visitor and session ids | | |
+
+Nothing about the device or location is trusted from the page: the snippet does not send them, and a request that claimed them would be ignored. Set **Location from IP address** to **Do not keep** to drop location entirely.
+
+A session ends after 30 minutes without a page view. The first view of a session is marked as the landing page.
+
+</Fold>
+
+<Fold>
+
+## Retention
+
+**Keep visits for** sets how long page views are kept, from 7 to 365 days (90 by default). A job on the backend prunes each workspace's views past its own window every few hours; the promise on the settings page is what the job keeps. Deleting a contact deletes the browsing history tied to them at the same time.
+
+Page views, and the browser records that carry them, travel in the **Delivery events** group of a [workspace archive](/guides/workspace-export-import/). The tracking settings, including the site key, are part of the workspace itself so installed snippets keep reporting after a move.
+
+</Fold>
+
+<Fold>
+
+## In the timeline
+
+Page views show in the **Activity** tab of a contact under the **Website** filter, one line each with the page title or path, the referring domain, the device and any UTM source. Open a row for the full detail: URL, referrer, operating system, browser, resolution, language, timezone, location and every UTM parameter. New views for a contact appear live for everyone with the contact open.
+
+</Fold>
+
+<Fold>
+
+## Abuse controls
+
+The ingest endpoint on the tracking service is public, so it runs behind the same controls as the open pixel and click redirects: a per-source request budget (with a tighter one for page views on top), prefetch and crawler filtering, an 8 KB body cap with limits on every field, a short window that ignores reloads and double-fires, a per-source budget for unknown site keys, and a circuit breaker toward the backend. A forwarded client address is believed only from proxies the operator lists in `TRACKING_TRUSTED_PROXIES`, and only from the one header named in `TRACKING_CLIENT_IP_HEADER`, so a caller cannot choose its own rate-limit bucket or the location stored with a view. Over budget requests get `429`; everything else that is declined is acknowledged quietly so a probe learns nothing about which keys exist.
+
+</Fold>

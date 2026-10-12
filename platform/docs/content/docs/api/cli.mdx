@@ -1,0 +1,396 @@
+---
+title: CLI
+description: The pegasusbound command line interface. Sign in once, then drive campaigns, contacts, mailboxes and the inbox from your terminal, from CI, or from an agent.
+---
+
+`pegasusbound` is the command line interface to Pegasusbound. It signs in as you, holds one credential per host, and speaks only the public REST API, so it works against the hosted service and against any self-hosted instance you can reach.
+
+```bash
+pegasusbound auth login
+pegasusbound campaign list
+pegasusbound inbox list --unseen
+pegasusbound api "/campaigns?limit=10"
+```
+
+<Callout type="info" title="This is not pegasusboundctl">
+There are two CLIs and they answer different questions. `pegasusbound` is the one you install on your machine to use the product. [`pegasusboundctl`](/development/pegasusboundctl/) is the operator's tool: it talks to Postgres directly, runs inside the backend container, and exists for recovery, accounts, health and backups. If you are asking "what is wrong with this install", that is the one you want.
+</Callout>
+
+## Install
+
+Pick one. All of them produce the same single binary.
+
+**macOS and Linux**
+
+```bash
+curl -fsSL https://pegasusbound.com/cli.sh | sh
+```
+
+Installs to `~/.local/bin`, so it needs no root and no toolchain. The script verifies what it downloaded against the published checksum and installs nothing if they disagree, writes shell completions, and tells you the one line to add to your profile if that directory is not already on your PATH.
+
+**Windows**
+
+```powershell
+irm https://pegasusbound.com/cli.ps1 | iex
+```
+
+Installs to `%LOCALAPPDATA%\Pegasusbound\bin` and adds it to your user PATH. No admin rights.
+
+**Homebrew** (macOS and Linux)
+
+```bash
+brew install pegasusbound/tap/pegasusbound
+```
+
+**Scoop** (Windows)
+
+```powershell
+scoop bucket add pegasusbound https://github.com/pegasusbound/homebrew-tap
+scoop install pegasusbound
+```
+
+**Docker**, for CI or anywhere installing a binary is more trouble than pulling one:
+
+```bash
+docker run --rm -e PEGASUSBOUND_TOKEN ghcr.io/pegasusbound/pegasusbound/cli campaign list
+```
+
+A container has no browser, so sign in with `PEGASUSBOUND_TOKEN` rather than `auth login`.
+
+**From source**, if you have Go:
+
+```bash
+go install github.com/pegasusbound/pegasusbound/cmd/cli@latest
+mv "$(go env GOPATH)/bin/cli" "$(go env GOPATH)/bin/pegasusbound"
+```
+
+The package directory is `cmd/cli`, so `go install` names the binary `cli`. Rename it, or use one of the channels above.
+
+**Already have a Pegasusbound instance?** The binary ships inside the backend image:
+
+```bash
+docker compose -p pegasusbound exec backend pegasusbound --help
+```
+
+### Keeping it current
+
+```bash
+pegasusbound version
+pegasusbound upgrade
+```
+
+`upgrade` replaces the binary in place, verifying the download against the release checksums first. When the CLI came from Homebrew or Scoop it says which command to run instead, rather than overwriting a file a package manager owns. The CLI also checks for a new release once a day and mentions it in one line; `PEGASUSBOUND_NO_UPDATE_CHECK=1` turns that off, and it never runs in CI or when output is piped.
+
+### Installer flags
+
+The install script takes flags after `--`, and every one of them is also an environment variable, so the same install runs from Ansible, cloud-init or a Dockerfile:
+
+```bash
+curl -fsSL https://pegasusbound.com/cli.sh | sh -s -- --dir /usr/local/bin
+curl -fsSL https://pegasusbound.com/cli.sh | sh -s -- --version v1.4.0
+curl -fsSL https://pegasusbound.com/cli.sh | sh -s -- --no-modify-path --no-completions
+curl -fsSL https://pegasusbound.com/cli.sh | sh -s -- --dry-run
+curl -fsSL https://pegasusbound.com/cli.sh | sh -s -- --uninstall
+```
+
+| Flag | Variable | What it does |
+|---|---|---|
+| `--dir PATH` | `PEGASUSBOUND_INSTALL_DIR` | Where the binary goes. Default `~/.local/bin` |
+| `--version TAG` | `PEGASUSBOUND_CLI_VERSION` | Pin a release instead of taking the newest |
+| `--base-url URL` | `PEGASUSBOUND_CLI_BASE_URL` | Download from an internal mirror of the release assets |
+| `--no-modify-path` | `PEGASUSBOUND_NO_MODIFY_PATH` | Never touch a shell profile |
+| `--no-completions` | `PEGASUSBOUND_NO_COMPLETIONS` | Skip the completion files |
+| `--dry-run` | | Print what would happen, change nothing |
+| `--uninstall` | | Remove the binary and completions, keep your sign-ins |
+
+`--help` lists them in the terminal. `sh -s -- --help` works through the pipe.
+
+### Reading it before you run it
+
+Piping a script into a shell is worth being careful about, which is why the checksum is published next to it:
+
+```bash
+curl -fsSLO https://pegasusbound.com/cli.sh
+curl -fsSLO https://pegasusbound.com/cli.sh.sha256
+sha256sum -c cli.sh.sha256
+less cli.sh && sh cli.sh
+```
+
+Every release archive is covered by `checksums.txt` on the release, and the installer verifies the archive against it before unpacking. If the two disagree it installs nothing and says so.
+
+### Completions
+
+The installer writes them for your shell. To do it by hand:
+
+```bash
+pegasusbound completion bash > /etc/bash_completion.d/pegasusbound
+pegasusbound completion zsh  > "${fpath[1]}/_pegasusbound"
+pegasusbound completion fish > ~/.config/fish/completions/pegasusbound.fish
+```
+
+## Signing in
+
+```bash
+pegasusbound auth login
+```
+
+It asks two questions: which instance (the hosted service, or a hostname of your own), and how (a browser approval, or pasting a key you already have).
+
+The browser path shows an eight character code, opens `app.pegasusbound.com/cli`, and waits. You approve there, choosing which workspace the CLI is signing in to. The client name and machine name on that screen are whatever the terminal reported, so check that the code matches the one your terminal printed. Because approving creates a lasting credential, the screen asks you to confirm it is you (password or second factor) if you have not done so in the last few minutes, the same as creating an API key. The approval creates **one API key named for your machine** (its hostname up to the first dot), which appears under Settings > API keys and is revocable there or with `pegasusbound auth logout`. The terminal never handles your password, and the browser never handles the key.
+
+```
+  Your code: K4TM-9RQD
+  Approve at: https://app.pegasusbound.com/cli?code=K4TM-9RQD
+
+… Waiting for approval (the code expires in 10 minutes)
+✓ Signed in to pegasusbound.com as jane@example.com
+  Workspace Acme
+```
+
+Non-interactive forms, for a script or an agent:
+
+```bash
+pegasusbound auth login --hostname pegasusbound.acme.com --web
+echo "$PEGASUSBOUND_KEY" | pegasusbound auth login --with-token
+pegasusbound auth login --scopes read-only
+```
+
+### Scopes
+
+The CLI asks for full access by default. The key it gets never carries more than your role in the chosen workspace allows: the approval screen lists the scopes the key will actually have for that workspace, and anything the CLI asked for beyond your role is left out. If your role allows none of them, the approval is refused with `cli_auth_scopes_role`. Narrow the request with `--scopes`:
+
+```bash
+pegasusbound auth login --scopes read-only
+pegasusbound auth login --scopes read_campaigns,read_contacts,send_campaigns
+```
+
+A key's scopes are fixed once created, so widening them means a new key. `pegasusbound auth refresh --scopes full` runs the sign-in again and revokes the key it replaces, which is why refreshing does not leave a trail of keys behind.
+
+Scope names are the ones in the [permissions reference](/api/permissions/), in either case, with `full` and `read-only` as shorthands.
+
+### Several instances
+
+The CLI holds one credential per host. The `*` in `auth status` is the one commands use.
+
+```bash
+pegasusbound auth login --hostname pegasusbound.acme.com
+pegasusbound auth status
+pegasusbound auth switch pegasusbound.acme.com
+pegasusbound campaign list --host pegasusbound.com   # one command, other host
+```
+
+`pegasusbound auth status` also tells you where the token came from, which is the answer nine times out of ten when a command fails unexpectedly:
+
+```
+* pegasusbound.com
+    ✓ signed in as jane@example.com
+    - workspace: Acme
+    - scopes: all 24
+    - api: https://api.pegasusbound.com
+    - token from: /home/jane/.config/pegasusbound/hosts.yml
+    - token: pgsbd_ab********wxyz
+```
+
+### In CI
+
+Set `PEGASUSBOUND_TOKEN` and skip the login entirely. It overrides the file and is never written to it.
+
+```yaml
+env:
+  PEGASUSBOUND_TOKEN: ${{ secrets.PEGASUSBOUND_TOKEN }}
+  PEGASUSBOUND_HOST: pegasusbound.com     # omit for the hosted service
+run: pegasusbound campaign list --json
+```
+
+`pegasusbound auth token` prints the active token and nothing else, for handing to another tool.
+
+## Output
+
+Commands print a table on a terminal and JSON everywhere else, so the same command is readable by a person and parseable by a pipe.
+
+```bash
+pegasusbound campaign list                      # a table
+pegasusbound campaign list > campaigns.json     # JSON, no flag needed
+pegasusbound campaign list --json | jq '.data[].name'
+pegasusbound campaign list --fields name,status
+pegasusbound campaign list --template '{{range .data}}{{.name}}{{"\n"}}{{end}}'
+```
+
+`--all` walks the cursor on any list command and merges every page into one response.
+
+## Sending real mail
+
+Anything that puts mail on the wire asks first, and refuses rather than sending when there is no terminal to ask on:
+
+```
+$ pegasusbound campaign start 6f1c…
+! `pegasusbound campaign start` sends real mail. Continue? [y/N]
+```
+
+`--yes` is the only way past it, which makes it the flag to grep for in a script review. The commands that behave this way are `campaign start`, `campaign test`, `placement test`, `placement batch-start`, `mailbox send`, `inbox reply`, `inbox compose` and `inbox approve-draft`.
+
+## Commands
+
+Run `pegasusbound <command> --help` for the flags, and `pegasusbound <command> <subcommand> --help` for one command's arguments.
+
+| Command | What it covers |
+|---|---|
+| `auth` | login, logout, status, token, switch, refresh |
+| `status` | one screen: mailboxes needing attention, what is sending, what is unread |
+| `browse` | open the dashboard, or one record, in a browser |
+| `campaign` | list, view, create, edit, steps, senders, segments, preflight, test, start, stop, logs, plan, pause-lead / resume-lead / lead-hold, lead-cc / set-lead-cc / lead-cc-suggestions |
+| `contact` | list, view, create, edit, delete, lookup, timeline, notes, import, export, verify |
+| `mailbox` | list, view, edit, health checks, sync state, send-as addresses, sending behaviour, warmup, hold, send |
+| `inbox` | list, view, threads, read, reply, compose, drafts, scheduled sends, snoozes |
+| `suppression` | the addresses and domains that get no campaign mail |
+| `segment` | live audiences and their conditions |
+| `template` | reply templates |
+| `automation` | automations, their runs and test firing |
+| `form` | lead capture forms, submissions and stats |
+| `deal`, `pipeline`, `task` | the CRM |
+| `analytics` | dashboard, deliverability, warmup, per-mailbox and per-campaign numbers |
+| `placement` | [inbox placement tests](/guides/placement-tests/): overview, test, list, view, cancel, seed inboxes, a campaign's scheduled test, [batches](/guides/placement-tests/#testing-a-fleet-with-batches) across many mailboxes (`batch-preview`, `batch-start`, `batches`, `batch`, `batch-senders`, `batch-cancel`) and fleet `coverage` |
+| `audit` | the workspace's audit trail |
+| `advisor` | recommendations, and applying or dismissing them |
+| `webhook` | endpoints, deliveries, redelivery, event types |
+| `key` | API keys, their scopes and their usage |
+| `oauth-app` | OAuth applications you publish |
+| `integration` | third-party connections |
+| `org` | which workspace this credential belongs to |
+| `team` | named groups of members, for CRM ownership and routing |
+| `settings` | workspace-wide outreach and suppression settings |
+| `warmup-routing` | which mailboxes warm with which |
+| `tool` | the AI tool registry, listed and called |
+| `events` | the live event stream |
+| `api` | any endpoint at all |
+| `upgrade` | replace this binary with the newest release |
+| `config`, `alias`, `completion`, `version` | the CLI itself |
+
+### Examples
+
+```bash
+# Create a campaign, add a step, check it, start it
+pegasusbound campaign create --name "Q3 outbound" --daily-limit 40
+pegasusbound campaign add-step CAMPAIGN_ID --subject "Quick question" --wait-after 0
+pegasusbound campaign preflight CAMPAIGN_ID
+pegasusbound campaign start CAMPAIGN_ID
+
+# Mailbox health across the workspace
+pegasusbound mailbox list
+pegasusbound mailbox check MAILBOX_ID
+pegasusbound mailbox edit MAILBOX_ID --daily-limit 40
+
+# Send as a verified Gmail alias, and take the signature from Gmail
+pegasusbound mailbox identity MAILBOX_ID
+pegasusbound mailbox refresh-identity MAILBOX_ID --signature
+pegasusbound mailbox edit MAILBOX_ID --send-as hello@acme.com
+
+# One contact is away: hold their sequence without unsubscribing them
+pegasusbound campaign pause-lead CAMPAIGN_ID CONTACT_ID --until 2026-09-21T17:00:00Z --reason "On holiday"
+pegasusbound campaign resume-lead CAMPAIGN_ID CONTACT_ID
+
+# Two people at one company: copy the second on the first lead's emails
+pegasusbound campaign lead-cc-suggestions CAMPAIGN_ID CONTACT_ID
+pegasusbound campaign set-lead-cc CAMPAIGN_ID CONTACT_ID --cc COLLEAGUE_ID
+
+# The inbox
+pegasusbound inbox list --unseen --limit 20
+pegasusbound inbox thread --email-id EMAIL_ID
+
+# Contacts in and out
+pegasusbound contact create --email jane@example.com --first-name Jane --company Acme
+pegasusbound contact list --all --json > contacts.json
+```
+
+## What needs the dashboard
+
+Three things the CLI deliberately does not do, because the API does not let a key do them:
+
+- **Connecting a mailbox.** It needs OAuth consent or a credential form in a browser. `pegasusbound browse mailboxes` opens the right page.
+- **Workspace administration.** Members, roles, invitations, workspace exports and the danger zone are session-only on the API: they depend on a human-bound session and refuse an API key. `pegasusbound browse members` and `pegasusbound browse settings` open them.
+- **Billing.** Plans, checkout and credits are session-only for the same reason. `pegasusbound browse billing`.
+
+`pegasusbound org view` still shows which workspace you are in, and `pegasusbound team`, `pegasusbound settings` and `pegasusbound audit` cover the workspace surface a key can reach.
+
+## Watching events
+
+`pegasusbound events tail` streams the developer WebSocket into your terminal: the same events the dashboard runs on, printed as they happen. It is the fastest way to see whether an integration is receiving what you think it is, without standing up a public endpoint first.
+
+```bash
+pegasusbound events tail
+pegasusbound events tail --intent EMAIL --intent CAMPAIGN
+pegasusbound events tail --json | jq 'select(.event_type == "EMAIL_REPLIED")'
+```
+
+It needs a key with `REALTIME_SUBSCRIBE`; `pegasusbound auth refresh --scopes full` gets one. The stream, its intents and its event types are documented under [Realtime](/api/realtime/).
+
+## Calling the API directly
+
+`pegasusbound api` reaches every endpoint, including the ones with no command of their own. Paths are relative to `/v1`.
+
+```bash
+pegasusbound api /me
+pegasusbound api "/campaigns?limit=10" --paginate
+pegasusbound api /contacts -f email=jane@example.com -f first_name=Jane
+pegasusbound api /campaigns/CAMPAIGN_ID -X PATCH -F daily_limit=40
+pegasusbound api /contacts/search -X POST --input filter.json
+pegasusbound api /webhooks/WEBHOOK_ID -X DELETE
+```
+
+`-f` keeps a value a string. `-F` guesses the type, so `true`, `false`, `null` and numbers arrive as themselves, `@file` reads a value from a file, `key[sub]=v` nests and repeated `key[]=v` builds an array. `--paginate` follows the cursor, `-i` includes the status and headers, `--idempotency-key` rides the [documented header](/api/authentication/).
+
+## Configuration
+
+Two files under `~/.config/pegasusbound` (or `XDG_CONFIG_HOME`, or `PEGASUSBOUND_CONFIG_DIR`):
+
+- `hosts.yml`, one credential per host, written 0600
+- `config.yml`, preferences and aliases
+
+Signing in records the instance's own API and dashboard URLs alongside the credential, taken from what the instance reports, so `browse` and `events tail` work on a self-hosted layout without anyone configuring a second address.
+
+```bash
+pegasusbound config list
+pegasusbound config set output json      # default to JSON even on a terminal
+pegasusbound config set confirm always   # confirm every write, not only sends
+pegasusbound config set browser firefox
+```
+
+### Aliases
+
+```bash
+pegasusbound alias set hot "campaign list --status active"
+pegasusbound hot --json
+```
+
+Anything you type after the alias is appended, so an alias is a starting point rather than a fixed command.
+
+### Environment
+
+| Variable | What it does |
+|---|---|
+| `PEGASUSBOUND_TOKEN` | The API key to use. Overrides `hosts.yml` and is never written to it |
+| `PEGASUSBOUND_API_KEY` | The same thing under the name `pegasusboundctl` uses |
+| `PEGASUSBOUND_HOST` | Which signed-in host to use |
+| `PEGASUSBOUND_API_URL` | The API base URL, when it is not derivable from the host |
+| `PEGASUSBOUND_CONFIG_DIR` | Where the two files live |
+| `PEGASUSBOUND_NO_UPDATE_CHECK` | Never check for a newer release |
+| `NO_COLOR` | Turns colour off, as everywhere else |
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| `0` | It worked |
+| `1` | The command failed, or you declined a prompt |
+| `2` | The command line was wrong, or an answer was needed with no terminal to ask on |
+| `4` | Not signed in, or the credential was rejected or lacks a scope |
+
+Every API failure prints the response's machine-readable `code` and `request_id` to stderr, so a script can branch without reading prose.
+
+## See also
+
+- [Authentication](/api/authentication/) for how the device flow mints a key
+- [Permissions](/api/permissions/) for what each scope allows
+- [Endpoint scope map](/api/endpoints/) for what `pegasusbound api` can reach
+- [Realtime](/api/realtime/) for the stream behind `pegasusbound events tail`
+- [pegasusboundctl](/development/pegasusboundctl/) for the operator's CLI

@@ -1,0 +1,148 @@
+package models
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// SyncPolicy is the fair-use budget a mailbox syncs under. The control plane
+// resolves it when the mailbox is loaded onto a worker (instance settings,
+// see internal/app/instancesettings) and ships it inside ADD_EMAIL, so the
+// worker never needs to read configuration of its own.
+type SyncPolicy struct {
+	// BackfillDays is how far back the initial import reaches.
+	BackfillDays int `json:"backfill_days" avro:"backfill_days"`
+	// BackfillMessages caps how many messages the initial import stores.
+	BackfillMessages int `json:"backfill_messages" avro:"backfill_messages"`
+	// DailyMessages caps new (live) messages stored per UTC day. Replies to
+	// the mailbox's own sends have a separate budget of the same size.
+	DailyMessages int `json:"daily_messages" avro:"daily_messages"`
+	// OrgDailyMessages caps new plus backfilled messages stored across the
+	// whole organization per UTC day.
+	OrgDailyMessages int `json:"org_daily_messages" avro:"org_daily_messages"`
+	// SkipFolders names the folders the sync leaves alone, as the server
+	// lists them; each also covers its subfolders. Per mailbox, unlike the
+	// budgets above, and only meaningful on IMAP.
+	SkipFolders []string `json:"skip_folders,omitempty" avro:"skip_folders"`
+}
+
+// SyncFolder is one folder the sync has seen on the server, as GET
+// /emails/:id/sync reports it: the name to use in skip_folders and the
+// canonical folder it files under, so a client can tell which ones are the
+// special folders that cannot be skipped.
+type SyncFolder struct {
+	Name   string `json:"name"`
+	Folder string `json:"folder"`
+}
+
+// UpdateSyncSettings is the body of PUT /emails/:id/sync. The list is the
+// desired state, so a retry converges.
+type UpdateSyncSettings struct {
+	SkipFolders []string `json:"skip_folders"`
+}
+
+// SyncBackfillStatus is where the initial import stands.
+type SyncBackfillStatus string
+
+const (
+	// SyncBackfillPending: the mailbox is loaded but the import has not run yet.
+	SyncBackfillPending SyncBackfillStatus = "pending"
+	// SyncBackfillRunning: the import is walking history and may be paced.
+	SyncBackfillRunning SyncBackfillStatus = "running"
+	// SyncBackfillComplete: the window is exhausted or the cap was reached.
+	SyncBackfillComplete SyncBackfillStatus = "complete"
+)
+
+// SyncFolderCursor is the resumable position inside one folder of a backfill.
+// Both IMAP and Graph key folders by name and IMAP walks UIDs downward, Graph
+// follows @odata.nextLink; Gmail has no folders and uses
+// SyncCursor.PageToken.
+type SyncFolderCursor struct {
+	// Next is an opaque continuation (Graph nextLink).
+	Next string `json:"next,omitempty" avro:"next"`
+	// UID is the lowest UID already imported; the walk continues below it.
+	UID uint32 `json:"uid,omitempty" avro:"uid"`
+	// Done marks the folder exhausted for this window.
+	Done bool `json:"done,omitempty" avro:"done"`
+}
+
+// SyncCursor is the resumable position of a mailbox's backfill. It is stored
+// as jsonb: read-then-execute state that is never filtered in SQL.
+type SyncCursor struct {
+	// PageToken is Gmail's messages.list continuation.
+	PageToken string `json:"page_token,omitempty" avro:"page_token"`
+	// Folders is the per-folder position for IMAP and Graph.
+	Folders        map[string]SyncFolderCursor `json:"folders,omitempty" avro:"folders"`
+	GoogleRecovery *GoogleHistoryRecovery      `json:"google_recovery,omitempty" avro:"google_recovery"`
+}
+
+// GoogleHistoryRecovery holds a baseline until additions and stored-message state are reconciled.
+type GoogleHistoryRecovery struct {
+	HistoryID    uint64    `json:"history_id" avro:"history_id"`
+	Since        time.Time `json:"since" avro:"since"`
+	PageToken    string    `json:"page_token,omitempty" avro:"page_token"`
+	MessagesDone bool      `json:"messages_done" avro:"messages_done"`
+	StoredAfter  string    `json:"stored_after,omitempty" avro:"stored_after"`
+}
+
+// SyncState is what the platform knows about a mailbox's sync: backfill
+// progress, whether fair use is holding it, and when it last ran. The worker
+// owns the live copy and relays every change as SYNC_STATE; the consumer
+// persists it and the loader hands it back on the next (re)assignment.
+type SyncState struct {
+	TransportGeneration uuid.UUID          `json:"transport_generation,omitempty" avro:"transport_generation"`
+	BackfillStatus      SyncBackfillStatus `json:"backfill_status" avro:"backfill_status"`
+	BackfillCursor      SyncCursor         `json:"backfill_cursor" avro:"backfill_cursor"`
+	// BackfillSynced counts messages the import has stored so far.
+	BackfillSynced int `json:"backfill_synced" avro:"backfill_synced"`
+	// BackfillSince is the cutoff the running import uses; fixed at start so
+	// a later settings change does not move the goalposts mid-walk.
+	BackfillSince       *time.Time `json:"backfill_since,omitempty" avro:"backfill_since"`
+	BackfillStartedAt   *time.Time `json:"backfill_started_at,omitempty" avro:"backfill_started_at"`
+	BackfillCompletedAt *time.Time `json:"backfill_completed_at,omitempty" avro:"backfill_completed_at"`
+
+	// ThrottledUntil is set while fair use is deferring live mail; nil when
+	// the mailbox is within budget.
+	ThrottledUntil *time.Time `json:"throttled_until,omitempty" avro:"throttled_until"`
+	// ThrottleReason names the exhausted budget (see SyncThrottle* constants).
+	ThrottleReason string `json:"throttle_reason,omitempty" avro:"throttle_reason"`
+	// Deferred counts live messages currently waiting on budget: seen on the
+	// server but not yet stored. Drops back to zero once they are admitted.
+	Deferred int `json:"deferred" avro:"deferred"`
+
+	// FoldersSkippedCap and FoldersSkippedConflict are what the last folder
+	// listing could not follow: more folders than the sync covers, and
+	// folders whose name the server listed more than once. Carried as state
+	// rather than raised as an error once, so the warning goes away by itself
+	// when the user fixes it.
+	FoldersSkippedCap      int `json:"folders_skipped_cap,omitempty" avro:"folders_skipped_cap"`
+	FoldersSkippedConflict int `json:"folders_skipped_conflict,omitempty" avro:"folders_skipped_conflict"`
+
+	LastSyncedAt *time.Time `json:"last_synced_at,omitempty" avro:"last_synced_at"`
+}
+
+// Throttle reasons, stable strings the dashboard maps to copy.
+const (
+	SyncThrottleBurst        = "burst"
+	SyncThrottleHourly       = "hourly"
+	SyncThrottleDaily        = "daily"
+	SyncThrottleOrgDaily     = "org_daily"
+	SyncThrottlePriorityFull = "priority_daily"
+)
+
+// AddWorkerEmailSyncData seeds a mailbox's sync on the worker: the budget it
+// runs under and where a previous worker left off. State is nil on first
+// connect.
+type AddWorkerEmailSyncData struct {
+	Policy SyncPolicy `json:"policy" avro:"policy"`
+	State  *SyncState `json:"state" avro:"state"`
+}
+
+// JobEventSyncState is the worker's SYNC_STATE relay: the full current state,
+// not a delta, so a lost event is repaired by the next one.
+type JobEventSyncState struct {
+	UserID  uuid.UUID `json:"user_id" avro:"user_id"`
+	EmailID uuid.UUID `json:"email_id" avro:"email_id"`
+	State   SyncState `json:"state" avro:"state"`
+}

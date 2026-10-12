@@ -1,0 +1,160 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import HeroScene from '../components/scenes/inbox/HeroScene.astro';
+import LabelsScene from '../components/scenes/inbox/LabelsScene.astro';
+import AutomatedScene from '../components/scenes/inbox/AutomatedScene.astro';
+import ActionRequiredScene from '../components/scenes/inbox/ActionRequiredScene.astro';
+import TriageScene from '../components/scenes/inbox/TriageScene.astro';
+import AgentScene from '../components/scenes/inbox/AgentScene.astro';
+import UndoScene from '../components/scenes/inbox/UndoScene.astro';
+import ScheduleScene from '../components/scenes/inbox/ScheduleScene.astro';
+import SnoozeScene from '../components/scenes/inbox/SnoozeScene.astro';
+
+// Behaviour from docs/content/docs/guides/unibox.mdx, inbox-tagging.mdx,
+// inbox-agent.mdx and collaboration.mdx.
+
+const faq: [string, string][] = [
+  ['Which mailboxes can I connect?', 'Google Workspace and Gmail, Microsoft 365 and Outlook, and any mailbox that speaks IMAP and SMTP. Every connected mailbox feeds the same inbox, and you can narrow it to one mailbox, a tag or a label at any time.'],
+  ['Who replies from which address?', 'A reply starts on the mailbox that holds the conversation, so the contact keeps hearing from the address they wrote to. You can switch it to any other active mailbox, and the picker shows each one’s budget for today and its history with that contact.'],
+  ['What does labelling run on?', 'Labels come from TypeSafe, a classification service. A self-hosted instance turns labelling on with its own TypeSafe API key, and those calls are billed to that key.'],
+  ['Does the AI ever send on its own?', 'No. The inbox agent only drafts replies to people who already wrote to you. Nothing is sent until someone on your team presses Approve and send. It is off by default and each draft costs 5 AI credits.'],
+  ['Can I undo a send?', 'Yes. Replies wait 30 seconds before they go out by default, and you can set that anywhere from 5 to 120 seconds. You can also schedule a reply for later or snooze a conversation for up to 90 days.'],
+  ['Does it update live for the whole team?', 'Yes. New mail, read state, labels, replies and snoozes appear for everyone as they happen, with no refresh.'],
+];
+
+const eyebrow = 'text-[34px] md:text-[44px] font-light tracking-[-0.04em] leading-none text-slate-400';
+const h2 = 'mt-5 text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.05] text-slate-900';
+const lead = 'mt-4 max-w-xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500';
+const link = 'group mt-5 inline-flex items-center gap-2 text-[17px] md:text-[18px] text-[color:var(--brand)] hover:text-[color:var(--brand-strong)]';
+const cardTitle = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const cardBody = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+---
+<Layout
+  title="Unified Inbox for Cold Email Replies | Pegasusbound"
+  description="Every reply from every connected mailbox in one inbox, labelled as it arrives: interested, meeting, pricing, not now, unsubscribe. Keyboard triage, AI reply drafts, undo send and snooze."
+>
+  <!-- HERO: copy, then the whole unibox as one wide window. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="text-[14px] text-slate-500">Unified inbox</div>
+    <h1 class="mt-4 max-w-4xl text-[40px] sm:text-[56px] md:text-[68px] font-medium tracking-[-0.05em] leading-[1.0] text-slate-900">
+      Every reply from every mailbox, already sorted.
+    </h1>
+    <p class="mt-6 max-w-2xl text-[17px] md:text-[20px] leading-[1.5] text-slate-500">
+      Replies from all your mailboxes land in one inbox and are labelled as they arrive, so the people who want a call are at the top and the receipts, codes and auto-replies are out of the way.
+    </p>
+    <div class="mt-9 flex flex-wrap items-center gap-3">
+      <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+        Start free <Icon name="arrowRight" size={14} />
+      </a>
+      <a href="https://docs.pegasusbound.com/guides/unibox/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+        Tour the inbox
+      </a>
+    </div>
+    <div class="mt-14 md:mt-20">
+      <HeroScene />
+    </div>
+    <p class="mt-5 text-[14px] text-slate-400">Your teammates show up where they are working: a green dot on a thread someone is reading, amber when they are writing back, so two people never answer the same prospect.</p>
+  </section>
+
+  <!-- LABELS: scene left, copy right. -->
+  <section class="container-page py-20 md:py-32">
+    <div class="grid items-end gap-10 lg:grid-cols-2 lg:gap-16">
+      <div class="lg:order-2 lg:pb-2">
+        <div class={eyebrow}>01</div>
+        <h2 class={h2}>Labels in words anyone on the team understands</h2>
+        <p class={lead}>Each reply is read and filed as Interested, Meeting, Pricing, Question, Not now, Not interested, Wrong person or Unsubscribe. One whose intent cannot be read gets no label rather than a wrong one, and hovering any label says exactly what it means.</p>
+        <p class="mt-4 max-w-xl text-[15px] leading-[1.6] text-slate-400">A confident label can also act: hold a contact who said not now, stop one who declined, open a task when someone asks for a call. Each action has its own switch.</p>
+        <a href="https://docs.pegasusbound.com/guides/inbox-tagging/" class={link}>How labelling works<Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a>
+      </div>
+      <div class="lg:order-1"><LabelsScene /></div>
+    </div>
+  </section>
+
+  <!-- AUTOMATED MAIL: two scenes side by side. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1fr_1fr] lg:items-end lg:gap-16">
+      <h2 class="text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.08]">
+        <span class="text-slate-400">Automated mail.</span> <span class="text-slate-900">Out of the way, unless it needs you.</span>
+      </h2>
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">Mailboxes used for outreach still get sign-in codes, receipts, bounces and away messages. Mail nobody wrote moves to its own view, and the unread count stops counting it.</p>
+    </div>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2">
+      <article>
+        <AutomatedScene />
+        <h3 class={cardTitle}>Receipts and codes leave the inbox</h3>
+        <p class={cardBody}>A conversation goes to Automated only on a confident verdict, and a reply from a person brings it straight back.</p>
+      </article>
+      <article>
+        <ActionRequiredScene />
+        <h3 class={cardTitle}>A failed payment stays where you will see it</h3>
+        <p class={cardBody}>Automated mail about a declined card, a suspended account or a suspicious sign-in stays in the inbox, labelled Action required, and tells the people who run your mailboxes.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- KEYBOARD: copy left, scene right. -->
+  <Rule />
+  <section class="container-page py-20 md:py-32">
+    <div class="grid items-end gap-10 lg:grid-cols-2 lg:gap-16">
+      <div class="lg:pb-2">
+        <div class={eyebrow}>02</div>
+        <h2 class={h2}>Clear a morning of replies from the keyboard</h2>
+        <p class={lead}>Move with <kbd class="rounded border border-slate-200 bg-white px-1.5 font-mono text-[15px] text-slate-700">j</kbd> and <kbd class="rounded border border-slate-200 bg-white px-1.5 font-mono text-[15px] text-slate-700">k</kbd>, tick with <kbd class="rounded border border-slate-200 bg-white px-1.5 font-mono text-[15px] text-slate-700">x</kbd>, archive the lot with <kbd class="rounded border border-slate-200 bg-white px-1.5 font-mono text-[15px] text-slate-700">e</kbd>. Ticked rows raise a bar with mark read, snooze, archive and delete, each one request however many you picked.</p>
+        <p class="mt-4 max-w-xl text-[15px] leading-[1.6] text-slate-400">Archiving or deleting here files the conversation in Gmail, Outlook or IMAP too, unless you turn that off for a mailbox. Press ? anywhere for every shortcut on the screen you are on.</p>
+        <a href="https://docs.pegasusbound.com/guides/unibox/" class={link}>Every inbox shortcut<Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a>
+      </div>
+      <div><TriageScene /></div>
+    </div>
+  </section>
+
+  <!-- INBOX AGENT: heading split over a wide scene. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1fr_1fr] lg:items-end lg:gap-16">
+      <div>
+        <div class={eyebrow}>03</div>
+        <h2 class={h2}>A drafted reply is waiting when you open the thread</h2>
+      </div>
+      <div>
+        <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">Turn on the inbox agent and every human reply to a campaign gets a draft, written from the thread, the contact’s record and your workspace’s voice. Edit it, send it or throw it away. It never sends by itself, and each draft costs 5 AI credits.</p>
+        <a href="https://docs.pegasusbound.com/guides/inbox-agent/" class={link}>About the inbox agent<Icon name="arrowRight" size={14} class="transition-transform group-hover:translate-x-0.5" /></a>
+      </div>
+    </div>
+    <div class="mt-12 md:mt-16"><AgentScene /></div>
+  </section>
+
+  <!-- SENDING CONTROLS: three small scenes. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <h2 class="max-w-4xl text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.08]">
+      <span class="text-slate-400">Sending controls.</span> <span class="text-slate-900">Room to change your mind.</span>
+    </h2>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-3">
+      <article>
+        <UndoScene />
+        <h3 class={cardTitle}>Undo send</h3>
+        <p class={cardBody}>Every reply waits 30 seconds before it goes, or anything from 5 to 120 you choose. Cancel puts it back in the composer.</p>
+      </article>
+      <article>
+        <ScheduleScene />
+        <h3 class={cardTitle}>Schedule</h3>
+        <p class={cardBody}>Queue a reply for a time that suits the contact. Anyone on the team can see it in the thread and cancel it.</p>
+      </article>
+      <article class="md:col-span-2 lg:col-span-1">
+        <SnoozeScene />
+        <h3 class={cardTitle}>Snooze</h3>
+        <p class={cardBody}>Clear a conversation until it matters again, up to 90 days out, straight from the list.</p>
+      </article>
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="The inbox, answered." />
+
+  <CTA photo="sheer-peach" title="Bring every reply into one place." description="Connect your mailboxes and the inbox fills itself, labelled and live for the whole team." />
+</Layout>

@@ -1,0 +1,1504 @@
+---
+title: CRM
+description: Manage pipelines, stages, deals, task types, and CRM tasks for your organization, and run the CRM on HubSpot or Pipedrive.
+---
+
+The CRM endpoints model your sales pipeline: deals move through stages of a pipeline, and CRM tasks track the follow-up work attached to contacts and deals. Every route is organization-scoped and requires an active organization on the session or API key. Read access uses the **CRM** read scope (`READ_CRM` / org permission `view_contacts`), and mutations use the **CRM** write scope (`WRITE_CRM` / org permission `manage_contacts`), except team membership operations which gate on `manage_team`. See [authentication](/api/authentication/) and [permissions](/api/permissions/) for how scopes map to API keys and member roles.
+
+Every list endpoint returns a `data` array plus the standard `pagination` envelope with an opaque `next_cursor`. The simple `GET` list endpoints use a keyset cursor; the faceted `POST .../search` endpoints paginate by offset under the hood (their nullable sort columns rule out a keyset cursor) but expose the same opaque `next_cursor`, and add an exact `total`.
+
+## List pipelines
+
+`GET /crm/pipelines`
+
+Return every pipeline in the organization, each with its ordered stages.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Response
+
+Returns a bare array of pipeline objects (not wrapped in an envelope).
+
+```json
+[
+  {
+    "id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+    "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+    "name": "Sales",
+    "position": 0,
+    "stages": [
+      {
+        "id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+        "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+        "name": "Lead",
+        "color": "#0ea5e9",
+        "position": 0,
+        "deal_count": 12,
+        "created_at": "2026-05-01T09:00:00Z",
+        "updated_at": "2026-05-01T09:00:00Z"
+      }
+    ],
+    "created_at": "2026-05-01T09:00:00Z",
+    "updated_at": "2026-05-01T09:00:00Z"
+  }
+]
+```
+
+## Create pipeline
+
+`POST /crm/pipelines`
+
+Create a pipeline, optionally seeding it with an ordered set of stages.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | Pipeline name (1 to 255 characters). |
+| `stages` | array | no | Stages to create with the pipeline, in order. |
+| `stages[].name` | string | yes | Stage name (1 to 255 characters). |
+| `stages[].color` | string | yes | Stage color (hex). |
+
+```json
+{
+  "name": "Sales",
+  "stages": [
+    { "name": "Lead", "color": "#0ea5e9" },
+    { "name": "Qualified", "color": "#8b5cf6" },
+    { "name": "Won", "color": "#22c55e" }
+  ]
+}
+```
+
+### Response
+
+`201 Created` with the created pipeline object (same shape as in the list response, including its `stages`).
+
+```json
+{
+  "id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "name": "Sales",
+  "position": 0,
+  "stages": [
+    {
+      "id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+      "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+      "name": "Lead",
+      "color": "#0ea5e9",
+      "position": 0,
+      "created_at": "2026-06-12T10:00:00Z",
+      "updated_at": "2026-06-12T10:00:00Z"
+    }
+  ],
+  "created_at": "2026-06-12T10:00:00Z",
+  "updated_at": "2026-06-12T10:00:00Z"
+}
+```
+
+## Get pipeline
+
+`GET /crm/pipelines/:id`
+
+Fetch a single pipeline with its stages.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Pipeline ID. |
+
+### Response
+
+Returns the pipeline object (same shape as a list item).
+
+```json
+{
+  "id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "name": "Sales",
+  "position": 0,
+  "stages": [],
+  "created_at": "2026-05-01T09:00:00Z",
+  "updated_at": "2026-05-01T09:00:00Z"
+}
+```
+
+## Update pipeline
+
+`PATCH /crm/pipelines/:id`
+
+Rename a pipeline. Only the name can be changed here; stages have their own endpoints.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Pipeline ID. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | no | New pipeline name. |
+
+```json
+{
+  "name": "Enterprise Sales"
+}
+```
+
+### Response
+
+Returns the updated pipeline object.
+
+## Delete pipeline
+
+`DELETE /crm/pipelines/:id`
+
+Delete a pipeline and its stages.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Pipeline ID. |
+
+### Response
+
+`204 No Content`.
+
+## Create stage
+
+`POST /crm/pipelines/:id/stages`
+
+Append a stage to a pipeline.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Pipeline ID. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | Stage name (1 to 255 characters). |
+| `color` | string | yes | Stage color (hex). |
+
+```json
+{
+  "name": "Negotiation",
+  "color": "#f59e0b"
+}
+```
+
+### Response
+
+`201 Created` with the created stage object.
+
+```json
+{
+  "id": "9c0d1e2f-3a4b-4c5d-6e7f-8a9b0c1d2e3f",
+  "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+  "name": "Negotiation",
+  "color": "#f59e0b",
+  "position": 3,
+  "created_at": "2026-06-12T10:05:00Z",
+  "updated_at": "2026-06-12T10:05:00Z"
+}
+```
+
+## Update stage
+
+`PATCH /crm/pipelines/:id/stages/:stageId`
+
+Rename or recolor a stage.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Pipeline ID. |
+| `stageId` | path | uuid | Stage ID. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | no | New stage name. |
+| `color` | string | no | New stage color (hex). |
+
+```json
+{
+  "name": "Contract Sent",
+  "color": "#6366f1"
+}
+```
+
+### Response
+
+Returns the updated stage object.
+
+## Delete stage
+
+`DELETE /crm/pipelines/:id/stages/:stageId`
+
+Remove a stage from a pipeline.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Pipeline ID. |
+| `stageId` | path | uuid | Stage ID. |
+
+### Response
+
+`204 No Content`.
+
+## List deals
+
+`GET /crm/deals`
+
+List deals with optional pipeline, stage, and status filters, keyset-paginated.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `pipeline_id` | query | uuid | Restrict to deals in this pipeline. |
+| `stage_id` | query | uuid | Restrict to deals in this stage. |
+| `status` | query | string | Restrict to `open`, `won`, or `lost`. |
+| `cursor` | query | string | Opaque cursor from a previous page's `pagination.next_cursor`. |
+| `limit` | query | int | Page size, 1 to 100 (default 50). |
+
+### Response
+
+A `data` array of deal objects plus a keyset `pagination` envelope. List rows may include joined `contact` and `stage` objects and a `campaign_name`.
+
+```json
+{
+  "data": [
+    {
+      "id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+      "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+      "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+      "stage_id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+      "contact_id": "aa11bb22-cc33-4dd4-95ee-66ff77008811",
+      "name": "Acme renewal",
+      "value": 12000,
+      "currency": "USD",
+      "status": "open",
+      "expected_close_date": "2026-07-15T00:00:00Z",
+      "assigned_to": "bb22cc33-dd44-4ee5-86ff-770011223344",
+      "campaign_id": "cc33dd44-ee55-4ff6-9700-112233445566",
+      "source_mailbox_id": "dd44ee55-ff66-4007-8811-223344556677",
+      "created_at": "2026-06-01T12:00:00Z",
+      "updated_at": "2026-06-10T09:30:00Z",
+      "campaign_name": "Q2 outbound"
+    }
+  ],
+  "pagination": {
+    "total": null,
+    "next_cursor": "c1_b3BhcXVlLWN1cnNvcg",
+    "has_more": true
+  }
+}
+```
+
+## Create deal
+
+`POST /crm/deals`
+
+Create a deal in a pipeline stage, optionally linked to a contact and attributed to a campaign and source mailbox.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `pipeline_id` | uuid | yes | Pipeline the deal belongs to. |
+| `stage_id` | uuid | yes | Initial stage. |
+| `contact_id` | uuid | no | Linked contact. |
+| `name` | string | yes | Deal name (1 to 255 characters). |
+| `value` | number | no | Monetary value. |
+| `currency` | string | no | ISO currency code. |
+| `expected_close_date` | string (date-time) | no | Expected close date. |
+| `assigned_to` | uuid | no | Owner (org member user ID). |
+| `campaign_id` | uuid | no | Attributed campaign. |
+| `source_mailbox_id` | uuid | no | Sending mailbox that produced the originating reply. |
+
+```json
+{
+  "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+  "stage_id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+  "contact_id": "aa11bb22-cc33-4dd4-95ee-66ff77008811",
+  "name": "Acme renewal",
+  "value": 12000,
+  "currency": "USD",
+  "expected_close_date": "2026-07-15T00:00:00Z",
+  "assigned_to": "bb22cc33-dd44-4ee5-86ff-770011223344"
+}
+```
+
+### Response
+
+`201 Created` with the created deal object. New deals default to `status: "open"`.
+
+```json
+{
+  "id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+  "stage_id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+  "contact_id": "aa11bb22-cc33-4dd4-95ee-66ff77008811",
+  "name": "Acme renewal",
+  "value": 12000,
+  "currency": "USD",
+  "status": "open",
+  "expected_close_date": "2026-07-15T00:00:00Z",
+  "created_at": "2026-06-12T10:10:00Z",
+  "updated_at": "2026-06-12T10:10:00Z"
+}
+```
+
+## Search deals
+
+`POST /crm/deals/search`
+
+Faceted, server-paginated deal search. Every filter is optional; an empty body matches every deal in the organization. Filters are sent in the JSON body, while `limit` and `cursor` are query params.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `limit` | query | int | Page size, 1 to 200 (default 50). |
+| `cursor` | query | string | Opaque cursor from a previous page's `pagination.next_cursor`. Omit for the first page. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `query` | string | no | Case-insensitive match on deal name. |
+| `statuses` | string[] | no | Any of `open`, `won`, `lost`. |
+| `pipeline_ids` | string[] | no | Restrict to any of these pipelines. |
+| `stage_ids` | string[] | no | Restrict to any of these stages. |
+| `assigned_to` | string[] | no | Owner is any of these user IDs. |
+| `campaign_ids` | string[] | no | Attributed campaign is any of these. |
+| `min_value` | number | no | Value greater than or equal to. |
+| `max_value` | number | no | Value less than or equal to. |
+| `close_after` | string (date-time) | no | Expected close date on or after. |
+| `close_before` | string (date-time) | no | Expected close date on or before. |
+| `created_after` | string (date-time) | no | Created on or after. |
+| `created_before` | string (date-time) | no | Created on or before. |
+| `sort_by` | string | no | One of `created_at`, `updated_at`, `value`, `expected_close_date`, `name`. |
+| `reverse` | boolean | no | `true` sorts ascending, `false` (default) descending. |
+
+```json
+{
+  "query": "renewal",
+  "statuses": ["open"],
+  "pipeline_ids": ["5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f"],
+  "min_value": 1000,
+  "sort_by": "value",
+  "reverse": false
+}
+```
+
+### Response
+
+A `data` array of deal objects (with joined `contact`, `stage`, and `campaign_name`) plus the standard `pagination` envelope (opaque `next_cursor`) with an exact `total`.
+
+```json
+{
+  "data": [
+    {
+      "id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+      "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+      "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+      "stage_id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+      "name": "Acme renewal",
+      "value": 12000,
+      "currency": "USD",
+      "status": "open",
+      "created_at": "2026-06-01T12:00:00Z",
+      "updated_at": "2026-06-10T09:30:00Z"
+    }
+  ],
+  "pagination": {
+    "total": 137,
+    "next_cursor": "o1_NTA",
+    "has_more": true
+  }
+}
+```
+
+## Deals summary
+
+`POST /crm/deals/summary`
+
+Aggregate counts and value sums over the same filter body as deal search, so header totals and per-stage board column totals reflect the whole matching set rather than a single page.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Request body
+
+Identical to [search deals](#search-deals). All facets are optional; an empty body summarizes every deal in the organization.
+
+```json
+{
+  "pipeline_ids": ["5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f"],
+  "statuses": ["open", "won"]
+}
+```
+
+### Response
+
+Returns the aggregate object. `stages` holds a per-stage count and open-deal value. `mixed_currency` is `true` when matching deals span more than one currency, in which case the top-level value sums should be treated as approximate.
+
+```json
+{
+  "total": 42,
+  "open_count": 30,
+  "open_value": 415000,
+  "won_count": 9,
+  "won_value": 220000,
+  "lost_count": 3,
+  "lost_value": 0,
+  "currency": "USD",
+  "stages": [
+    {
+      "stage_id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+      "count": 18,
+      "value": 240000
+    }
+  ],
+  "mixed_currency": false
+}
+```
+
+## Get deal
+
+`GET /crm/deals/:id`
+
+Fetch a single deal.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Deal ID. |
+
+### Response
+
+Returns the deal object. Joined `contact`, `stage`, and `campaign_name` are populated by the list and search queries, not by this single-row read.
+
+```json
+{
+  "id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "pipeline_id": "5d8a2b1e-0c4f-4a9b-9f2e-1a2b3c4d5e6f",
+  "stage_id": "7f3c1a90-2b4d-4e6f-8a01-b2c3d4e5f607",
+  "contact_id": "aa11bb22-cc33-4dd4-95ee-66ff77008811",
+  "name": "Acme renewal",
+  "value": 12000,
+  "currency": "USD",
+  "status": "open",
+  "expected_close_date": "2026-07-15T00:00:00Z",
+  "created_at": "2026-06-01T12:00:00Z",
+  "updated_at": "2026-06-10T09:30:00Z"
+}
+```
+
+## Update deal
+
+`PATCH /crm/deals/:id`
+
+Update a deal. Moving it to a different `stage_id` records a stage-change activity, and setting `status` to `won` or `lost` stamps the corresponding close timestamp.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Deal ID. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `stage_id` | uuid | no | Move the deal to this stage. |
+| `contact_id` | uuid | no | Linked contact. |
+| `name` | string | no | Deal name. |
+| `value` | number | no | Monetary value. |
+| `currency` | string | no | ISO currency code. |
+| `status` | string | no | One of `open`, `won`, `lost`. |
+| `expected_close_date` | string (date-time) | no | Expected close date. |
+| `lost_reason` | string | no | Reason recorded when marking lost. |
+| `assigned_to` | uuid | no | Owner (org member user ID). |
+
+```json
+{
+  "stage_id": "9c0d1e2f-3a4b-4c5d-6e7f-8a9b0c1d2e3f",
+  "status": "won"
+}
+```
+
+### Response
+
+Returns the updated deal object.
+
+## Delete deal
+
+`DELETE /crm/deals/:id`
+
+Delete a deal.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Deal ID. |
+
+### Response
+
+`204 No Content`.
+
+## List task types
+
+`GET /crm/task-types`
+
+List the organization's CRM task types (the kinds of work a task represents, such as Call, Email, or Meeting). A default set is seeded the first time an org lists its types.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Response
+
+Returns a `data` array of task type objects (no pagination envelope).
+
+```json
+{
+  "data": [
+    {
+      "id": "e1d2c3b4-a5f6-4071-8293-a4b5c6d7e8f9",
+      "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+      "name": "Call",
+      "color": "#8b5cf6",
+      "position": 0,
+      "created_at": "2026-05-01T09:00:00Z",
+      "updated_at": "2026-05-01T09:00:00Z"
+    }
+  ]
+}
+```
+
+## Create task type
+
+`POST /crm/task-types`
+
+Create a CRM task type.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | yes | Type name (1 to 60 characters). |
+| `color` | string | no | Type color (hex). |
+
+```json
+{
+  "name": "Demo",
+  "color": "#22c55e"
+}
+```
+
+### Response
+
+`201 Created` with the created task type object.
+
+```json
+{
+  "id": "f0e1d2c3-b4a5-4607-8293-a4b5c6d7e8f9",
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "name": "Demo",
+  "color": "#22c55e",
+  "position": 3,
+  "created_at": "2026-06-12T10:20:00Z",
+  "updated_at": "2026-06-12T10:20:00Z"
+}
+```
+
+## Update task type
+
+`PATCH /crm/task-types/:id`
+
+Rename, recolor, or reorder a task type.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Task type ID. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | string | no | New type name. |
+| `color` | string | no | New type color (hex). |
+| `position` | int | no | New ordering position. |
+
+```json
+{
+  "name": "Product demo",
+  "position": 1
+}
+```
+
+### Response
+
+Returns the updated task type object.
+
+## Delete task type
+
+`DELETE /crm/task-types/:id`
+
+Delete a task type. Tasks reference their type by name, so existing tasks keep their label and fall back to a neutral color rather than being orphaned.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Task type ID. |
+
+### Response
+
+`204 No Content`.
+
+## List tasks
+
+`GET /crm/tasks`
+
+List CRM tasks with optional contact, deal, assignee, and status filters, keyset-paginated.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `contact_id` | query | uuid | Restrict to tasks linked to this contact. |
+| `deal_id` | query | uuid | Restrict to tasks linked to this deal. |
+| `assigned_to` | query | uuid | Restrict to tasks assigned to this user. |
+| `status` | query | string | One of `pending`, `in_progress`, `completed`, `cancelled`. |
+| `cursor` | query | string | Opaque cursor from a previous page's `pagination.next_cursor`. |
+| `limit` | query | int | Page size, 1 to 100 (default 50). |
+
+### Response
+
+A `data` array of task objects plus a keyset `pagination` envelope.
+
+```json
+{
+  "data": [
+    {
+      "id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80912",
+      "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+      "contact_id": "aa11bb22-cc33-4dd4-95ee-66ff77008811",
+      "deal_id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+      "assigned_to": "bb22cc33-dd44-4ee5-86ff-770011223344",
+      "created_by": "bb22cc33-dd44-4ee5-86ff-770011223344",
+      "title": "Send renewal quote",
+      "description": "Include the multi-year discount",
+      "due_date": "2026-06-20T17:00:00Z",
+      "priority": "high",
+      "type": "Email",
+      "status": "pending",
+      "created_at": "2026-06-12T08:00:00Z",
+      "updated_at": "2026-06-12T08:00:00Z"
+    }
+  ],
+  "pagination": {
+    "total": null,
+    "next_cursor": "c1_b3BhcXVlLWN1cnNvcg",
+    "has_more": false
+  }
+}
+```
+
+## Create task
+
+`POST /crm/tasks`
+
+Create a CRM task, optionally linked to a contact and deal and assigned to a user or team.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | string | yes | Task title (1 to 255 characters). |
+| `contact_id` | uuid | no | Linked contact. |
+| `deal_id` | uuid | no | Linked deal. |
+| `assigned_to` | uuid | no | Assignee user ID. |
+| `assigned_team_id` | uuid | no | Assignee team ID. |
+| `description` | string | no | Free-text description. |
+| `due_date` | string (date-time) | no | Due date. |
+| `priority` | string | no | One of `low`, `medium`, `high`, `urgent`. |
+| `type` | string | no | Task type name (matches a configured task type). |
+
+```json
+{
+  "title": "Send renewal quote",
+  "contact_id": "aa11bb22-cc33-4dd4-95ee-66ff77008811",
+  "deal_id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+  "assigned_to": "bb22cc33-dd44-4ee5-86ff-770011223344",
+  "due_date": "2026-06-20T17:00:00Z",
+  "priority": "high",
+  "type": "Email"
+}
+```
+
+### Response
+
+`201 Created` with the created task object. `created_by` is set to the authenticated user.
+
+```json
+{
+  "id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80912",
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "contact_id": "aa11bb22-cc33-4dd4-95ee-66ff77008811",
+  "deal_id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+  "assigned_to": "bb22cc33-dd44-4ee5-86ff-770011223344",
+  "created_by": "bb22cc33-dd44-4ee5-86ff-770011223344",
+  "title": "Send renewal quote",
+  "due_date": "2026-06-20T17:00:00Z",
+  "priority": "high",
+  "type": "Email",
+  "status": "pending",
+  "created_at": "2026-06-12T10:25:00Z",
+  "updated_at": "2026-06-12T10:25:00Z"
+}
+```
+
+## Search tasks
+
+`POST /crm/tasks/search`
+
+Faceted, server-paginated task search. Every filter is optional; an empty body matches every task in the organization. Filters are sent in the JSON body, while `limit` and `cursor` are query params.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `limit` | query | int | Page size, 1 to 200 (default 50). |
+| `cursor` | query | string | Opaque cursor from a previous page's `pagination.next_cursor`. Omit for the first page. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `query` | string | no | Case-insensitive match on task title. |
+| `statuses` | string[] | no | Any of `pending`, `in_progress`, `completed`, `cancelled`. |
+| `priorities` | string[] | no | Any of `low`, `medium`, `high`, `urgent`. |
+| `types` | string[] | no | Task type name is any of these. |
+| `assigned_to` | string[] | no | Assignee user ID is any of these. |
+| `team_ids` | uuid[] | no | Task team is any of these, or the assignee belongs to one. |
+| `contact_id` | string | no | Linked contact. |
+| `deal_id` | string | no | Linked deal. |
+| `due_after` | string (date-time) | no | Due on or after. |
+| `due_before` | string (date-time) | no | Due on or before. |
+| `overdue` | boolean | no | Only tasks past due and not completed or cancelled. |
+| `sort_by` | string | no | One of `created_at`, `due_date`, `priority`, `title`, `updated_at`. |
+| `reverse` | boolean | no | `true` sorts ascending, `false` (default) descending. |
+
+```json
+{
+  "statuses": ["pending", "in_progress"],
+  "priorities": ["high", "urgent"],
+  "overdue": true,
+  "sort_by": "due_date",
+  "reverse": true
+}
+```
+
+### Response
+
+A `data` array of task objects plus the standard `pagination` envelope (opaque `next_cursor`) with an exact `total`.
+
+```json
+{
+  "data": [
+    {
+      "id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80912",
+      "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+      "created_by": "bb22cc33-dd44-4ee5-86ff-770011223344",
+      "title": "Send renewal quote",
+      "priority": "high",
+      "type": "Email",
+      "status": "pending",
+      "due_date": "2026-06-20T17:00:00Z",
+      "created_at": "2026-06-12T08:00:00Z",
+      "updated_at": "2026-06-12T08:00:00Z"
+    }
+  ],
+  "pagination": {
+    "total": 64,
+    "next_cursor": "o1_NTA",
+    "has_more": true
+  }
+}
+```
+
+## Tasks summary
+
+`POST /crm/tasks/summary`
+
+Aggregate counts over the same filter body as task search, so header totals (by status, overdue, high priority) reflect the whole matching set rather than a single page.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Request body
+
+Identical to [search tasks](#search-tasks). All facets are optional; an empty body summarizes every task in the organization.
+
+```json
+{
+  "assigned_to": ["bb22cc33-dd44-4ee5-86ff-770011223344"]
+}
+```
+
+### Response
+
+Returns the aggregate counts.
+
+```json
+{
+  "total": 64,
+  "pending_count": 28,
+  "in_progress_count": 9,
+  "completed_count": 22,
+  "cancelled_count": 5,
+  "overdue_count": 7,
+  "high_priority_count": 11
+}
+```
+
+## Get task
+
+`GET /crm/tasks/:id`
+
+Fetch a single CRM task.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Task ID. |
+
+### Response
+
+Returns the task object (same shape as a list item).
+
+```json
+{
+  "id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80912",
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "created_by": "bb22cc33-dd44-4ee5-86ff-770011223344",
+  "title": "Send renewal quote",
+  "priority": "high",
+  "type": "Email",
+  "status": "pending",
+  "due_date": "2026-06-20T17:00:00Z",
+  "created_at": "2026-06-12T08:00:00Z",
+  "updated_at": "2026-06-12T08:00:00Z"
+}
+```
+
+## Update task
+
+`PATCH /crm/tasks/:id`
+
+Update a CRM task. Setting `status` to `completed` stamps the completion timestamp, and any other status clears it.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Task ID. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | string | no | Task title. |
+| `assigned_to` | uuid | no | Assignee user ID. |
+| `assigned_team_id` | uuid | no | Assignee team ID. |
+| `description` | string | no | Free-text description. |
+| `due_date` | string (date-time) | no | Due date. |
+| `priority` | string | no | One of `low`, `medium`, `high`, `urgent`. |
+| `type` | string | no | Task type name. |
+| `status` | string | no | One of `pending`, `in_progress`, `completed`, `cancelled`. |
+
+```json
+{
+  "status": "completed"
+}
+```
+
+### Response
+
+Returns the updated task object.
+
+## Delete task
+
+`DELETE /crm/tasks/:id`
+
+Delete a CRM task.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Task ID. |
+
+### Response
+
+`204 No Content`.
+
+## Selecting many tasks
+
+The two bulk endpoints below take the same **selection**, in one of two forms. Either an explicit list of ids:
+
+```json
+{ "tasks": ["3b4c5d6e-7f80-4912-a3b4-c5d6e7f80912"] }
+```
+
+Or every task a search matches, minus the ones taken back out:
+
+```json
+{
+  "all": true,
+  "filters": { "statuses": ["pending"], "query": "out_of_office" },
+  "exclude": ["3b4c5d6e-7f80-4912-a3b4-c5d6e7f80912"]
+}
+```
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `tasks` | string[] | with `all` unset | Task ids. At most `1000` per request. |
+| `all` | boolean | no | Switches the selection from `tasks` to `filters`. |
+| `filters` | object | with `all` | The same body [search tasks](#search-tasks) takes, so the set acted on is exactly the set the search returns. |
+| `exclude` | string[] | no | Ids to drop from the resolved set. Ignored unless `all` is set. |
+
+A selection resolving to more than `50,000` tasks is refused with `selection_too_large` rather than half applied; narrow the filter and run it in parts. A `filters` block naming something that is not an id in `assigned_to`, `contact_id` or `deal_id` is refused with `invalid_filter`.
+
+A bulk update raises one `crm.task_updated` [webhook](/api/reference/webhooks/) for the whole call rather than one per task, carrying `metadata.bulk` and `metadata.count` and no `entity_id`. A bulk delete raises none, because deleting a task raises none either way.
+
+Neither endpoint takes an `Idempotency-Key`: both write an end state rather than a delta, so repeating one converges on the same result. They differ in what the repeat reports. A repeated delete finds fewer rows and `affected` falls to `0`. A repeated update still touches every row in the selection, because it stamps `updated_at`, so `affected` does not fall; the status and priority simply do not change, and a repeated completion adds no second entry to the contact timeline and does not move `completed_at`.
+
+## Bulk update tasks
+
+`PATCH /crm/tasks`
+
+Write a status, a priority, or both onto every task in a selection. At least one of the two fields is required; setting `status` to `completed` stamps the completion timestamp and records the completion on each linked contact's timeline, exactly as the single-task update does. Any other status clears `completed_at`, so a task moved back to `pending` does not keep the time it was finished, again matching the single-task update.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+### Request body
+
+The selection above, plus:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `status` | string | no | One of `pending`, `in_progress`, `completed`, `cancelled`. |
+| `priority` | string | no | One of `low`, `medium`, `high`, `urgent`. |
+
+```json
+{
+  "all": true,
+  "filters": { "statuses": ["pending"], "priorities": ["high"] },
+  "status": "completed"
+}
+```
+
+### Response
+
+The number of tasks written, rather than the rows: a select-all can cover tens of thousands.
+
+```json
+{ "affected": 128 }
+```
+
+## Bulk delete tasks
+
+`DELETE /crm/tasks`
+
+Delete every task in a selection. The body is the selection object, or a bare array of ids.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+```json
+{ "all": true, "filters": { "query": "out_of_office" } }
+```
+
+### Response
+
+```json
+{ "affected": 128 }
+```
+
+## CRM provider mode
+
+A workspace can run its CRM on [HubSpot](/guides/hubspot/) or [Pipedrive](/guides/pipedrive/) instead of Pegasusbound's own. In provider mode the endpoints above keep their shapes, and the records they return are the provider's, mirrored into Pegasusbound. In HubSpot mode:
+
+- a create, update or delete of a deal, task or note is written to HubSpot before it is saved. A refusal from HubSpot comes back as an error and nothing is saved; see [CRM provider refusals](/api/error-codes/#crm-provider-refusals)
+- creating, updating or deleting a pipeline, stage or task type answers `409 crm_managed_externally`. `GET /crm/pipelines` lists only HubSpot pipelines, and `GET /crm/task-types` returns HubSpot's four types (To-do, Call, Email, LinkedIn)
+- `POST /crm/deals/search` and `POST /crm/deals/summary` cover only HubSpot pipelines when no `pipeline_ids` filter is given, so deals in Pegasusbound-only pipelines are left out
+- setting a deal's `status` to `won` or `lost` moves it to the pipeline's first closed stage of that kind, and moving it to a closed stage sets its `status`. `assigned_to` must be a member matched to a HubSpot owner (`400 crm_owner_unmapped`)
+
+In Pipedrive mode the same holds, with Pipedrive's model:
+
+- tasks are Pipedrive activities. `GET /crm/task-types` returns the company's activity types; a task's `status` is written as done (`completed`, `cancelled`) or not done, and its `priority` stays in Pegasusbound
+- a deal's `status` is Pipedrive's own deal status, so `won` and `lost` keep the deal's stage. `lost_reason` is written with a `lost` status. `assigned_to` must be a member matched to a Pipedrive user (`400 crm_owner_unmapped`)
+- Pipedrive has no lifecycle stage or lead status. A contact's `lifecycle_stage` is its first person label (an id, as in `GET /crm/metadata`), and `lead_status` is always empty
+
+Deals, tasks, notes and pipelines that live in the provider carry an `external` object, and the stages of a mirrored pipeline carry its stage metadata. Both are absent outside provider mode.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `external.provider` | string | `hubspot` or `pipedrive`. |
+| `external.external_id` | string | The provider's record id. |
+| `external.url` | string | Where the record opens in the provider: the deal, the tasks view (in Pipedrive the activity's deal, else the activities list), the note's contact, or the pipeline. Omitted when unknown. |
+| `external.synced_at` | string (date-time) | When the record was last written to or read from the provider. |
+| `external.owner_name` | string | The provider's owner, on a deal or task whose owner is not a workspace member (so `assigned_to` is empty). |
+| `stages[].closed` | boolean | The stage is a closed stage in HubSpot. Omitted when false, and always in Pipedrive. |
+| `stages[].won` | boolean | The stage is closed won in HubSpot. Omitted when false, and always in Pipedrive. |
+| `stages[].probability` | number | The provider's deal probability for the stage, from `0` to `1`. |
+
+```json
+{
+  "id": "1f2e3d4c-5b6a-4789-90ab-cdef01234567",
+  "name": "Acme renewal",
+  "status": "open",
+  "external": {
+    "provider": "hubspot",
+    "external_id": "18342007291",
+    "url": "https://app.hubspot.com/contacts/4711/record/0-3/18342007291",
+    "synced_at": "2026-06-10T09:30:04Z",
+    "owner_name": "Dana Kim"
+  }
+}
+```
+
+The routes below configure provider mode and read the provider's side of a contact; each one acts on the CRM the workspace runs on. Except for `GET /crm/settings`, `GET /crm/owners`, `GET /crm/sync` and `GET /crm/backfill`, each answers `409 crm_not_connected` while the workspace is not in provider mode, and `501` on an instance where CRM providers are not available.
+
+## Get CRM settings
+
+`GET /crm/settings`
+
+Return the workspace's CRM mode, its setup choices and the connected account. A workspace that never chose returns `provider: "native"` with the default choices.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Response
+
+```json
+{
+  "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+  "provider": "hubspot",
+  "connection_id": "6e7f8a9b-0c1d-4e2f-8a3b-4c5d6e7f8a9b",
+  "config": {
+    "activity": { "sent": true, "replies": true, "bounces": true, "unsubscribes": true, "opens": false, "clicks": false, "meetings": true },
+    "create_contacts": true,
+    "create_companies": true,
+    "write_properties": true,
+    "positive_reply": { "lead_status": "IN_PROGRESS", "lifecycle_stage": "", "create_deal": false },
+    "exit_rules": { "deal_created": true, "lifecycle_stages": ["opportunity", "customer"], "opted_out": true },
+    "guards": { "skip_lifecycle_stages": ["customer", "evangelist"], "skip_open_deals": true, "skip_other_owners": false, "skip_opted_out": true },
+    "deal_pipelines": [],
+    "display_properties": ["jobtitle"],
+    "field_map": { "first_name": "firstname", "last_name": "lastname", "company": "company", "phone": "phone" },
+    "field_direction": { "first_name": "both", "last_name": "both", "company": "both", "phone": "both" }
+  },
+  "setup_completed_at": "2026-06-01T12:04:00Z",
+  "updated_at": "2026-06-01T12:04:00Z",
+  "account": {
+    "external_id": "4711",
+    "name": "acme.com",
+    "app_url": "https://app.hubspot.com/contacts/4711",
+    "status": "connected",
+    "health": "healthy"
+  }
+}
+```
+
+`account.missing_scopes` lists the permissions the connection lacks for provider mode, when there are any. `config.for` names the provider the choices were made for. In Pipedrive mode `account.external_id` is the Pipedrive company id, and `config.positive_reply.create_lead` adds the person to Pipedrive's Leads Inbox on an interested reply.
+
+## Update CRM settings
+
+`PUT /crm/settings`
+
+Choose the CRM and store the setup choices. Switching to HubSpot creates the Pegasusbound contact property group in HubSpot (when `write_properties` is on) and starts the first pull in the background. Switching to Pipedrive fills the label rules from the company's own labels when no `config` is sent, then adds the Pegasusbound person fields, registers the change notifications and starts the first pull. Switching from one provider to the other replaces it, and stored choices made for the other provider are reset to the new one's defaults. Naturally safe to retry: it writes an end state.
+
+Auth: **Scope** `INTEGRATIONS` · **Org permission** `manage_settings`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `provider` | string | no | `native`, `hubspot` or `pipedrive`. |
+| `connection_id` | uuid | no | The workspace's HubSpot or Pipedrive [integration connection](/api/reference/integrations/). Required once, to use the provider. |
+| `config` | object | no | The whole set of choices, replacing the stored one. Shape as in the response above. |
+| `complete_setup` | boolean | no | Mark the setup wizard as finished. |
+
+`config` is validated before it is stored: `field_map` keys are `first_name`, `last_name`, `email`, `company`, `phone` or `custom:<key>`; each `field_direction` entry is `push`, `pull` or `both` and names a mapped field; `deal_pipelines` (provider pipeline ids, empty for all) holds at most 50 entries, `display_properties` at most 40, `field_map` at most 100, and each lifecycle stage list at most 20. `positive_reply.create_deal` needs `deal_pipeline_id` and `deal_stage_id`, which are Pegasusbound's ids for a mirrored pipeline and stage.
+
+```json
+{
+  "provider": "hubspot",
+  "connection_id": "6e7f8a9b-0c1d-4e2f-8a3b-4c5d6e7f8a9b",
+  "complete_setup": true
+}
+```
+
+### Response
+
+The settings object, as returned by `GET /crm/settings`. A connection without the permissions provider mode needs answers `409 crm_reauth_required`; a `connection_id` that is not one of the workspace's connections to that provider answers `400`.
+
+## Get CRM metadata
+
+`GET /crm/metadata`
+
+Return the provider's vocabulary for the setup pickers: lifecycle stages, lead statuses, task types, contact properties (hidden and calculated ones left out) and deal pipelines. Pipelines here carry the provider's ids, as `deal_pipelines` expects. For Pipedrive, `lifecycle_stages` are the person labels, `lead_statuses` is empty, `task_types` are the activity types, and `properties` are the standard person keys (`first_name`, `last_name`, `name`, `phone`, `org_name`) followed by the custom fields by code.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Response
+
+```json
+{
+  "lifecycle_stages": [{ "value": "lead", "label": "Lead" }, { "value": "customer", "label": "Customer" }],
+  "lead_statuses": [{ "value": "IN_PROGRESS", "label": "In Progress" }],
+  "task_types": [{ "value": "TODO", "label": "To-do" }, { "value": "CALL", "label": "Call" }],
+  "properties": [{ "name": "jobtitle", "label": "Job Title", "type": "string", "group_name": "contactinformation", "read_only": false }],
+  "pipelines": [{ "value": "default", "label": "Sales Pipeline" }]
+}
+```
+
+## List CRM owners
+
+`GET /crm/owners`
+
+List the provider's owners (Pipedrive's users) and the member each one is matched to. Owners are matched by email address unless a match was chosen by hand (`user_pinned`).
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Response
+
+```json
+{
+  "data": [
+    {
+      "external_id": "82731",
+      "email": "dana@acme.com",
+      "first_name": "Dana",
+      "last_name": "Kim",
+      "user_id": "bb22cc33-dd44-4ee5-86ff-770011223344",
+      "user_pinned": false,
+      "archived": false
+    }
+  ]
+}
+```
+
+## Match a CRM owner
+
+`PUT /crm/owners/:externalId`
+
+Match a provider owner to a member, or clear the match with `null`. A match set here is kept when email matching runs again. Naturally safe to retry.
+
+Auth: **Scope** `INTEGRATIONS` · **Org permission** `manage_settings`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `externalId` | path | string | The provider's owner (Pipedrive user) id. |
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `user_id` | uuid or null | yes | The member, or `null` to clear. |
+
+### Response
+
+`204 No Content`. `404` when the owner or the member is not in the workspace.
+
+## Get sync health
+
+`GET /crm/sync`
+
+Report the sync queue (pending, failed, and finished in the last 24 hours), the latest 50 failures, each pull's last run, and how many records are mirrored.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Response
+
+```json
+{
+  "pending": 2,
+  "failed": 1,
+  "done_24h": 418,
+  "last_synced_at": "2026-06-10T09:31:12Z",
+  "cursors": [
+    { "object_type": "deals", "cursor_at": "2026-06-10T09:30:58Z", "last_run_at": "2026-06-10T09:31:02Z" }
+  ],
+  "failures": [
+    {
+      "id": "3c4d5e6f-7a8b-4c9d-8e0f-1a2b3c4d5e6f",
+      "organization_id": "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+      "provider": "hubspot",
+      "kind": "push_deal",
+      "subject": "Acme renewal",
+      "status": "failed",
+      "attempts": 6,
+      "next_attempt_at": "2026-06-10T03:12:00Z",
+      "last_error": "HubSpot refused the change: Property \"amount\" is required",
+      "created_at": "2026-06-09T18:02:00Z",
+      "updated_at": "2026-06-10T03:12:04Z",
+      "finished_at": "2026-06-10T03:12:04Z"
+    }
+  ],
+  "counts": { "contacts": 1820, "deals": 64, "tasks": 211, "pipelines": 2, "owners": 9 }
+}
+```
+
+`cursors[].object_type` is `owners`, `pipelines`, `deals`, `tasks` or `contacts`, with `last_error` set when its last run failed.
+
+## Sync now
+
+`POST /crm/sync`
+
+Start a full pull from the provider in the background.
+
+Auth: **Scope** `INTEGRATIONS` · **Org permission** `manage_settings`
+
+### Response
+
+`202 Accepted`. A second call within 30 seconds answers `429 crm_sync_running`.
+
+## Retry or discard failed syncs
+
+`POST /crm/sync/retry` · `POST /crm/sync/discard`
+
+Requeue failed sync items, or drop them. Without a body (or with an empty `ids`) every failed item is affected. Naturally safe to retry: an item already requeued or dropped is not failed any more.
+
+Auth: **Scope** `INTEGRATIONS` · **Org permission** `manage_settings`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ids` | array of uuid | no | Failed items to act on, at most 500. |
+
+### Response
+
+```json
+{ "affected": 3 }
+```
+
+## Copy Pegasusbound CRM data into the provider
+
+`GET /crm/backfill` · `POST /crm/backfill`
+
+`GET` counts the deals, tasks and notes that live only in Pegasusbound, in no connected CRM (records mirrored from a CRM the workspace used before are left out). `POST` copies the kinds you pick, once, in the background: deals move onto the first mirrored pipeline, keeping a stage of the same name or else taking the first stage that matches their status (in Pipedrive, the first stage, with the deal's status kept). A copied record is never copied twice, and a second `POST` while one runs is folded into it.
+
+Auth: **Scope** `INTEGRATIONS` · **Org permission** `manage_settings`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `deals` | boolean | no | Copy deals. |
+| `tasks` | boolean | no | Copy tasks. |
+| `notes` | boolean | no | Copy notes. |
+
+At least one must be `true`.
+
+### Response
+
+`GET` returns `{ "deals": 12, "tasks": 40, "notes": 7 }`. `POST` returns `202 Accepted`; progress shows in [sync health](#get-sync-health).
+
+## Get a contact's CRM record
+
+`GET /crm/contacts/:id`
+
+Return the provider's side of a Pegasusbound contact as last mirrored: owner, lifecycle stage (a label in Pipedrive), lead status, company (organization in Pipedrive), opt-out and the properties chosen in `display_properties`. A contact not linked to the provider returns `linked: false` and nothing else.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `id` | path | uuid | Pegasusbound contact ID. |
+
+### Response
+
+```json
+{
+  "provider": "hubspot",
+  "linked": true,
+  "external_id": "51234",
+  "url": "https://app.hubspot.com/contacts/4711/record/0-1/51234",
+  "owner": { "external_id": "82731", "email": "dana@acme.com", "first_name": "Dana", "last_name": "Kim", "user_pinned": false, "archived": false },
+  "lifecycle_stage": { "value": "lead", "label": "Lead" },
+  "lead_status": { "value": "IN_PROGRESS", "label": "In Progress" },
+  "company": { "external_id": "9921", "name": "Acme", "domain": "acme.com", "url": "https://app.hubspot.com/contacts/4711/record/0-2/9921" },
+  "opted_out": false,
+  "properties": [{ "name": "jobtitle", "label": "Job Title", "value": "Head of Sales" }],
+  "synced_at": "2026-06-10T09:30:04Z"
+}
+```
+
+## Refresh a contact's CRM record
+
+`POST /crm/contacts/:id/refresh`
+
+Pull the contact's provider record, deals, tasks and notes now. An unlinked contact is looked up by email and linked when the provider has it; nothing is created. Debounced per contact, so it is safe to call whenever a contact is opened: in HubSpot one pull a minute and one lookup every five minutes; in Pipedrive, which meters API use per company per day, the person is re-read at most every two minutes, their deals, activities and notes every six hours, and an unlinked contact is looked up every fifteen minutes.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `view_contacts`
+
+### Response
+
+The contact's CRM record, as in `GET /crm/contacts/:id`.
+
+## Link a contact to the CRM
+
+`POST /crm/contacts/:id/link`
+
+Find the contact in the provider by email, or create it there when the workspace allows creating contacts, then pull its deals, tasks and notes. Naturally safe to retry: a linked contact stays linked to the same record.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+### Response
+
+The contact's CRM record, as in `GET /crm/contacts/:id`. `404 crm_contact_missing` when the provider does not have the contact and creating contacts is off.
+
+## Update a contact's CRM record
+
+`PATCH /crm/contacts/:id`
+
+Write the contact's owner, lifecycle stage or lead status to the provider, then to the mirror. In Pipedrive, `lifecycle_stage` sets the person's label (an id from `GET /crm/metadata`, or empty to clear it) and `lead_status` is ignored.
+
+Auth: **Scope** `WRITE_CRM` · **Org permission** `manage_contacts`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `owner_external_id` | string | no | The provider's owner (Pipedrive user) id. |
+| `lifecycle_stage` | string | no | A lifecycle stage value from `GET /crm/metadata`. |
+| `lead_status` | string | no | A lead status value from `GET /crm/metadata`. |
+
+Each value is at most 100 characters.
+
+### Response
+
+The updated provider record, as in `GET /crm/contacts/:id`. `404 crm_contact_missing` when the contact is not linked to the provider.
+
+## List CRM lists
+
+`GET /crm/lists`
+
+List the HubSpot account's contact lists, newest first, for import. Needs HubSpot's optional list permission; a connection without it answers `409 crm_reauth_required`. In Pipedrive mode these are the company's saved people filters, most recently changed first, each with `size: -1` (Pipedrive does not count a filter) and `dynamic: true`.
+
+Auth: **Scope** `READ_CRM` · **Org permission** `manage_contacts`
+
+| Parameter | In | Type | Description |
+| --- | --- | --- | --- |
+| `q` | query | string | Filter by list name (at most 200 characters). |
+| `cursor` | query | string | Opaque cursor from a previous page's `pagination.next_cursor`. An unrecognized one answers `400`. |
+| `limit` | query | int | Page size, 1 to 100 (default 25). |
+
+### Response
+
+```json
+{
+  "data": [
+    { "external_id": "212", "name": "Q3 webinar attendees", "size": 840, "dynamic": true, "updated_at": "2026-06-08T15:20:00Z" }
+  ],
+  "pagination": { "next_cursor": "bGlzdDoyNQ", "has_more": true }
+}
+```
+
+## Preview a CRM list import
+
+`POST /crm/lists/preview`
+
+Count who a list would bring in and who it skips, by reason, without writing anything.
+
+Auth: **Scope** `WRITE_CONTACTS` · **Org permission** `manage_contacts`
+
+### Request body
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `list_id` | string | yes | HubSpot list id or Pipedrive filter id (at most 64 characters). |
+| `apply_guards` | boolean | no | Skip the contacts the workspace's import guards exclude (`config.guards`). |
+
+### Response
+
+```json
+{
+  "list_name": "Q3 webinar attendees",
+  "total": 840,
+  "included": 772,
+  "skipped": [
+    { "reason": "opted_out", "label": "Opted out of email in HubSpot", "count": 31 },
+    { "reason": "lifecycle", "label": "Lifecycle stage is Customer", "count": 25 },
+    { "reason": "no_email", "label": "No email address", "count": 12 }
+  ],
+  "sample": [{ "email": "sam@globex.com", "first_name": "Sam", "last_name": "Lee", "company": "Globex" }],
+  "truncated": false
+}
+```
+
+`reason` is `opted_out`, `lifecycle`, `open_deal`, `other_owner`, `no_email` or `duplicate`. One import reads at most 25,000 contacts; `truncated` is `true` when the list is larger.
+
+## Import a CRM list
+
+`POST /crm/lists/import`
+
+Turn a list into a [contact import](/api/reference/contacts/) draft, finished in the regular import review. The body and the skip rules are those of the preview. The imported contacts are linked to their provider records a few minutes later. The draft belongs to the caller (for an API key, the member who created it).
+
+Auth: **Scope** `WRITE_CONTACTS` · **Org permission** `manage_contacts`
+
+### Response
+
+`201 Created`.
+
+```json
+{
+  "import_id": "4d5e6f7a-8b9c-4d0e-8f1a-2b3c4d5e6f7a",
+  "preview": { "list_name": "Q3 webinar attendees", "total": 840, "included": 772, "skipped": [], "sample": [], "truncated": false }
+}
+```
+
+`400` when nobody in the list can be imported.
+
+## Errors
+
+All endpoints return the standard error envelope on failure, for example a malformed UUID path param or an invalid request body. See [error codes](/api/error-codes/) for the full list.
+
+```json
+{
+  "error": "invalid_request",
+  "message": "invalid request body",
+  "code": "INVALID_REQUEST",
+  "request_id": "req_8f2c1a90b34d4e6f"
+}
+```

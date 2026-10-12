@@ -1,0 +1,61 @@
+import { getPageImage, getPageMarkdown, source } from '@/lib/source';
+import { DocsBody, DocsDescription, DocsPage, DocsTitle } from 'fumadocs-ui/layouts/notebook/page';
+import { notFound } from 'next/navigation';
+import { getMDXComponents } from '@/mdx-components';
+import type { Metadata } from 'next';
+import { createRelativeLink } from 'fumadocs-ui/mdx';
+import { LLMCopyButton, ViewOptions } from '@/components/ai/page-actions';
+
+export default async function Page(props: PageProps<'/[...slug]'>) {
+  const params = await props.params;
+  const page = source.getPage(params.slug);
+  if (!page) notFound();
+
+  const MDX = page.data.body;
+  const markdownUrl = getPageMarkdown(page).url;
+
+  return (
+    <DocsPage toc={page.data.toc} full={page.data.full}>
+      <DocsTitle>{page.data.title}</DocsTitle>
+      <DocsDescription className="wd-description mb-1">{page.data.description}</DocsDescription>
+      <div className="wd-actions flex flex-row items-center gap-2 pb-4">
+        <LLMCopyButton markdownUrl={markdownUrl} />
+        <ViewOptions
+          markdownUrl={markdownUrl}
+          githubUrl={`https://github.com/pegasusbound/pegasusbound/blob/main/docs/content/docs/${page.path}`}
+        />
+      </div>
+      <DocsBody>
+        <MDX
+          components={getMDXComponents({
+            a: createRelativeLink(source, page),
+          })}
+        />
+      </DocsBody>
+    </DocsPage>
+  );
+}
+
+export async function generateStaticParams() {
+  return source.generateParams();
+}
+
+export async function generateMetadata(props: PageProps<'/[...slug]'>): Promise<Metadata> {
+  const params = await props.params;
+  const page = source.getPage(params.slug);
+  if (!page) notFound();
+
+  const url = page.url.endsWith('/') ? page.url : `${page.url}/`;
+
+  return {
+    title: page.data.title,
+    description: page.data.description,
+    alternates: { canonical: url },
+    openGraph: {
+      url,
+      title: page.data.title,
+      description: page.data.description,
+      images: getPageImage(page).url,
+    },
+  };
+}

@@ -1,0 +1,210 @@
+package main
+
+import (
+	"context"
+	"log"
+	"net"
+	"net/url"
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/pegasusbound/pegasusbound/internal/config"
+	"github.com/pegasusbound/pegasusbound/internal/notify"
+)
+
+// insecureDefaults are the working secret values shipped in docker-compose.yml
+// and the Makefile so `docker compose up` boots with no .env. They are public
+// in this repository, so a deployment still running on one is not protected by
+// it at all: a forged AUTH_SECRET JWT is accepted by the realtime service, and
+// the local KMS master key unwraps every organization DEK offline.
+//
+// The map is keyed by env var so the check is exact rather than a heuristic.
+var insecureDefaults = map[string]string{
+	"AUTH_SECRET":                "local-dev-auth-secret-minimum-32-characters-long",
+	"KMS_LOCAL_MASTER_KEY":       "Xr0JA7gqF2POy29a7MRByyqddivTNt8WOyKsOXklazk=",
+	"CREDENTIALS_ENCRYPTION_KEY": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	"INTERNAL_API_TOKEN":         "local-dev-internal-token",
+	"SECRET_KEY_BASE":            "local-development-secret-key-base-minimum-64-characters-for-phoenix",
+}
+
+// checkSecrets refuses to start a deployment that reaches the network while
+// still using a published default secret. Local development is exempt: that is
+// what the defaults exist for.
+//
+// ALLOW_INSECURE_DEFAULTS=true downgrades the refusal to a warning, for an
+// operator who genuinely wants a throwaway instance on a trusted LAN.
+// It returns the offenders so the health page can keep reporting them for as
+// long as they are in use, not just once at boot.
+func checkSecrets() []string {
+	var offenders []string
+	for env, def := range insecureDefaults {
+		if os.Getenv(env) == def {
+			offenders = append(offenders, env)
+		}
+	}
+	if len(offenders) == 0 {
+		return nil
+	}
+	sort.Strings(offenders)
+
+	list := strings.Join(offenders, ", ")
+	if isDevEnv() || strings.EqualFold(os.Getenv("ALLOW_INSECURE_DEFAULTS"), "true") {
+		log.Printf("Warning: using the published default value for %s. Anyone can read these from the Pegasusbound repository. Generate real values before this instance is reachable by other people (make gen-key).", list)
+		return offenders
+	}
+
+	log.Fatalf("Refusing to start: %s still hold the published default value from docker-compose.yml. "+
+		"Those defaults are public, so they provide no protection. Generate real values (make gen-key) and put them in .env, "+
+		"or set ALLOW_INSECURE_DEFAULTS=true if this instance is genuinely disposable.", list)
+	return offenders
+}
+
+func isDevEnv() bool {
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
+	return env == "" || env == "dev" || env == "development" || env == "local"
+}
+
+// passkeysUsableFor reports whether WebAuthn can work on this deployment's
+// origin. Passkeys require a secure context and an RP ID that is a real
+// domain, so a plain-http LAN address fails in the browser with an opaque
+// error. Detecting it here lets GET /auth/config hide the button instead.
+func passkeysUsableFor(appURL string) bool {
+	if appURL == "" {
+		return false
+	}
+	u, err := url.Parse(appURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme == "https" {
+		return true
+	}
+	// http is a secure context only on loopback.
+	host := u.Hostname()
+	return host == "localhost" || host == "127.0.0.1" || host == "::1" || strings.HasSuffix(host, ".localhost")
+}
+
+// ssoRedirectURL is where a provider sends the browser back. The explicit
+// override wins; otherwise it derives from the backend's public base, because
+// the callback is served by the API and not by the dashboard.
+func ssoRedirectURL(explicit, provider string) string {
+	if v := strings.TrimSpace(explicit); v != "" {
+		return v
+	}
+	base := strings.TrimRight(os.Getenv("API_PUBLIC_URL"), "/")
+	if base == "" {
+		return ""
+	}
+	// The routes are registered on /v1, not /api/v1: there is no /api prefix.
+	return base + "/v1/auth/" + provider + "/callback"
+}
+
+func oidcRedirectURL() string { return ssoRedirectURL(os.Getenv("OIDC_REDIRECT_URL"), "oidc") }
+
+// warnSSORedirectOrigin fires on the mistake that produces a working OAuth
+// client and a broken button: a redirect URI on the dashboard origin, which
+// serves no callback route.
+func warnSSORedirectOrigin(provider, redirectURL string) {
+	if redirectURL == "" {
+		return
+	}
+	u, err := url.Parse(redirectURL)
+	if err != nil {
+		return
+	}
+	if strings.Contains(u.Path, "/v1/auth/") {
+		return
+	}
+	app, aerr := url.Parse(config.AppBaseURL())
+	if aerr != nil || app.Host == "" || app.Host != u.Host {
+		return
+	}
+	log.Printf("Warning: the %s sign-in redirect URI %s points at the dashboard, which serves no callback. It should be %s (your API_PUBLIC_URL), registered at the provider.",
+		provider, redirectURL, ssoRedirectURL("", provider))
+}
+
+// oauthPublicBaseURL is the base every mailbox-connect redirect_uri is built
+// from. It has to be the address the provider will send a browser back to,
+// which is API_PUBLIC_URL, the same value oidcRedirectURL derives from and the
+// one .env.example already documents as `<API_PUBLIC_URL>/addresses/...`.
+//
+// It is emphatically NOT API_HOST: that is the listener's bind address, which
+// stays 0.0.0.0:8080 in a container. Sent as a redirect_uri it is not even an
+// absolute URI, so the provider rejects the request outright.
+func oauthPublicBaseURL(bindAddr string) string {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("API_PUBLIC_URL")), "/"); v != "" {
+		return v
+	}
+	return browsableBaseFromBindAddr(bindAddr)
+}
+
+// browsableBaseFromBindAddr turns a listener address into a URL a browser on
+// the same host can actually open, so a stock local install that never set
+// API_PUBLIC_URL still produces an absolute redirect_uri.
+func browsableBaseFromBindAddr(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return ""
+	}
+	// Already a URL (someone put a real base in API_HOST): keep it as-is.
+	if strings.Contains(addr, "://") {
+		return strings.TrimRight(addr, "/")
+	}
+
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host, port = addr, ""
+	}
+	// A wildcard bind is reachable from the host itself as localhost.
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		host = "localhost"
+	}
+	if port == "" {
+		return "http://" + host
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+// splitList parses a comma-separated env list.
+func splitList(v string) []string {
+	out := []string{}
+	for _, part := range strings.Split(v, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
+func mailTransportKind(t *notify.Transport) string {
+	if t == nil {
+		return ""
+	}
+	return t.Kind
+}
+
+// warnDeploymentURLs surfaces the configuration mistakes that silently break
+// auth once an operator moves off localhost, each of which previously appeared
+// only as a failure in the browser.
+func warnDeploymentURLs(ctx context.Context, appURL string) {
+	if appURL == "" {
+		if base := config.AppBaseURL(); base != "" {
+			// FRONTEND_BASE_URL is the older name for the same setting, so a
+			// deployment using it is configured, not guessed at, and must not
+			// be told to go looking at CORS_ALLOW_ORIGINS.
+			if os.Getenv("FRONTEND_BASE_URL") != "" {
+				log.Printf("Warning: APP_URL is not set, so emailed links are built from FRONTEND_BASE_URL (%s), its older name. Rename it to APP_URL.", base)
+				return
+			}
+			log.Printf("Warning: APP_URL is not set. Password reset and team invitation emails will link to %s, guessed from CORS_ALLOW_ORIGINS or PUBLIC_HOST. Set APP_URL if that is not where the dashboard is served.", base)
+			return
+		}
+		log.Printf("Warning: APP_URL is not set and nothing else names this deployment's dashboard, so password reset and team invitation emails carry links with no host and nobody can open them. Set APP_URL.")
+		return
+	}
+	if !passkeysUsableFor(appURL) {
+		log.Printf("Warning: APP_URL is %s. Passkeys need a secure context, so they are disabled: browsers refuse WebAuthn on plain http outside localhost, and an IP address cannot be a relying-party ID. Put the dashboard behind HTTPS to enable them.", appURL)
+	}
+}

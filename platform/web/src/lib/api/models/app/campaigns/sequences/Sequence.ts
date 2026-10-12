@@ -1,0 +1,41 @@
+import type { SequenceConditions } from "./Branching";
+import type { SequenceAction } from "./Action";
+
+export default interface Sequence {
+    id: string;
+    name: string;
+
+    subject: string;
+
+    body_plain: string;
+    body_html: string;
+    body_sync: boolean;
+    body_code: boolean;
+
+    wait_after: number;
+
+    // Send this step as a reply on the conversation the contact is already in
+    // rather than as a new email. Default true. A threading step has no
+    // subject of its own: a reply carries the conversation's.
+    thread_reply: boolean;
+
+    // Canvas coordinates set through the layout endpoint. The dashboard lays
+    // steps out from their branches and does not read them.
+    x: number;
+    y: number;
+
+    // Conditional step routing. Absent when the step has no branches; a PATCH
+    // with this field replaces the step's branch set wholesale.
+    conditions?: SequenceConditions | null;
+
+    // "email" (default — subject/body are sent), "action" (a side effect named
+    // by action.type — no email is sent), or "wait" (a no-op control node used
+    // as a Condition / pure router in the flow editor). Step spacing is the
+    // per-step wait_after, not a node kind.
+    kind: "email" | "action" | "wait";
+    // Typed config for action nodes; empty/absent for email nodes.
+    action?: SequenceAction | null;
+
+    updated_at: Date;
+    created_at: Date;
+}

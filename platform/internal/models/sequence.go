@@ -1,0 +1,340 @@
+package models
+
+import (
+	"encoding/json"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type Sequence struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+
+	Subject   string `json:"subject"`
+	BodyPlain string `json:"body_plain"`
+	BodyHTML  string `json:"body_html"`
+	BodySync  bool   `json:"body_sync"`
+	BodyCode  bool   `json:"body_code"`
+
+	WaitAfter int `json:"wait_after"`
+	Position  int `json:"position"`
+
+	// ThreadReply sends this step as a reply on the contact's existing
+	// conversation (In-Reply-To/References, plus the provider thread handle)
+	// instead of opening a new one. Default true; it only has an effect when
+	// the contact has already received an email from this campaign.
+	ThreadReply bool `json:"thread_reply"`
+
+	// X/Y are canvas coordinates set through the layout endpoint, never the
+	// audited content update. The dashboard lays steps out from their branches
+	// and does not read them.
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+
+	// Conditions is the per-step routing: the connections out of this step.
+	// Routing follows connections only. When empty (`{}` / no branches) the
+	// step has no outgoing path and the contact's flow ends there; position
+	// orders the canvas and picks the entry step, it never advances a contact
+	// by itself. When populated, the scheduler evaluates the contact's
+	// engagement against these branches at schedule time to decide which step
+	// (or stop) comes next. Stored as a single jsonb column on `sequences`.
+	Conditions json.RawMessage `json:"conditions,omitempty"`
+
+	// Kind is "email" (default — subject/body are rendered and sent) or a
+	// non-email control node: "action" (Action.Type names the side effect) or
+	// "wait" (delay only). Routing (Conditions) is identical regardless of Kind.
+	Kind string `json:"kind"`
+	// Action is the typed config for non-email nodes; an empty object for email
+	// nodes. Stored in the sequences.action jsonb column.
+	Action json.RawMessage `json:"action,omitempty"`
+
+	UpdatedAt time.Time `json:"updated_at"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// StepSubject is the subject the step at index i actually puts on the wire:
+// its own, or the conversation's when it replies in the contact's thread. A
+// threading step has no subject of its own, so anything that judges a step's
+// copy (preflight, the content score) has to read this rather than the column.
+//
+// seqs must be in canvas order, which is how every campaign read returns them.
+// It follows that order rather than branch targets: it is what a linear
+// sequence does, and a step reached by a branch still inherits from whatever
+// actually preceded it at send time, which only the send path can know.
+func StepSubject(seqs []Sequence, i int) string {
+	if i < 0 || i >= len(seqs) {
+		return ""
+	}
+	own := seqs[i].Subject
+	if !seqs[i].ThreadReply {
+		return own
+	}
+	// Walking back, every step that also replies passes the question on; the
+	// first that does not is the one that opened the conversation.
+	conv := ""
+	for j := i - 1; j >= 0; j-- {
+		if seqs[j].Kind != "" && seqs[j].Kind != "email" {
+			continue
+		}
+		conv = seqs[j].Subject
+		if !seqs[j].ThreadReply {
+			break
+		}
+	}
+	if conv != "" {
+		return conv
+	}
+	return own
+}
+
+// ActionConfig is the persisted config for a non-email (action/wait) node. Type
+// is the switch the task executes on; the remaining fields are type-scoped.
+type ActionConfig struct {
+	Type string `json:"type"` // wait | add_tag | remove_tag | add_to_segment | remove_from_segment | label_email | unsubscribe | notify | create_task | create_deal | move_deal_stage | run_automation | fire_event | switch | ai_step | end
+
+	// wait
+	WaitMinutes *int `json:"wait_minutes,omitempty"`
+
+	// add_tag / remove_tag — a contact category id (product "tags" == categories)
+	CategoryID *uuid.UUID `json:"category_id,omitempty"`
+
+	// add_to_segment / remove_from_segment — pins the contact into or out of a
+	// segment as a manual override.
+	SegmentID *uuid.UUID `json:"segment_id,omitempty"`
+
+	// label_email — apply unibox conversation labels to the contact's most recent
+	// thread. Labels are the same registry as contact tags (categories), but in
+	// the inbox they're "labels", so the field is label_ids. Reply-branch only.
+	LabelIDs []uuid.UUID `json:"label_ids,omitempty"`
+
+	// create_task — open a CRM task for the lead when they reach this step
+	// (e.g. a Call task). TaskAssignedTo is the teammate chosen on the step;
+	// when nil the task falls back to the campaign owner.
+	TaskTitle          string     `json:"task_title,omitempty"`
+	TaskType           string     `json:"task_type,omitempty"`     // general | call | email | meeting
+	TaskPriority       string     `json:"task_priority,omitempty"` // low | medium | high | urgent
+	TaskAssignedTo     *uuid.UUID `json:"task_assigned_to,omitempty"`
+	TaskAssignedTeamID *uuid.UUID `json:"task_assigned_team_id,omitempty"` // assign to a whole team instead of one user
+	TaskDueOffsetDays  *int       `json:"task_due_offset_days,omitempty"`  // due N days after the step fires
+
+	// create_deal / move_deal_stage — CRM deal automation off a reply branch.
+	//   create_deal: open a new deal for the contact in DealPipelineID/DealStageID.
+	//   move_deal_stage: move the contact's most-recent OPEN deal in
+	//     DealPipelineID to DealStageID; a contact with no open deal in that
+	//     pipeline is a logged no-op (not an error).
+	// DealName supports the same {{first_name}}/{{company}} templating other
+	// campaign copy uses. DealValue is optional; DealCurrency defaults to "USD".
+	DealPipelineID *uuid.UUID `json:"deal_pipeline_id,omitempty"`
+	DealStageID    *uuid.UUID `json:"deal_stage_id,omitempty"`
+	DealName       string     `json:"deal_name,omitempty"`
+	DealValue      *float64   `json:"deal_value,omitempty"`
+	DealCurrency   string     `json:"deal_currency,omitempty"`
+
+	// run_automation — launch an automation flow when the contact reaches this
+	// step, passing templated key/value inputs as the automation's event data.
+	// Values render against the contact ({{.FirstName}} / {{.Company}} etc.).
+	AutomationID     *uuid.UUID `json:"automation_id,omitempty"`
+	AutomationValues []ActionKV `json:"automation_values,omitempty"`
+
+	// fire_event — publish a developer-defined custom event to the realtime
+	// gateway. Subscribers (an API key with REALTIME_SUBSCRIBE on the org
+	// websocket) receive it with no public URL. EventName + each field value are
+	// templated against the contact; the fields become the event payload.
+	EventName   string     `json:"event_name,omitempty"`
+	EventFields []ActionKV `json:"event_fields,omitempty"`
+
+	// switch — a multi-way router. SwitchCases are the named case paths shown
+	// as draggable dots on the canvas node; each connected case is stored as an
+	// outgoing branch with an "ai_label" condition carrying the case name, and
+	// an unconditional branch is the "otherwise" fallback. SwitchOn picks the
+	// decider:
+	//   "ai"    — one model call per contact follows AIInstruction (templated
+	//             against the contact) and picks EXACTLY one case. Costs one AI
+	//             credit per contact.
+	//   "value" — SwitchValue (a template like {{.Industry}}) is rendered
+	//             against the contact and matched to the case names. Free,
+	//             deterministic, no model call.
+	// Either way the chosen case lands on the progress row (RecordAILabel) and
+	// routing reads it at the step boundary; a contact matching no case follows
+	// the fallback. Side effects are ordinary action steps placed on the chosen
+	// path, never executed by the decider. Always runs through the scheduler
+	// (never the instant chain), so an instant branch pauses at it.
+	SwitchOn      string   `json:"switch_on,omitempty"` // "ai" (default) | "value"
+	SwitchCases   []string `json:"switch_cases,omitempty"`
+	SwitchValue   string   `json:"switch_value,omitempty"`
+	AIInstruction string   `json:"ai_instruction,omitempty"`
+
+	// AI-decider capabilities. AIWebSearch runs one bounded web search about
+	// the contact's company before deciding and feeds the results in as fenced
+	// untrusted context (+1 credit when results are found). AIThinking routes
+	// the call to the stronger model tier with a larger output budget; the
+	// extra cost flows through usage metering.
+	AIWebSearch bool `json:"ai_web_search,omitempty"`
+	AIThinking  bool `json:"ai_thinking,omitempty"`
+
+	// Context opt-outs for the AI-decided switch. By default the model also
+	// sees the contact's campaign history (which steps ran, opens/clicks/
+	// replies, prior outcomes) and the newest email received from them, so
+	// decisions can be grounded in "what happened so far". Stored inverted so
+	// existing steps keep the richer context.
+	AINoEngagement bool `json:"ai_no_engagement,omitempty"`
+	AINoReplies    bool `json:"ai_no_replies,omitempty"`
+
+	// ai_step (agent) — a bounded AI agent that follows AIInstruction and may
+	// call the reversible actions in AIAllowedActions (add_tag, remove_tag,
+	// label_email, unsubscribe, create_task, create_deal, move_deal_stage). Most
+	// enabled actions' pinned config lives in this same ActionConfig blob (the
+	// Deal* / Task* / LabelIDs fields above). The agent decides which to run per
+	// contact; it never sends or replies. Billed per iteration.
+	AIAllowedActions []string `json:"ai_allowed_actions,omitempty"`
+	// AIAddTags / AIRemoveTags / AILabels are OPTIONAL pools the agent picks from
+	// by name. An empty pool means unrestricted: the executor lists the org's
+	// tags/labels live at run time and the agent may use any (tags and unibox
+	// labels are the same category registry). AIAllowCreateTags additionally lets
+	// an empty-pool pick mint a brand-new tag/label (opt-in).
+	AIAddTags         []AITagRef `json:"ai_add_tags,omitempty"`
+	AIRemoveTags      []AITagRef `json:"ai_remove_tags,omitempty"`
+	AILabels          []AITagRef `json:"ai_labels,omitempty"`
+	AIAllowCreateTags bool       `json:"ai_allow_create_tags,omitempty"`
+}
+
+// AITagRef is one tag in an AI agent step's add/remove pool (id + display name).
+type AITagRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// IsReversibleCampaignAction is the closed set of reversible action types a
+// campaign AI agent step (ai_step) may call as a guarded tool. Its own list
+// (never derived) so it can never include a send, run_automation, fire_event,
+// switch, wait, or end. Shared by write validation and the step executor.
+func IsReversibleCampaignAction(t string) bool {
+	switch t {
+	case "add_tag", "remove_tag", "label_email", "unsubscribe",
+		"create_task", "create_deal", "move_deal_stage":
+		return true
+	default:
+		return false
+	}
+}
+
+// ActionKV is one templated input passed to a launched automation.
+type ActionKV struct {
+	Key   string `json:"key"`
+	Value string `json:"value"`
+}
+
+type UpdateSequence struct {
+	Name    *string `json:"name"`
+	Subject *string `json:"subject"`
+
+	BodyPlain *string `json:"body_plain"`
+	BodyHTML  *string `json:"body_html"`
+	BodySync  *bool   `json:"body_sync"`
+	BodyCode  *bool   `json:"body_code"`
+
+	WaitAfter *int `json:"wait_after"`
+
+	// ThreadReply toggles reply-in-thread for this step.
+	ThreadReply *bool `json:"thread_reply"`
+
+	// Conditions, when non-nil, replaces the step's branching tree. Send `{}`
+	// (or an object with an empty `branches` array) to clear branching, which
+	// ends the contact's flow at this step.
+	Conditions *BranchConditions `json:"conditions"`
+
+	// Kind / Action, when non-nil, switch the node between email and action/wait.
+	Kind   *string       `json:"kind"`
+	Action *ActionConfig `json:"action"`
+}
+
+// SequenceLayout is a position-only update for the sequence builder: the canvas
+// x/y of some or all steps. Like the automation layout endpoint it is written
+// continuously as steps are dragged and is deliberately NOT audited and does not
+// bump updated_at — a reposition is cosmetic. Retries are naturally safe
+// (positions are last-write-wins), so it needs no Idempotency-Key.
+type SequenceLayout struct {
+	Positions []SequencePosition `json:"positions"`
+}
+
+// SequencePosition is one step's canvas coordinates.
+type SequencePosition struct {
+	ID string  `json:"id"`
+	X  float64 `json:"x"`
+	Y  float64 `json:"y"`
+}
+
+// BranchConditions is the typed branching tree persisted in the sequence
+// `conditions` jsonb column. Branches are evaluated in declared order; the first
+// branch whose conditions ALL match wins. A winning branch routes the contact to
+// its TargetSequenceID (any step in the campaign), or stops them when the target
+// is nil. When no branch matches (or Branches is empty) the contact's flow
+// ends at this step; a plain "go there next" link is a branch with no
+// conditions.
+type BranchConditions struct {
+	Branches []Branch `json:"branches,omitempty"`
+}
+
+// Branch is a single conditional route out of a step ("if <conditions> -> go to
+// target, else stop"). A branch with no conditions is an unconditional catch-all
+// ("otherwise").
+type Branch struct {
+	// BranchID is a stable client-supplied identifier (for editor diffing /
+	// logging). Kept as a free-form string: the editor uses crypto.randomUUID()
+	// when available but falls back to a non-UUID token, so this must NOT be a
+	// strict uuid.UUID or unmarshalling the PATCH body would fail.
+	BranchID string `json:"branch_id"`
+	// TargetSequenceID is the step to route to when this branch matches. nil
+	// means STOP (send the contact no further step). A target that no longer
+	// exists (a deleted step) is treated as STOP at schedule time.
+	TargetSequenceID *uuid.UUID `json:"target_step_id"`
+	// Conditions are ANDed together — every condition must hold for the branch
+	// to match. An empty list is an unconditional/catch-all branch ("otherwise").
+	Conditions []BranchCondition `json:"conditions,omitempty"`
+	// Instant, for a reply_* branch, controls whether its action chain fires the
+	// MOMENT the contact replies. nil or true = instant (the default); false =
+	// opt out, leaving the branch to route at the normal step boundary like an
+	// engagement branch. Ignored for non-reply branches. Stored in the
+	// sequences.conditions jsonb, so no migration is needed.
+	Instant *bool `json:"instant,omitempty"`
+}
+
+// BranchCondition is a single engagement predicate evaluated against the
+// contact's campaign_contact_progress row for the current step.
+type BranchCondition struct {
+	// Field is the engagement signal:
+	//   "opened" | "clicked" | "replied" and their negations
+	//   "not_opened" | "not_clicked" | "not_replied",
+	// plus the reply-classification fields (operator "ever", no Value), read
+	// from campaign_contact_progress.reply_class:
+	//   "reply_positive"  — reply_class is positive
+	//   "reply_negative"  — reply_class is negative
+	//   "reply_neutral"   — reply_class is neutral
+	//   "reply_automated" — reply_class is auto_reply OR out_of_office
+	// IMPORTANT: the plain "replied"/"not_replied" fields IGNORE automated
+	// replies (auto_reply / out_of_office) — only a human reply sets replied_at,
+	// so a vacation autoresponder never trips "replied" or stop_on_reply. Use the
+	// reply_automated field to branch specifically on an automated reply.
+	//
+	// "ai_label" (operator "is", value in Label) matches when the AI step that
+	// owns this branch stored that label for the contact — deterministic at
+	// schedule time, no model call.
+	//
+	// "reply_intent" (operator "is", value in Label) matches when automatic inbox
+	// tagging stored that intent for the contact's human reply; also decided
+	// at schedule time with no model call.
+	Field string `json:"field"`
+	// Operator is the comparison. "within_days" (the signal occurred in the last
+	// Value days) and "ever" (the signal occurred at all). For the not_* fields
+	// the meaning inverts (did NOT happen within / ever). The reply_* fields take
+	// operator "ever" (no Value). "is" pairs with "ai_label" or "reply_intent"
+	// (compare to Label).
+	Operator string `json:"operator"`
+	// Value is the day window for "within_days". nil for operators that take no
+	// argument (e.g. "ever").
+	Value *int `json:"value"`
+	// Label is the AI-step label an "ai_label" condition compares against
+	// (case-insensitive). Empty for every other field.
+	Label string `json:"label,omitempty"`
+}

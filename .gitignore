@@ -1,0 +1,22 @@
+node_modules
+.next
+.data
+.env
+*.log
+.env.*
+!.env.example
+*.local
+.claude/
+coverage/
+dist/
+*.tsbuildinfo
+# Credentials and generated media stay local
+.dev-credentials
+.demo-credentials
+demo/video/raw/
+demo/video/audio/
+demo/video/*.wav
+demo/video/*.mp4
+packages/engine/scripts/tmp/
+# Internal one-off tooling
+scripts/rebrand.cjs

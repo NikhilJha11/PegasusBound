@@ -1,0 +1,92 @@
+[package]
+name = "tracking"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight tracking pixel and click tracking service for Pegasusbound"
+
+[dependencies]
+# Web framework
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# AWS SDK. The `rustls` default feature is NOT the modern rustls: it selects
+# aws-smithy-http-client's legacy-rustls-ring path, which drags hyper 0.14,
+# rustls 0.21 and rustls-webpki 0.101 into the tree alongside the current ones
+# and is where every outstanding cargo-audit advisory here came from.
+# `default-https-client` is the hyper 1.x / rustls 0.23 client and is what we
+# actually want.
+aws-config = "1.1"
+aws-sdk-ssm = { version = "1.15", default-features = false, features = ["default-https-client", "rt-tokio"] }
+aws-sdk-secretsmanager = { version = "1.15", default-features = false, features = ["default-https-client", "rt-tokio"] }
+
+# NATS (default event bus): pure-Rust, no native librdkafka to compile.
+async-nats = "0.50"
+
+# rustls 0.23 refuses to pick a provider when both aws-lc-rs and ring are in
+# the tree, and both are: it panics on the first TLS connection rather than at
+# startup. Named here so main can install one explicitly. ring, because it
+# needs no C toolchain on the musl builder.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+# Kafka with Avro (optional; enabled with `--features kafka`). rdkafka is the
+# only native/librdkafka dependency, so the default build compiles far faster
+# and needs no libcurl/libsasl system headers.
+# "ssl" is not optional in practice: every managed broker speaks SASL_SSL, and
+# without it librdkafka is built with -DWITH_SSL=0 and refuses
+# security.protocol=SASL_SSL at runtime with "OpenSSL not available at build
+# time". gssapi is deliberately left out; PLAIN and SCRAM need no cyrus-sasl.
+rdkafka = { version = "0.36", features = ["cmake-build", "ssl"], optional = true }
+apache-avro = { version = "0.21", features = ["derive"], optional = true }
+schema_registry_converter = { version = "4.0", features = ["avro", "blocking"], optional = true }
+
+# HTTP client for the click-ticket resolver (always needed by links.rs). Uses
+# rustls (pure Rust TLS) instead of native-tls so the default image needs no
+# OpenSSL system libraries.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# Utils
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.21"
+moka = { version = "0.12", features = ["future"] }
+# Trusted-proxy CIDR matching for the client IP
+ipnet = "2"
+
+# Source-ASN resolution from a GeoLite2-ASN database, so `asn:` entries in the
+# scanner catalogue match without an edge that writes an ASN header. Pure Rust,
+# no native deps; the `mmap` feature is deliberately off (see asndb.rs).
+maxminddb = { version = "0.32", default-features = false }
+
+# Unwrapping that database when it is downloaded rather than mounted. MaxMind's
+# permalink serves a .tar.gz with the file nested under a dated directory.
+# flate2's default backend is miniz_oxide, which keeps the musl builder free of
+# a C toolchain the same way the rest of this file does.
+flate2 = "1"
+tar = "0.4"
+
+# Error reporting. Optional at runtime: with no SENTRY_DSN the guard is never
+# created, no transport thread starts and no host is contacted. rustls for the
+# same reason reqwest uses it, so the image needs no OpenSSL system libraries.
+sentry = { version = "0.49", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[features]
+# Default is NATS-only: no rdkafka/librdkafka, so the image builds fast and
+# needs no native Kafka toolchain. Build with `--features kafka` to add the
+# Kafka + Avro + Schema Registry publisher (selected at runtime by
+# EVENTBUS_PROVIDER=kafka).
+default = []
+kafka = ["dep:rdkafka", "dep:apache-avro", "dep:schema_registry_converter"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = "z"
+strip = true

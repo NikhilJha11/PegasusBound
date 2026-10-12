@@ -1,0 +1,1 @@
+-- Connections are ordinary step data the user can edit; there is nothing to undo.

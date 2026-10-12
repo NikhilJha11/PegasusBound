@@ -1,0 +1,71 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import Icon from '../../components/Icon.astro';
+import CTA from '../../components/CTA.astro';
+import PostGrid from '../../components/blog/PostGrid.astro';
+import TagFilter from '../../components/blog/TagFilter.astro';
+import { getPublishedPosts, tagCounts } from '../../lib/blog';
+
+const posts = await getPublishedPosts();
+const tags = tagCounts(posts);
+
+const follow = [
+  { href: '/changelog/', title: 'Changelog', icon: 'list', external: false },
+  { href: 'https://github.com/pegasusbound/pegasusbound', title: 'Source code', icon: 'code', external: true },
+  { href: 'https://github.com/pegasusbound/pegasusbound/discussions', title: 'Discussions', icon: 'reply', external: true },
+];
+---
+<Layout
+  title="Cold Email and Deliverability Blog | Pegasusbound"
+  description="Deliverability, sending infrastructure, and what it takes to run an open-source cold email platform."
+>
+  <section class="container-page pt-14 md:pt-24 pb-10">
+    <div class="flex flex-wrap items-end justify-between gap-x-8 gap-y-4">
+      <div class="max-w-3xl">
+        <div class="text-[14px] text-slate-500">Blog</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">Notes on sending cold email that lands.</h1>
+        <p class="mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">Deliverability, warmup, sending limits and what it takes to build an open-source cold email platform.</p>
+      </div>
+      <a href="/blog/rss.xml" class="text-[14px] text-slate-500 hover:text-slate-900">RSS feed</a>
+    </div>
+  </section>
+
+  <!-- ============================================================
+       POSTS — tabs + search + cover-image grid
+  ============================================================ -->
+  <section class="pb-20 md:pb-28">
+    <div class="container-page">
+      <PostGrid posts={posts}>
+        <TagFilter slot="filters" tags={tags} total={posts.length} />
+      </PostGrid>
+    </div>
+  </section>
+
+  <div class="container-page" aria-hidden="true"><div class="h-px bg-slate-900/[0.06] md:-mx-6"></div></div>
+  <section class="container-page py-16 md:py-20">
+    <div class="grid gap-10 lg:grid-cols-2 lg:gap-16">
+      <div>
+        <h2 class="text-[13px] text-slate-400">Topics</h2>
+        <div class="mt-4 flex flex-wrap gap-2">
+          {tags.map(({ tag, count }) => (
+            <a href={`/blog/tag/${tag}/`} class="inline-flex h-9 items-center gap-2 rounded-full px-4 text-[14px] text-slate-600 ring-1 ring-slate-200 transition-colors hover:text-slate-900 hover:ring-slate-300">
+              {tag}<span class="tabular-nums text-[12.5px] text-slate-400">{count}</span>
+            </a>
+          ))}
+        </div>
+      </div>
+      <div>
+        <h2 class="text-[13px] text-slate-400">Elsewhere</h2>
+        <div class="mt-4 flex flex-wrap gap-2">
+          {follow.map((f) => (
+            <a href={f.href} {...(f.external ? { target: '_blank', rel: 'noopener' } : {})} class="inline-flex h-9 items-center gap-2 rounded-full px-4 text-[14px] text-slate-600 ring-1 ring-slate-200 transition-colors hover:text-slate-900 hover:ring-slate-300">
+              <Icon name={f.icon} size={13} class="text-slate-400" />{f.title}
+            </a>
+          ))}
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <CTA />
+</Layout>

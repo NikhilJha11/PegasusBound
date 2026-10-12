@@ -1,0 +1,16 @@
+{
+  "title": "Learn",
+  "description": "Cold email and deliverability fundamentals",
+  "root": true,
+  "pages": [
+    "email-warmup",
+    "warmup-pools",
+    "spf-dkim-dmarc",
+    "deliverability",
+    "inbox-placement",
+    "cold-email-rules",
+    "reputation-recovery",
+    "personalization",
+    "glossary"
+  ]
+}

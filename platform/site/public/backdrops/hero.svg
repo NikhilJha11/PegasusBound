@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 700" preserveAspectRatio="xMidYMid slice" role="img" aria-label="">
+  <defs>
+    <!-- Abstract atmospheric backdrop — sky + clouds + sun, no mountains -->
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"   stop-color="#eedfd0"/>
+      <stop offset="30%"  stop-color="#e6d3c8"/>
+      <stop offset="60%"  stop-color="#dcc7c1"/>
+      <stop offset="100%" stop-color="#cdbab4"/>
+    </linearGradient>
+
+    <radialGradient id="sun" cx="78%" cy="28%" r="55%">
+      <stop offset="0%"   stop-color="#fff3d4" stop-opacity="0.80"/>
+      <stop offset="38%"  stop-color="#fbdcb0" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#fbdcb0" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="cool" cx="18%" cy="22%" r="55%">
+      <stop offset="0%"   stop-color="#cfc6d8" stop-opacity="0.45"/>
+      <stop offset="100%" stop-color="#cfc6d8" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="cloud" cx="50%" cy="50%" r="55%">
+      <stop offset="0%"   stop-color="#ffffff" stop-opacity="0.95"/>
+      <stop offset="48%"  stop-color="#fbeedd" stop-opacity="0.55"/>
+      <stop offset="100%" stop-color="#e8d2c2" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="wash" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%"  stop-color="#f7f7f4" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#f7f7f4" stop-opacity="0.55"/>
+    </linearGradient>
+
+    <filter id="paint" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.014" numOctaves="3" seed="3" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="120"/>
+      <feGaussianBlur stdDeviation="16"/>
+    </filter>
+
+    <filter id="paint-soft" x="-30%" y="-30%" width="160%" height="160%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.010" numOctaves="2" seed="11" result="n"/>
+      <feDisplacementMap in="SourceGraphic" in2="n" scale="80"/>
+      <feGaussianBlur stdDeviation="28"/>
+    </filter>
+
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="2.4" numOctaves="2" stitchTiles="stitch"/>
+      <feColorMatrix type="matrix" values="0 0 0 0 0.35  0 0 0 0 0.30  0 0 0 0 0.26  0 0 0 0.07 0"/>
+      <feComposite operator="in" in2="SourceGraphic"/>
+    </filter>
+  </defs>
+
+  <rect width="1600" height="700" fill="url(#sky)"/>
+  <rect width="1600" height="700" fill="url(#cool)"/>
+  <rect width="1600" height="700" fill="url(#sun)"/>
+
+  <!-- Distant soft band -->
+  <g filter="url(#paint-soft)" opacity="0.85">
+    <ellipse cx="320"  cy="200" rx="460" ry="120" fill="url(#cloud)"/>
+    <ellipse cx="1240" cy="180" rx="420" ry="110" fill="url(#cloud)"/>
+    <ellipse cx="820"  cy="300" rx="500" ry="120" fill="url(#cloud)"/>
+  </g>
+
+  <!-- Foreground definition -->
+  <g filter="url(#paint)" opacity="0.92">
+    <ellipse cx="180"  cy="160" rx="300" ry="95"  fill="url(#cloud)"/>
+    <ellipse cx="1340" cy="140" rx="280" ry="90"  fill="url(#cloud)"/>
+    <ellipse cx="980"  cy="260" rx="340" ry="105" fill="url(#cloud)"/>
+    <ellipse cx="540"  cy="430" rx="380" ry="100" fill="url(#cloud)"/>
+    <ellipse cx="1280" cy="460" rx="330" ry="90"  fill="url(#cloud)"/>
+  </g>
+
+  <rect x="0" y="420" width="1600" height="280" fill="url(#wash)"/>
+
+  <rect width="1600" height="700" fill="white" filter="url(#grain)" opacity="0.45"/>
+</svg>

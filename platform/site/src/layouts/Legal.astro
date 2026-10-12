@@ -1,0 +1,193 @@
+---
+import Layout from './Layout.astro';
+
+interface Section {
+  id: string;
+  num: string;
+  title: string;
+}
+interface Props {
+  title: string;
+  description?: string;
+  effective?: string;
+  updated?: string;
+  sections: Section[];
+}
+const {
+  title,
+  description,
+  effective = '2026-05-27',
+  updated = '2026-05-27',
+  sections,
+} = Astro.props;
+
+const docs = [
+  { label: 'Terms of Service', href: '/terms/' },
+  { label: 'Privacy Policy',   href: '/privacy/' },
+];
+
+const path = Astro.url.pathname;
+---
+<Layout title={title} description={description ?? title}>
+
+  <!-- HEADER: a plain document title. -->
+  <section class="container-page pt-14 md:pt-24 pb-12 md:pb-14" id="legal-hero">
+    <div class="text-[14px] text-slate-500">Legal</div>
+    <h1 class="mt-4 max-w-3xl text-[38px] md:text-[56px] font-medium tracking-[-0.045em] leading-[1.04] text-slate-900">{title}</h1>
+    <div class="mt-5 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-[14px] text-slate-500">
+      <span>Effective {effective}</span>
+      <span class="size-1 rounded-full bg-slate-300"></span>
+      <span>Last updated {updated}</span>
+    </div>
+  </section>
+
+  <!-- BODY -->
+  <div class="container-page border-t border-slate-900/[0.06] pt-12 md:pt-14 pb-20 md:pb-28 grid grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)] gap-10 lg:gap-16">
+
+    <!-- STICKY SIDEBAR -->
+    <aside class="lg:sticky lg:top-28 self-start hidden lg:block">
+      <div class="text-[13px] text-slate-400 mb-4">On this page</div>
+      <ol class="space-y-px text-[13px] relative" data-legal-rail>
+        <span
+          data-legal-indicator
+          aria-hidden="true"
+          class="absolute left-0 w-[2px] rounded-full bg-slate-900 pointer-events-none opacity-0 transition-all duration-300 ease-out"
+          style="top:0;height:0;"
+        ></span>
+        {sections.map((s) => (
+          <li>
+            <a
+              href={`#${s.id}`}
+              data-target-id={s.id}
+              class="legal-link group flex items-baseline gap-3 py-1.5 pl-3 pr-2 -ml-px rounded-md text-slate-500 hover:text-slate-900 transition-colors duration-300 ease-out"
+            >
+              <span class="legal-num font-mono text-[11px] text-slate-300 w-5 shrink-0 transition-colors duration-300">{s.num}</span>
+              <span class="leading-snug">{s.title}</span>
+            </a>
+          </li>
+        ))}
+      </ol>
+
+      <div class="mt-8 pt-6 border-t border-slate-200">
+        <div class="text-[13px] text-slate-400 mb-3">Documents</div>
+        <ul class="space-y-0.5">
+          {docs.map((d) => {
+            const isCurrent = path === d.href;
+            return (
+              <li>
+                <a
+                  href={d.href}
+                  aria-current={isCurrent ? 'page' : undefined}
+                  class={
+                    'block text-[13px] -mx-2 px-2 py-1.5 rounded-md transition-colors duration-200 ' +
+                    (isCurrent
+                      ? 'text-slate-900 font-medium'
+                      : 'text-slate-500 hover:text-slate-900')
+                  }
+                >
+                  {d.label}
+                </a>
+              </li>
+            );
+          })}
+        </ul>
+      </div>
+    </aside>
+
+    <!-- MAIN -->
+    <article class="max-w-3xl">
+      <div class="space-y-6 [&_h2]:text-[22px] [&_h2]:md:text-[28px] [&_h2]:font-medium [&_h2]:tracking-[-0.03em] [&_h2]:mt-14 [&_h2]:mb-3 [&_h2]:text-slate-900 [&_h3]:text-[17px] [&_h3]:font-medium [&_h3]:mt-8 [&_h3]:mb-2 [&_h3]:text-slate-900 [&_p]:text-[16px] [&_p]:leading-[1.75] [&_p]:text-slate-600 [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-2 [&_ul]:text-[16px] [&_ul]:leading-[1.7] [&_ul]:text-slate-600 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:space-y-2 [&_ol]:text-[16px] [&_ol]:leading-[1.7] [&_ol]:text-slate-600 [&_a]:text-slate-900 [&_a]:underline [&_a]:decoration-slate-300 [&_a]:underline-offset-4 [&_a:hover]:decoration-slate-900 [&_code]:font-mono [&_code]:text-[0.92em] [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:bg-[color:var(--surface-2)] [&_code]:ring-1 [&_code]:ring-[color:var(--border)]">
+        <slot />
+      </div>
+      <div class="mt-16 text-[14px] text-slate-500 border-t border-slate-200 pt-6">
+        Questions about this document? Email <a class="text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-900" href="mailto:team@pegasusbound.com">team@pegasusbound.com</a>.
+      </div>
+    </article>
+  </div>
+
+  <!-- Scrollspy + animated active indicator -->
+  <script is:inline>
+    (function () {
+      var links = Array.prototype.slice.call(document.querySelectorAll('.legal-link'));
+      if (!links.length) return;
+      var sections = links
+        .map(function (a) {
+          return { link: a, el: document.getElementById(a.getAttribute('data-target-id')) };
+        })
+        .filter(function (s) { return s.el; });
+      if (!sections.length) return;
+
+      var indicator = document.querySelector('[data-legal-indicator]');
+
+      var inactiveText = ['text-slate-500'];
+      var activeText   = ['text-slate-900', 'font-medium'];
+      var inactiveNum  = ['text-slate-300'];
+      var activeNum    = ['text-slate-900'];
+
+      var currentId = null;
+      function setActive(id) {
+        if (id === currentId) return;
+        currentId = id;
+        var activeLink = null;
+        sections.forEach(function (s) {
+          var num = s.link.querySelector('.legal-num');
+          if (s.el.id === id) {
+            activeLink = s.link;
+            s.link.classList.remove.apply(s.link.classList, inactiveText);
+            s.link.classList.add.apply(s.link.classList, activeText);
+            if (num) {
+              num.classList.remove.apply(num.classList, inactiveNum);
+              num.classList.add.apply(num.classList, activeNum);
+            }
+          } else {
+            s.link.classList.remove.apply(s.link.classList, activeText);
+            s.link.classList.add.apply(s.link.classList, inactiveText);
+            if (num) {
+              num.classList.remove.apply(num.classList, activeNum);
+              num.classList.add.apply(num.classList, inactiveNum);
+            }
+          }
+        });
+        if (indicator && activeLink) {
+          var railParent = indicator.parentElement;
+          var railRect = railParent.getBoundingClientRect();
+          var linkRect = activeLink.getBoundingClientRect();
+          indicator.style.opacity = '1';
+          indicator.style.top = (linkRect.top - railRect.top) + 'px';
+          indicator.style.height = linkRect.height + 'px';
+        }
+      }
+
+      function onScroll() {
+        var probe = window.innerHeight * 0.30;
+        var active = sections[0].el.id;
+        for (var i = 0; i < sections.length; i++) {
+          var rect = sections[i].el.getBoundingClientRect();
+          if (rect.top - probe <= 0) active = sections[i].el.id; else break;
+        }
+        setActive(active);
+      }
+
+      onScroll();
+      var raf = 0;
+      window.addEventListener('scroll', function () {
+        if (raf) return;
+        raf = requestAnimationFrame(function () { raf = 0; onScroll(); });
+      }, { passive: true });
+      window.addEventListener('resize', function () {
+        var id = currentId;
+        currentId = null;
+        if (id) setActive(id);
+      });
+    })();
+  </script>
+
+  <style is:global>
+    @media print {
+      header, footer, aside { display: none !important; }
+      #legal-hero { height: auto !important; padding: 1.5rem 0 !important; background: none !important; color: #111 !important; }
+      #legal-hero * { color: #111 !important; }
+      article { max-width: 100% !important; }
+    }
+  </style>
+</Layout>

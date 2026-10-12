@@ -1,0 +1,56 @@
+{
+  "uid": "pegasusbound_add_to_campaign",
+  "type": "workflow-action",
+  "config": {
+    "actionUrl": "https://api.pegasusbound.com/api/v1/integrations/hubspot/actions/enroll",
+    "isPublished": true,
+    "supportedClients": [
+      {
+        "client": "WORKFLOWS"
+      }
+    ],
+    "objectTypes": [
+      "CONTACT"
+    ],
+    "inputFields": [
+      {
+        "typeDefinition": {
+          "name": "campaign",
+          "type": "enumeration",
+          "fieldType": "select",
+          "optionsUrl": "https://api.pegasusbound.com/api/v1/integrations/hubspot/actions/campaigns"
+        },
+        "supportedValueTypes": [
+          "STATIC_VALUE"
+        ],
+        "isRequired": true
+      }
+    ],
+    "outputFields": [
+      {
+        "typeDefinition": {
+          "name": "pegasusbound_result",
+          "type": "string",
+          "fieldType": "text"
+        }
+      }
+    ],
+    "labels": {
+      "en": {
+        "actionName": "Add to Pegasusbound campaign",
+        "actionDescription": "Enroll the contact in a Pegasusbound campaign. Contacts new to Pegasusbound are created from their HubSpot record; opted-out contacts are skipped.",
+        "appDisplayName": "Pegasusbound",
+        "actionCardContent": "Add to Pegasusbound campaign",
+        "inputFieldLabels": {
+          "campaign": "Campaign"
+        },
+        "outputFieldLabels": {
+          "pegasusbound_result": "Pegasusbound result"
+        },
+        "inputFieldDescriptions": {
+          "campaign": "The Pegasusbound campaign to add the contact to. Campaigns that have finished are not listed."
+        }
+      }
+    }
+  }
+}

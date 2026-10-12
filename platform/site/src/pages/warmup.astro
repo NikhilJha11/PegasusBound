@@ -1,0 +1,203 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import WarmupPoolNotice from '../components/WarmupPoolNotice.astro';
+import PillarPosts from '../components/PillarPosts.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import WarmupHeroScene from '../components/scenes/warmup/WarmupHeroScene.astro';
+import RampScene from '../components/scenes/warmup/RampScene.astro';
+import ConversationScene from '../components/scenes/warmup/ConversationScene.astro';
+import PlacementWatchScene from '../components/scenes/warmup/PlacementWatchScene.astro';
+import PoolStandingScene from '../components/scenes/warmup/PoolStandingScene.astro';
+import PoolsScene from '../components/scenes/warmup/PoolsScene.astro';
+
+// Every number here is a product default from internal/config/constants.go,
+// docs/content/docs/guides/warmup.mdx and the warmup policy in CLAUDE.md.
+
+const mail = [
+  {
+    t: 'A token for one inbox',
+    b: 'Every warmup email carries a single-use token bound to the inbox it was sent to. It proves the copy arrived and records where it landed, then it is spent. Replayed or forwarded anywhere else, it counts for nothing.',
+  },
+  {
+    t: 'Out of your way',
+    b: 'By default, warmup mail in and out is filed into a folder called Pegasusbound, so it never buries your inbox or your Sent folder. It never shows up in the Pegasusbound unibox either.',
+  },
+  {
+    t: 'Cleaned up for you',
+    b: 'Warmup mail is deleted after 30 days by default. Set a shorter or longer window per mailbox, down to three days.',
+  },
+];
+
+const defaults = [
+  { v: '10', k: 'emails on day one' },
+  { v: '+1', k: 'each day after' },
+  { v: '40', k: 'a day at most' },
+  { v: '30', k: 'days before warmup mail is deleted' },
+];
+
+const faq: [string, string][] = [
+  ['How long does warmup take?', 'Most new mailboxes need three to six weeks. At the default ramp a mailbox reaches 40 emails a day after about a month, and inbox placement usually settles over the same stretch.'],
+  ['Should warmup keep running once my campaigns start?', 'Yes. Warmup runs alongside cold sending at up to five messages a day, so a dip in reputation shows up in the warmup numbers and gets corrected before your campaigns feel it.'],
+  ['What gets a mailbox taken out of the pool?', 'High complaint or bounce rates: 0.10% complaints or 5% bounces pause it for 7 days, 0.30% or 10% for 30. Spam placement on its own never removes a mailbox; it only slows warmup down until placement recovers.'],
+  ['Do the free and premium pools mix?', 'Only on proven terms. A paying mailbox can also write to free mailboxes from other workspaces that have been healthy pool members for at least three days, and a free mailbox may only write back to a paying inbox that wrote to it in the last two weeks.'],
+  ['Which providers does placement count at?', 'Gmail, Outlook and Yahoo. They filter on sender reputation, which is what cold email is judged on. Smaller mail hosts run their own filters, so their spam folder is never held against you.'],
+  ['Can I warm up a self-hosted instance?', 'Yes, by linking it to Pegasusbound Cloud once it launches: up to 10 mailboxes free, or unlimited for $15 a month. Everything else stays on your own servers.'],
+];
+
+const sceneTitle = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const sceneBody = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+const link = 'group mt-6 inline-flex items-center gap-2 text-[16px] md:text-[17px] text-[color:var(--brand)] hover:text-[color:var(--brand-strong)]';
+---
+<Layout
+  title="Email Warmup That Builds Sender Reputation | Pegasusbound"
+  description="Warm up new mailboxes with real email in a vetted pool: 10 a day, adding one a day up to 40, with inbox placement tracked at Gmail, Outlook and Yahoo."
+>
+  <!-- HERO: the claim on the left, the how on the right, then the Accounts
+       page with a mailbox's Warmup tab open. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="grid gap-8 lg:grid-cols-[1.35fr_1fr] lg:items-end lg:gap-16">
+      <div>
+        <div class="text-[14px] text-slate-500">Warmup</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+          Email warmup that builds real sender reputation.
+        </h1>
+      </div>
+      <div class="lg:pb-2">
+        <p class="text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+          Pegasusbound warms each mailbox by trading a little real email with other inboxes, starting at 10 a day and adding one a day up to 40. It watches where that mail lands and slows a mailbox down the moment placement slips.
+        </p>
+        <div class="mt-8 flex flex-wrap items-center gap-3">
+          <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+            Start warming <Icon name="arrowRight" size={14} />
+          </a>
+          <a href="https://docs.pegasusbound.com/learn/email-warmup/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+            How warmup works
+          </a>
+        </div>
+      </div>
+    </div>
+    <div class="mt-12 md:mt-16">
+      <WarmupHeroScene />
+    </div>
+  </section>
+
+  <!-- THE RAMP: copy beside the drawer's Analytics tab. -->
+  <Rule class="mt-20 md:mt-28" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-[0.9fr_1.1fr] lg:gap-16">
+      <div>
+        <SectionIntro lead="The ramp." title="Ten a day, one more each day, never past forty." text="Each mailbox follows its own ramp, spread across the warmup hours you set for it. The real number can come in lower than the ramp: a mailbox never writes to the same partner twice in a day, and its target is capped by how many partners are free." />
+        <p class="mt-4 max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">
+          If a warmup email lands in spam at Gmail, Outlook or Yahoo, the ramp stops climbing at once: today's target drops by a quarter for 48 hours and the daily increase pauses for three days, without catching up afterwards.
+        </p>
+        <a href="https://docs.pegasusbound.com/guides/warmup/" class={link}>
+          Read about the ramp
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform group-hover:translate-x-0.5"><polyline points="9 18 15 12 9 6" /></svg>
+        </a>
+      </div>
+      <RampScene />
+    </div>
+  </section>
+
+  <!-- WHAT WARMUP MAIL IS: a real thread in a partner's mailbox. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-end lg:gap-16">
+      <SectionIntro lead="What warmup mail is." title="Short plain-text threads that say what they are." />
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500 lg:pb-1">
+        Each message is plain text with no tracking pixel and opens with "Simulated diagnostic", so nobody mistakes it for a real conversation. Partners write back on their own schedule, about three times in ten by default, and each thread closes after a few turns.
+      </p>
+    </div>
+    <div class="mt-12">
+      <ConversationScene />
+    </div>
+    <div class="mt-12 grid gap-10 md:grid-cols-3 md:gap-8">
+      {mail.map((m) => (
+        <div class="md:border-l md:border-slate-200 md:pl-6 md:first:border-l-0 md:first:pl-0">
+          <h3 class="text-[19px] font-medium tracking-[-0.01em] text-slate-900">{m.t}</h3>
+          <p class="mt-2 text-[15px] leading-[1.6] text-slate-500">{m.b}</p>
+        </div>
+      ))}
+    </div>
+  </section>
+
+  <!-- HEALTH: what slows a mailbox down, and what takes it out. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-[1.1fr_1fr] lg:items-end lg:gap-16">
+      <SectionIntro lead="Health." title="Landing in spam slows a mailbox down. Hurting other people takes it out." />
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500 lg:pb-1">
+        Placement is judged at Gmail, Outlook and Yahoo once a mailbox has 20 verified deliveries in a week. Complaint and bounce lines sit below the ones Google and Amazon SES enforce, because a shared pool is only as good as its worst member.
+      </p>
+    </div>
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 lg:grid-cols-2">
+      <article>
+        <PlacementWatchScene />
+        <h3 class={sceneTitle}>Spam placement only ever slows a mailbox down</h3>
+        <p class={sceneBody}>At 10% spam a mailbox goes on watch and sends a little slower. At 20% warmup and cold sending both drop to half volume, and they return to normal on their own once placement recovers.</p>
+      </article>
+      <article>
+        <PoolStandingScene />
+        <h3 class={sceneTitle}>Complaints and bounces take it out of the pool</h3>
+        <p class={sceneBody}>Complaints at 0.10% or bounces at 5% take a mailbox out for 7 days and pause its cold sending; 0.30% or 10% take it out for 30. The standing follows the address, so reconnecting it does not reset anything.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- POOLS: who a mailbox can write to, and why. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-[1.1fr_0.9fr] lg:gap-16">
+      <div class="lg:order-2">
+        <SectionIntro lead="Pools." title="Free and premium mailboxes warm apart." text="Paid plans warm in the premium pool; free workspaces and linked self-hosted instances in the free one. A paying mailbox may also write to free mailboxes from other workspaces once they have been healthy members for three days. A free mailbox only writes back to a paying inbox that wrote to it in the last 14 days." />
+        <p class="mt-4 max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">
+          Every draw favours the inbox that is owed the most mail, up to four times as often, and no inbox receives more than about twice what it sends in a day.
+        </p>
+        <p class="mt-4 max-w-xl text-[14px] leading-[1.6] text-slate-400">On the Business plan your mailboxes also sign in to their providers from an address no other customer uses. They still warm in the premium pool and are judged mailbox by mailbox.</p>
+      </div>
+      <div class="lg:order-1">
+        <PoolsScene />
+      </div>
+    </div>
+    <WarmupPoolNotice class="mt-14 max-w-3xl" />
+  </section>
+
+  <!-- DEFAULTS: four numbers in a row. -->
+  <Rule />
+  <section class="container-page py-16 md:py-20">
+    <div class="grid grid-cols-2 gap-y-10 md:grid-cols-4">
+      {defaults.map((d) => (
+        <div class="md:border-l md:border-slate-200 md:pl-6 md:first:border-l-0 md:first:pl-0">
+          <div class="text-[44px] md:text-[56px] font-medium tracking-[-0.05em] leading-none text-slate-900">{d.v}</div>
+          <div class="mt-2 text-[14.5px] text-slate-500">{d.k}</div>
+        </div>
+      ))}
+    </div>
+    <p class="mt-10 text-[14px] text-slate-400">Every default can be changed per mailbox.</p>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Warmup, answered.">
+    <p class="mt-4 text-[16px] leading-[1.6] text-slate-500">
+      For the whole picture, read the <a class="font-medium text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-900" href="https://docs.pegasusbound.com/learn/email-warmup/">warmup guide</a>.
+    </p>
+  </Faq>
+
+  <PillarPosts
+    title="More on warmup"
+    items={[
+      { kicker: 'Warmup', href: '/blog/how-email-warmup-actually-works/', title: 'How email warmup actually works, ramp curve and all' },
+      { kicker: 'Policy', href: '/blog/quarantine-early/', title: 'Quarantine early: how we protect shared warmup pools' },
+      { kicker: 'Recovery', href: '/blog/getting-a-mailbox-back-into-warmup-pool/', title: 'Getting a burned mailbox back: a recovery playbook' },
+    ]}
+  />
+
+  <CTA photo="sheer-blue"
+    title="Connect a mailbox and start warming today."
+    description="Sign in with Google or Microsoft, or add any SMTP account, then switch warmup on from the mailbox's Warmup tab."
+  />
+</Layout>

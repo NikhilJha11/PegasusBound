@@ -1,0 +1,78 @@
+// Sky chrome — the calm light backdrop behind sidebar + header.
+//
+// Intent: an off-white workspace, just slightly cooler than the white
+// content panel, with the faintest suggestion of clouds drifting in
+// the upper area. The atmosphere is meant to be felt, not seen — if
+// you find yourself noticing it, it's too loud.
+//
+// What's painted:
+//   - A single near-white base (#f4f7fb), one degree cooler than the
+//     white content surface so the panel reads slightly forward.
+//   - Three blurred-white cloud blobs in the top half, very low
+//     opacity. No animation; the auth page is the loud version.
+//   - A subtle vignette toward the bottom so the chrome doesn't feel
+//     flat across large monitors.
+//
+// Pointer-events-none across every layer so nothing intercepts input.
+
+import React from "react";
+
+export function SkyChrome() {
+    return (
+        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+            {/* Base tint — clean neutral, a half-step darker than white.
+                Avoid blue-leaning here; the only colour cue is the soft
+                clouds above. */}
+            <div className="absolute inset-0 bg-[#f6f5fb] dark:bg-[var(--wb-chrome)]" />
+            {/* Brand aurora: a faint violet glow behind the logo corner, both themes. */}
+            <div className="absolute -top-40 -left-32 h-[420px] w-[620px] rounded-full bg-[radial-gradient(closest-side,rgba(124,77,255,0.16),transparent)] dark:bg-[radial-gradient(closest-side,rgba(139,92,246,0.22),transparent)]" />
+            <div className="absolute top-1/3 -left-40 h-[520px] w-[360px] rounded-full bg-[radial-gradient(closest-side,rgba(217,70,239,0.07),transparent)] dark:bg-[radial-gradient(closest-side,rgba(217,70,239,0.10),transparent)]" />
+            <div className="wb-chrome-light absolute inset-0 hidden dark:block" />
+
+            {/* Faint cloud blobs, light theme only: white haze on the dark
+                chrome reads as fog, not sky. Positioned to suggest a softly clouded
+                sky in the upper half. Generous blur radius + low alpha
+                makes them ambient rather than figurative. */}
+            <div
+                className="absolute dark:hidden"
+                style={{
+                    top: "-80px",
+                    left: "-60px",
+                    width: "520px",
+                    height: "240px",
+                    background: "rgba(255,255,255,0.95)",
+                    borderRadius: "50% 50% 18% 18%",
+                    filter: "blur(60px)",
+                    opacity: 0.7,
+                }}
+            />
+            <div
+                className="absolute dark:hidden"
+                style={{
+                    top: "10%",
+                    right: "8%",
+                    width: "380px",
+                    height: "180px",
+                    background: "rgba(255,255,255,0.85)",
+                    borderRadius: "50% 50% 18% 18%",
+                    filter: "blur(70px)",
+                    opacity: 0.55,
+                }}
+            />
+            <div
+                className="absolute dark:hidden"
+                style={{
+                    top: "32%",
+                    left: "26%",
+                    width: "300px",
+                    height: "140px",
+                    background: "rgba(255,255,255,0.9)",
+                    borderRadius: "50% 50% 22% 22%",
+                    filter: "blur(70px)",
+                    opacity: 0.45,
+                }}
+            />
+
+        </div>
+    );
+}

@@ -1,0 +1,82 @@
+// Inbox list + search client. Calls GET /unibox with the filter params
+// the backend supports today: from, subject, unseen, since, until,
+// cursor, limit. Empty fields are dropped so the URL stays readable
+// in the network tab.
+
+import Request from "../../Request";
+import type { UniboxSearchParams } from "@/lib/api/models/app/unibox/UniboxSearch";
+
+export interface UniboxListRow {
+  id: string;
+  email_id: string;
+  thread_id: string;
+  from_addr: string[];
+  to_addr: string[];
+  subject: string;
+  snippet: string;
+  internal_date: Date;
+  seen: boolean;
+  /** Messages in the conversation behind this row (1 = singleton). */
+  message_count: number;
+  /** True if any message in the thread is unread (bold the whole row). */
+  has_unread: boolean;
+  /** Conversation labels (categories) assigned to the thread. */
+  labels: { id: string; title: string; color: string }[];
+}
+
+interface UniboxListResponse {
+  data: UniboxListRow[];
+  pagination: {
+    has_more: boolean;
+    next_cursor: string | null;
+  };
+}
+
+function isoDay(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+export default async function searchIncoming(
+  p: UniboxSearchParams = {},
+  signal?: AbortSignal,
+): Promise<UniboxListResponse> {
+  const usp = new URLSearchParams();
+  // The free-text param is still named `subject` for compatibility, but the
+  // server matches it against the subject, the preview, the message body and
+  // the people on the message.
+  if (p.query) usp.set("subject", p.query);
+  if (p.from) usp.set("from", p.from);
+  if (p.address) usp.set("address", p.address);
+  if (p.direction) usp.set("direction", p.direction);
+  if (p.accountIds && p.accountIds.length > 0) {
+    // Backend accepts comma-separated email_ids and falls back to a
+    // single email_id for legacy callers; we always use the multi form.
+    usp.set("email_ids", p.accountIds.join(","));
+  }
+  if (p.folder) usp.set("folder", p.folder);
+  if (p.includeArchived) usp.set("include_archived", "true");
+  if (p.unseen) usp.set("unseen", "true");
+  if (p.snoozed === true) usp.set("snoozed", "true");
+  else if (p.snoozed === "any") usp.set("snoozed", "any");
+  if (p.awaitingReply) usp.set("awaiting_reply", "true");
+  if (p.agentDrafts) usp.set("agent_drafts", "true");
+  if (p.categoryIds && p.categoryIds.length > 0) {
+    usp.set("category_ids", p.categoryIds.join(","));
+  }
+  if (p.automated !== undefined) usp.set("automated", String(p.automated));
+  if (p.since) usp.set("since", isoDay(p.since));
+  if (p.until) usp.set("until", isoDay(p.until));
+  if (p.cursor) usp.set("cursor", p.cursor);
+  if (p.limit) usp.set("limit", String(p.limit));
+
+  const qs = usp.toString();
+  return Request<UniboxListResponse>({
+    method: "GET",
+    url: `/unibox${qs ? `?${qs}` : ""}`,
+    authorization: true,
+    signal,
+  });
+}

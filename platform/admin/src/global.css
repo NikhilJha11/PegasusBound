@@ -1,0 +1,243 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Admin design tokens: black and white, with colour reserved for status. A
+ * quiet base surface for the sidebar, the page in a raised inset panel,
+ * hairline borders and 13px type. Light and dark are both first class; src/lib/theme.ts
+ * toggles `.dark` on <html>. Never hardcode white/zinc in a page: use these
+ * tokens, and src/lib/tones.ts for status colour.
+ *
+ * The --admin-accent* names predate this palette and are kept so existing
+ * call sites pick up the accent without a rename.
+ */
+
+:root {
+  color-scheme: light;
+  --radius: 0.5rem;
+
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.21 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.21 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.21 0 0);
+  --primary: oklch(0.2 0 0);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.967 0 0);
+  --secondary-foreground: oklch(0.25 0 0);
+  --muted: oklch(0.967 0 0);
+  --muted-foreground: oklch(0.54 0 0);
+  --subtle-foreground: oklch(0.66 0 0);
+  --accent: oklch(0.955 0 0);
+  --accent-foreground: oklch(0.21 0 0);
+  --destructive: oklch(0.58 0.21 25);
+  --border: oklch(0.925 0 0);
+  --border-strong: oklch(0.87 0 0);
+  --input: oklch(0.9 0 0);
+  --ring: oklch(0.6 0 0);
+  --chart-1: oklch(0.25 0 0);
+  --chart-2: oklch(0.62 0 0);
+  --chart-3: oklch(0.78 0 0);
+  --chart-4: oklch(0.45 0 0);
+  --chart-5: oklch(0.88 0 0);
+
+  --sidebar: oklch(0.975 0 0);
+  --sidebar-foreground: oklch(0.33 0 0);
+  --sidebar-primary: oklch(0.2 0 0);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.935 0 0);
+  --sidebar-accent-foreground: oklch(0.18 0 0);
+  --sidebar-border: oklch(0.925 0 0);
+  --sidebar-ring: oklch(0.6 0 0);
+
+  --panel-shadow: 0 0 0 1px oklch(0.2 0.01 286 / 0.06), 0 1px 2px oklch(0.2 0.01 286 / 0.04), 0 4px 12px -4px oklch(0.2 0.01 286 / 0.05);
+  --popover-shadow: 0 0 0 1px oklch(0.2 0.01 286 / 0.08), 0 4px 8px -2px oklch(0.2 0.01 286 / 0.08), 0 16px 32px -8px oklch(0.2 0.01 286 / 0.12);
+
+  --admin-accent: oklch(0.2 0 0);
+  --admin-accent-foreground: oklch(1 0 0);
+  --admin-accent-soft: oklch(0 0 0 / 0.07);
+  --admin-accent-weak: oklch(0 0 0 / 0.035);
+  --admin-accent-strong: oklch(0.2 0 0);
+  --admin-danger: oklch(0.58 0.21 25);
+}
+
+.dark {
+  color-scheme: dark;
+
+  /* Near-black layers, separated by translucent hairlines rather than grey fills. */
+  --background: oklch(0.163 0 0);
+  --foreground: oklch(0.968 0 0);
+  --card: oklch(0.183 0 0);
+  --card-foreground: oklch(0.968 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.968 0 0);
+  --primary: oklch(0.96 0 0);
+  --primary-foreground: oklch(0.16 0 0);
+  --secondary: oklch(1 0 0 / 0.06);
+  --secondary-foreground: oklch(0.968 0 0);
+  --muted: oklch(1 0 0 / 0.045);
+  --muted-foreground: oklch(0.69 0 0);
+  --subtle-foreground: oklch(0.52 0 0);
+  --accent: oklch(1 0 0 / 0.06);
+  --accent-foreground: oklch(0.968 0 0);
+  --destructive: oklch(0.66 0.2 22);
+  --border: oklch(1 0 0 / 0.075);
+  --border-strong: oklch(1 0 0 / 0.12);
+  --input: oklch(1 0 0 / 0.1);
+  --ring: oklch(0.62 0 0);
+  --chart-1: oklch(0.92 0 0);
+  --chart-2: oklch(0.58 0 0);
+  --chart-3: oklch(0.42 0 0);
+  --chart-4: oklch(0.75 0 0);
+  --chart-5: oklch(0.32 0 0);
+
+  --sidebar: oklch(0.135 0 0);
+  --sidebar-foreground: oklch(0.77 0 0);
+  --sidebar-primary: oklch(0.96 0 0);
+  --sidebar-primary-foreground: oklch(0.16 0 0);
+  --sidebar-accent: oklch(1 0 0 / 0.06);
+  --sidebar-accent-foreground: oklch(0.968 0 0);
+  --sidebar-border: oklch(1 0 0 / 0.06);
+  --sidebar-ring: oklch(0.62 0 0);
+
+  --panel-shadow: 0 0 0 1px oklch(1 0 0 / 0.07), 0 1px 0 0 oklch(1 0 0 / 0.04) inset, 0 16px 48px -12px oklch(0 0 0 / 0.6);
+  --popover-shadow: 0 0 0 1px oklch(1 0 0 / 0.09), 0 1px 0 0 oklch(1 0 0 / 0.06) inset, 0 16px 48px -8px oklch(0 0 0 / 0.7);
+
+  --admin-accent: oklch(0.94 0 0);
+  --admin-accent-foreground: oklch(0.16 0 0);
+  --admin-accent-soft: oklch(1 0 0 / 0.1);
+  --admin-accent-weak: oklch(1 0 0 / 0.055);
+  --admin-accent-strong: oklch(0.97 0 0);
+  --admin-danger: oklch(0.66 0.2 22);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, monospace;
+  --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle-foreground: var(--subtle-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+
+  --color-admin: var(--admin-accent);
+  --color-admin-foreground: var(--admin-accent-foreground);
+  --color-admin-soft: var(--admin-accent-soft);
+  --color-admin-weak: var(--admin-accent-weak);
+  --color-admin-strong: var(--admin-accent-strong);
+  --color-admin-danger: var(--admin-danger);
+
+  --shadow-panel: var(--panel-shadow);
+  --shadow-popover: var(--popover-shadow);
+
+  /* Floating layers grow out of their trigger and settle, then fade on close. */
+  --animate-pop-in: pop-in 170ms cubic-bezier(0.16, 1, 0.3, 1);
+  --animate-pop-out: pop-out 120ms cubic-bezier(0.4, 0, 1, 1) forwards;
+  --animate-page-in: page-in 220ms cubic-bezier(0.16, 1, 0.3, 1);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(var(--pop-y, -4px)) scale(0.96);
+    filter: blur(2px);
+  }
+}
+@keyframes pop-out {
+  to {
+    opacity: 0;
+    transform: translateY(var(--pop-y, -2px)) scale(0.98);
+  }
+}
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    transition-duration: 1ms !important;
+  }
+}
+
+body {
+  color: var(--foreground);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'cv01', 'cv02', 'cv03', 'cv04', 'cv11', 'ss03';
+  text-rendering: optimizeLegibility;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-sidebar text-foreground text-[13px];
+  }
+  ::selection {
+    background: color-mix(in oklab, var(--admin-accent) 28%, transparent);
+  }
+  /* Thin, quiet scrollbars. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+  }
+  input[type="date"]::-webkit-calendar-picker-indicator {
+    opacity: 0.55;
+    cursor: pointer;
+  }
+  .dark input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+  }
+}
+
+@layer utilities {
+  /* A 1px top highlight that makes dark surfaces read as lit from above. */
+  .dark .surface-lit {
+    box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.04);
+  }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+  .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+}

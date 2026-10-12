@@ -1,0 +1,197 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import Rule from '../components/page/Rule.astro';
+import Faq from '../components/page/Faq.astro';
+import SectionIntro from '../components/page/SectionIntro.astro';
+import BrandMark from '../components/page/BrandMark.astro';
+import HeroStage from '../components/scenes/automations/HeroStage.astro';
+import TriggerScene from '../components/scenes/automations/TriggerScene.astro';
+import ActionScene from '../components/scenes/automations/ActionScene.astro';
+import AIStepScene from '../components/scenes/automations/AIStepScene.astro';
+import HistoryScene from '../components/scenes/automations/HistoryScene.astro';
+import RecipeScene from '../components/scenes/automations/RecipeScene.astro';
+
+// Triggers, actions and behaviour from docs/content/docs/guides/automations.mdx
+// and ai-steps-in-automations.mdx.
+
+const triggers = ['A reply', 'A new contact', 'A form submission', 'A booking, reschedule or cancellation', 'A bounce', 'An unsubscribe', 'A warmup health change', 'A spam complaint', 'A call to its own webhook URL', 'A campaign step'];
+
+const apps = [
+  { name: 'slack', label: 'Slack' },
+  { name: 'discord', label: 'Discord' },
+  { name: 'hubspot', label: 'HubSpot' },
+  { name: 'pipedrive', label: 'Pipedrive' },
+  { name: 'salesforce', label: 'Salesforce' },
+  { name: 'close', label: 'Close' },
+];
+
+const recipes = [
+  {
+    title: 'Interested replies become deals',
+    text: 'A positive reply opens a deal in your pipeline and tells the sales channel.',
+    photo: 'sheer-sky',
+    steps: [
+      { icon: 'zap', tone: 'sky', kicker: 'Trigger', title: 'Prospect replies', summary: 'Starts this automation' },
+      { icon: 'gitBranch', tone: 'amber', kicker: 'If / else', title: 'intent is Positive', summary: 'Checks the event', pill: 'Yes' },
+      { icon: 'briefcase', tone: 'sky', kicker: 'Action', title: 'Create a deal', summary: 'Sales · Qualified' },
+      { brand: 'slack', kicker: 'Slack', title: 'Send a Slack message', summary: '#sales' },
+    ],
+  },
+  {
+    title: 'Form leads go straight into a campaign',
+    text: 'A form submission creates or updates the contact and enrols it in the follow-up.',
+    photo: 'sheer-peach',
+    steps: [
+      { icon: 'fileText', tone: 'sky', kicker: 'Trigger', title: 'Form submitted', summary: 'Starts this automation' },
+      { icon: 'userPlus', tone: 'indigo', kicker: 'Action', title: 'Create or update contact', summary: '{{.contact_email}}' },
+      { icon: 'tag', tone: 'emerald', kicker: 'Action', title: 'Add a label', summary: '1 label' },
+      { icon: 'send', tone: 'sky', kicker: 'Action', title: 'Add to campaign', summary: 'Inbound follow-up' },
+    ],
+  },
+  {
+    title: 'A throttled mailbox reaches the right person',
+    text: 'When warmup health drops to throttled, the deliverability channel hears about it and someone gets a task.',
+    photo: 'frost-blue',
+    steps: [
+      { icon: 'thermometer', tone: 'sky', kicker: 'Trigger', title: 'Warmup health changes', summary: 'Starts this automation' },
+      { icon: 'gitBranch', tone: 'amber', kicker: 'If / else', title: 'new state is Throttled', summary: 'Checks the event', pill: 'Yes' },
+      { brand: 'slack', kicker: 'Slack', title: 'Send a Slack message', summary: '#deliverability' },
+      { icon: 'squareCheck', tone: 'violet', kicker: 'Action', title: 'Create a task', summary: 'Check {{.email}}' },
+    ],
+  },
+] as const;
+
+const faq: [string, string][] = [
+  ['Do I need Zapier or Make?', 'Not for the common jobs. Slack, Discord, HubSpot, Pipedrive, Salesforce, Close and signed webhooks are built in. If you already use Zapier, Make or n8n, they connect too.'],
+  ['Can I test an automation before turning it on?', 'Yes. Test runs the flow against sample data without sending anything or changing any record, and shows the exact path it took on the canvas. AI steps are the exception: they run for real so you see their output, which costs one credit each.'],
+  ['What happens when a step fails?', 'Add an error path to catch it, like a try and catch. Without one, the failure is recorded in History and the rest of the flow carries on, so one rejected Slack message never blocks the deal that should be created after it.'],
+  ['Can a campaign start an automation?', 'Yes. Put a Run automation step anywhere in a sequence, and the automation runs for each contact who reaches it, still checking its own conditions.'],
+  ['Will a big import fire thousands of runs?', 'No. File imports, sheet syncs and API requests that add more than 100 contacts at once stay quiet, so a bulk upload never floods your Slack or your webhooks.'],
+];
+
+const rowLabel = 'text-[14px] text-slate-500';
+const rowTitle = 'mt-4 text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.05] text-slate-900';
+const rowText = 'mt-4 max-w-xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500';
+const bentoTitle = 'mt-6 text-[21px] md:text-[23px] tracking-[-0.02em] text-slate-900';
+const bentoText = 'mt-2 max-w-xl text-[16px] md:text-[17px] leading-[1.55] text-slate-500';
+---
+<Layout
+  title="Cold Email Automations: Visual Workflow Builder | Pegasusbound"
+  description="When a reply, booking, bounce or form submission happens, do the rest automatically: branch on reply intent, post to Slack, create deals, update HubSpot or Salesforce and send signed webhooks."
+>
+  <!-- HERO: a centred sentence, then the builder running its own test across the page. -->
+  <section class="container-page pt-14 md:pt-24">
+    <div class="mx-auto max-w-4xl text-center">
+      <div class="text-[14px] text-slate-500">Automations</div>
+      <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">
+        When this happens, do that.
+      </h1>
+      <p class="mx-auto mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+        A reply, a booking, a bounce or a form submission can start a flow. Branch on what it says, post to Slack, open the deal, update your CRM, all on one canvas and without writing code.
+      </p>
+      <div class="mt-9 flex flex-wrap items-center justify-center gap-3">
+        <a href="https://app.pegasusbound.com/auth/register" class="inline-flex h-11 items-center gap-2 rounded-full bg-slate-900 px-5 text-[15px] font-medium text-white transition-colors hover:bg-slate-800">
+          Build an automation <Icon name="arrowRight" size={14} />
+        </a>
+        <a href="https://docs.pegasusbound.com/guides/automations/" class="inline-flex h-11 items-center rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+          Read the guide
+        </a>
+      </div>
+    </div>
+
+    <div class="mt-14 md:mt-20">
+      <HeroStage />
+    </div>
+    <div class="mt-5 grid gap-4 text-[14px] leading-[1.55] text-slate-500 md:grid-cols-3 md:gap-8">
+      <p><span class="font-medium text-slate-900">Test before it's live.</span> The window above is the real builder: Test dry-runs the flow against a sample event and marks the path it took, without sending anything. Press Test inside it to run it again.</p>
+      <p><span class="font-medium text-slate-900">Then it runs for real.</span> Every run lands in History with the result of each step, and the Slack card arrives with the contact and subject on it.</p>
+      <p><span class="font-medium text-slate-900">The canvas lays itself out.</span> Steps run top to bottom from the trigger. Hover a line to insert a step, and an If / else splits into Yes and No columns.</p>
+    </div>
+  </section>
+
+  <!-- WHEN: the trigger picker and what a reply carries. -->
+  <Rule class="mt-20 md:mt-28" />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div>
+        <div class={rowLabel}>When</div>
+        <h2 class={rowTitle}>Anything that happens in Pegasusbound can start a flow.</h2>
+        <p class={rowText}>Each trigger brings its own data. A reply carries the contact, the campaign, the subject, a snippet, the intent the classifier read and how sure it was, so the next step can branch on any of it.</p>
+        <ul class="mt-7 flex max-w-xl flex-wrap gap-2">
+          {triggers.map((t) => <li class="rounded-full bg-white px-3 py-1.5 text-[14px] text-slate-600 ring-1 ring-slate-200">{t}</li>)}
+        </ul>
+        <p class="mt-5 max-w-xl text-[14.5px] leading-[1.6] text-slate-500">Bulk arrivals stay quiet: a file import, a sheet sync or an API request adding more than 100 contacts never fires Contact created.</p>
+      </div>
+      <TriggerScene />
+    </div>
+  </section>
+
+  <!-- THEN: an action configured, and the card it produces. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div class="lg:order-2">
+        <div class={rowLabel}>Then</div>
+        <h2 class={rowTitle}>Act in your tools and inside Pegasusbound.</h2>
+        <p class={rowText}>Pick where a step runs and what it does. Text fields take the trigger's values as chips, so a Slack message can name the contact and quote the reply. Slack and Discord get a tidy card with the contact and subject, not a bare line.</p>
+        <div class="mt-7 flex flex-wrap items-center gap-2.5">
+          {apps.map((a) => (
+            <span class="inline-flex items-center gap-2 rounded-full bg-white py-1 pl-1 pr-3 text-[13.5px] text-slate-600 ring-1 ring-slate-200"><BrandMark name={a.name} size={24} class="rounded-full ring-0" />{a.label}</span>
+          ))}
+        </div>
+        <p class="mt-5 max-w-xl text-[14.5px] leading-[1.6] text-slate-500">Built in, with no connection needed: create or update a contact, add to a campaign, add or remove a label, label the conversation, create a task or a deal, move a deal's stage, unsubscribe and set variables. A webhook step sends the event to any URL you give it.</p>
+      </div>
+      <div class="lg:order-1"><ActionScene /></div>
+    </div>
+  </section>
+
+  <!-- AI: the agent step and its guardrails. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div>
+        <div class={rowLabel}>AI steps</div>
+        <h2 class={rowTitle}>Let a model read the reply and act on it.</h2>
+        <p class={rowText}>Write an instruction in plain words and tick the reversible actions it may take. One step can label a pricing question and open a task, or unsubscribe someone who asked to stop. It never sends email or replies.</p>
+        <p class="mt-4 max-w-xl text-[15px] leading-[1.6] text-slate-500">Other modes sort a reply into one of the labels you list, pull fields like budget or team size out of the text, or write a short summary for a later step. An AI switch routes each event down one of your cases.</p>
+      </div>
+      <AIStepScene />
+    </div>
+  </section>
+
+  <!-- HISTORY: a wide scene, the run record with an error path taken. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <div class="grid gap-6 lg:grid-cols-2 lg:gap-16 lg:items-end">
+      <h2 class="text-[30px] md:text-[44px] font-medium tracking-[-0.04em] leading-[1.08]">
+        <span class="text-slate-400">History. </span><span class="text-slate-900">See every run, and catch what fails.</span>
+      </h2>
+      <p class="max-w-xl text-[16px] md:text-[18px] leading-[1.6] text-slate-500">Each real run is listed with its result and the outcome of every step, updated live. Give a step an error path and a rejected Slack message or a CRM timeout follows it instead, like a try and catch. Without one, the failure is recorded and the rest of the flow still runs.</p>
+    </div>
+    <div class="mt-12 md:mt-16">
+      <HistoryScene />
+    </div>
+  </section>
+
+  <!-- RECIPES: three small canvases. -->
+  <Rule />
+  <section class="container-page py-20 md:py-28">
+    <SectionIntro lead="Recipes." title="Three flows teams set up on day one." />
+    <div class="mt-12 md:mt-16 grid gap-x-3 gap-y-12 md:grid-cols-2 lg:grid-cols-3">
+      {recipes.map((r, i) => (
+        <article class={i === 2 ? 'md:col-span-2 lg:col-span-1' : ''}>
+          <RecipeScene name={r.title} photo={r.photo} steps={r.steps as any} />
+          <h3 class={bentoTitle}>{r.title}</h3>
+          <p class={bentoText}>{r.text}</p>
+        </article>
+      ))}
+    </div>
+  </section>
+
+  <Rule />
+  <Faq items={faq} title="Automations, answered." />
+
+  <CTA photo="paint-teal" title="Let replies run the rest of your process." description="Build your first automation in a few minutes and test it before it ever runs for real." />
+</Layout>

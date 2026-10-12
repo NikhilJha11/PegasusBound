@@ -1,0 +1,120 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Icon from '../components/Icon.astro';
+import CTA from '../components/CTA.astro';
+import { getChangelog } from '../lib/changelog';
+import { GITHUB_PATH } from '../lib/marks';
+import Glyph from '../components/scenes/Glyph.astro';
+import ReleaseScene from '../components/scenes/changelog/ReleaseScene.astro';
+
+// Entries come from merged pull requests on pegasusbound/pegasusbound at build time;
+// curation and the offline fallback live in src/lib/changelog.ts.
+const entries = await getChangelog();
+
+const tone = {
+  shipped: { dot: 'bg-emerald-500', label: 'New', icon: 'sparkles', tile: 'bg-emerald-50 text-emerald-600' },
+  changed: { dot: 'bg-amber-500', label: 'Improved', icon: 'trendingUp', tile: 'bg-amber-50 text-amber-600' },
+  fixed: { dot: 'bg-sky-500', label: 'Fixed', icon: 'check', tile: 'bg-sky-50 text-sky-600' },
+} as const;
+
+// Group by month, newest first, keeping the entries' own order inside.
+const monthName = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+const dayName = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+const months: { name: string; items: typeof entries }[] = [];
+for (const e of entries) {
+  const name = monthName(e.date);
+  const last = months[months.length - 1];
+  if (last && last.name === name) last.items.push(e);
+  else months.push({ name, items: [e] });
+}
+const counts = {
+  all: entries.length,
+  shipped: entries.filter((e) => e.tag === 'shipped').length,
+  changed: entries.filter((e) => e.tag === 'changed').length,
+  fixed: entries.filter((e) => e.tag === 'fixed').length,
+};
+---
+<Layout
+  title="Changelog: What's New in Pegasusbound"
+  description="Everything new, improved and fixed in Pegasusbound, dated and linked to the change that shipped it. Built from the public repository, so nothing is rewritten or quietly removed."
+>
+  <section class="container-page pt-14 md:pt-24 pb-12 md:pb-16">
+    <div class="flex flex-wrap items-end justify-between gap-8">
+      <div class="max-w-3xl">
+        <div class="text-[14px] text-slate-500">Changelog</div>
+        <h1 class="mt-4 text-[40px] sm:text-[52px] md:text-[64px] font-medium tracking-[-0.05em] leading-[1.02] text-slate-900">What’s new in Pegasusbound.</h1>
+        <p class="mt-6 max-w-2xl text-[17px] md:text-[19px] leading-[1.55] text-slate-500">
+          New features, improvements and fixes, in the order they reached production. Each one links to the change on GitHub, so nothing here is rewritten after the fact.
+        </p>
+      </div>
+      <a href="https://github.com/pegasusbound/pegasusbound/pulls?q=is%3Apr+is%3Amerged" target="_blank" rel="noopener noreferrer" class="inline-flex h-11 items-center gap-2 rounded-full border border-slate-200 px-5 text-[15px] text-slate-800 transition-colors hover:border-slate-300 hover:bg-slate-50">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={GITHUB_PATH} /></svg>
+        Every merged change
+      </a>
+    </div>
+
+    <div class="mt-12 md:mt-16"><ReleaseScene entries={entries} /></div>
+
+    <div class="mt-16 md:mt-24 flex flex-wrap items-end justify-between gap-6">
+    <h2 class="text-[26px] md:text-[34px] font-medium tracking-[-0.035em] leading-[1.1]"><span class="text-slate-400">The full log.</span> <span class="text-slate-900">Every entry, by month.</span></h2>
+    <div class="flex flex-wrap items-center gap-2" data-filters role="group" aria-label="Filter entries">
+      {[
+        { id: 'all', label: 'All', n: counts.all },
+        { id: 'shipped', label: 'New', n: counts.shipped },
+        { id: 'changed', label: 'Improved', n: counts.changed },
+        { id: 'fixed', label: 'Fixed', n: counts.fixed },
+      ].map((f, i) => (
+        <button type="button" data-filter={f.id} aria-pressed={i === 0 ? 'true' : 'false'} class="inline-flex h-9 items-center gap-2 rounded-full px-4 text-[14px] text-slate-600 ring-1 ring-slate-200 transition-colors hover:text-slate-900 aria-pressed:bg-slate-900 aria-pressed:text-white aria-pressed:ring-slate-900">
+          {f.label}<span class="tabular-nums opacity-60">{f.n}</span>
+        </button>
+      ))}
+    </div>
+    </div>
+  </section>
+
+  <!-- TIMELINE: a month per block, the month label sticking as you scroll. -->
+  <section class="container-page border-t border-slate-900/[0.06] pb-20 md:pb-28">
+    {months.map((m) => (
+      <div class="month grid gap-6 border-b border-slate-100 py-12 md:grid-cols-[200px_1fr] md:gap-12" data-month>
+        <h2 class="text-[18px] font-medium tracking-[-0.02em] text-slate-900 md:sticky md:top-28 md:self-start">{m.name}</h2>
+        <ol class="space-y-10">
+          {m.items.map((e) => (
+            <li class="entry grid gap-3 sm:grid-cols-[90px_1fr] sm:gap-6" data-tag={e.tag}>
+              <div class="flex items-center gap-2 text-[13px] text-slate-400 sm:block">
+                <span class={`hidden sm:mb-3 sm:inline-flex size-8 items-center justify-center rounded-lg ${tone[e.tag].tile}`}><Glyph name={tone[e.tag].icon} size={15} /></span>
+                <div>{dayName(e.date)}</div>
+                <div class="inline-flex items-center gap-1.5 sm:mt-1.5"><span class={`size-1.5 rounded-full ${tone[e.tag].dot}`}></span>{tone[e.tag].label}</div>
+              </div>
+              <div>
+                <h3 class="text-[19px] font-medium tracking-[-0.015em] leading-snug text-slate-900">{e.title}</h3>
+                <p class="mt-2 max-w-2xl text-[15.5px] leading-[1.65] text-slate-500">{e.body}</p>
+                <a href={e.url} target="_blank" rel="noopener noreferrer" class="mt-3 inline-flex items-center gap-1 font-mono text-[12.5px] text-slate-400 transition-colors hover:text-slate-900">
+                  #{e.number} <Icon name="arrowUpRight" size={11} />
+                </a>
+              </div>
+            </li>
+          ))}
+        </ol>
+      </div>
+    ))}
+  </section>
+
+  <CTA photo="reeded-glass" title="Try what just shipped." description="Start free on Pegasusbound Cloud, or pull the latest release and run it on your own server." secondaryLabel="Star on GitHub" secondaryHref="https://github.com/pegasusbound/pegasusbound" />
+</Layout>
+
+<script>
+  const buttons = [...document.querySelectorAll<HTMLButtonElement>('[data-filter]')];
+  buttons.forEach((b) => b.addEventListener('click', () => {
+    const f = b.dataset.filter;
+    buttons.forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+    document.querySelectorAll<HTMLElement>('[data-month]').forEach((m) => {
+      let shown = 0;
+      m.querySelectorAll<HTMLElement>('.entry').forEach((e) => {
+        const on = f === 'all' || e.dataset.tag === f;
+        e.hidden = !on;
+        if (on) shown++;
+      });
+      m.hidden = shown === 0;
+    });
+  }));
+</script>

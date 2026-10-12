@@ -1,0 +1,1079 @@
+package warmup
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/mailhost"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+	"github.com/rs/zerolog/log"
+)
+
+// WebhookDispatcher is the minimum dispatch interface the warmup service
+// needs. Kept narrow to avoid importing the webhook package (which would
+// create a cycle on init order).
+type WebhookDispatcher interface {
+	Dispatch(ctx context.Context, orgID uuid.UUID, eventType models.WebhookEventType, data any) (uuid.UUID, error)
+}
+
+// HealthRealtimePublisher pushes a health transition to the owning org's
+// realtime stream. Narrow + primitive-typed so the warmup package doesn't
+// import the pubsub event types. *pubsub.StreamingPublisher satisfies it.
+type HealthRealtimePublisher interface {
+	PublishAccountHealth(ctx context.Context, orgID, userID, accountID, email, prevState, newState, reason string)
+}
+
+const (
+	minSpamPlacementSample = 20
+
+	// Placement is a reading of reputation, not misconduct, and warming is how
+	// it recovers, so it only ever slows a mailbox down: it never quarantines,
+	// blocks or needs an appeal.
+	spamPlacementWatchPct    = 10.0
+	spamPlacementThrottlePct = 20.0
+	// A watch or throttle lifts only once the rate falls this far below the
+	// line that set it, so a mailbox near a line does not flap across it.
+	spamPlacementExitFactor = 0.75
+
+	complaintRateWatchPct      = 0.03
+	complaintRateQuarantinePct = 0.10
+	complaintRateBlockPct      = 0.30
+
+	// Warmup-internal user complaints are a strong negative content signal
+	// (recipient actively rejected the message inside the pool). They are
+	// rarer than placement events so the thresholds sit between external
+	// complaint rates (0.03 / 0.10 / 0.30) and placement rates (10 / 20 / 40).
+	warmupComplaintWatchPct      = 0.5
+	warmupComplaintQuarantinePct = 1.5
+	warmupComplaintBlockPct      = 3.0
+
+	bounceRateQuarantinePct = 5.0
+	bounceRateBlockPct      = 10.0
+
+	minComplaintSample = 100
+
+	// Tampering: harm done to warmup mail the mailbox received, one strike per
+	// deletion or spam move over the seven-day window. One is housekeeping or a
+	// provider's filter until proven otherwise, so it only warns; the ladder
+	// climbs from there and every step lapses on its own.
+	tamperingWatchStrikes      = 1
+	tamperingQuarantineStrikes = 2
+	tamperingBlockStrikes      = 4
+
+	// Every tampering pause and block reason starts with one of these, which
+	// is how a withdrawn strike finds the hold it imposed.
+	tamperingPausePrefix = "Paused from warmup: "
+	tamperingBlockPrefix = "Blocked from warmup: "
+
+	warmupThrottleDuration   = 3 * 24 * time.Hour
+	warmupQuarantineDuration = 7 * 24 * time.Hour
+	warmupBlockDuration      = 30 * 24 * time.Hour
+)
+
+type Service interface {
+	// EnsurePoolMembershipWithRole puts the mailbox in exactly one pool, moving it (with its
+	// reputation) rather than adding a second membership (issue #211).
+	EnsurePoolMembershipWithRole(ctx context.Context, accountID uuid.UUID, poolType, role string) *errx.Error
+	// MovePoolMembership corrects an existing member's pool, keeping its role. Reports whether it moved.
+	MovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) (bool, *errx.Error)
+	// RemoveFromAllPools takes the mailbox out of warmup; a caller that knows it is not entitled
+	// does not know which pool it is in.
+	RemoveFromAllPools(ctx context.Context, accountID uuid.UUID) *errx.Error
+	// CanParticipate is pinned to the pool the caller drew the row from; a
+	// partner borrowed from the other tier is gated there, not in the sender's pool (#495).
+	CanParticipate(ctx context.Context, accountID uuid.UUID, poolType string) (bool, string, *errx.Error)
+	ApplySpamReport(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, reportType string) (*models.WarmupParticipantHealth, *errx.Error)
+	// RecordSpamPlacement records that a warmup message landed in the
+	// recipient's Junk/Spam folder on arrival. Counted separately from
+	// user complaints so the two signals can drive distinct thresholds.
+	RecordSpamPlacement(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, contentSource, recipientProvider, recipientDomain string) (*models.WarmupParticipantHealth, *errx.Error)
+	ApplyRateLimitExceeded(ctx context.Context, accountID uuid.UUID, reason string) (*models.WarmupParticipantHealth, *errx.Error)
+
+	// RecordTampering records that a participant harmed a warmup email (deleted
+	// it or marked it as spam) and re-evaluates its standing: the tampering
+	// band warns on a first deletion and climbs from there. The owner can
+	// appeal a block.
+	RecordTampering(ctx context.Context, accountID uuid.UUID, messageID, kind string) (*models.WarmupParticipantHealth, *errx.Error)
+	// WithdrawTampering takes back a strike the mailbox did not earn and
+	// lifts a pause or block that strike imposed and no longer stands.
+	WithdrawTampering(ctx context.Context, accountID uuid.UUID, messageID, kind string) (*models.WarmupParticipantHealth, *errx.Error)
+
+	// SubmitAppeal lets the mailbox owner appeal a warmup ban with a reason.
+	SubmitAppeal(ctx context.Context, orgID, userID, accountID uuid.UUID, reason string) (uuid.UUID, *errx.Error)
+	// GetBanStatus returns the user-facing warmup standing for a mailbox.
+	GetBanStatus(ctx context.Context, orgID, accountID uuid.UUID) (*models.WarmupBanStatus, *errx.Error)
+
+	// PublishHealthTransition fans a transition decided elsewhere (Pegasusbound
+	// Cloud, for a mailbox it warms) out to realtime and webhooks, exactly as
+	// a local one.
+	PublishHealthTransition(ctx context.Context, accountID uuid.UUID, oldState, newState models.WarmupHealthState, reason string)
+
+	// Scheduled health evaluation
+	EvaluateAllParticipants(ctx context.Context) (evaluated int, stateChanges int, err *errx.Error)
+	GetPoolHealthSummary(ctx context.Context) (*models.WarmupPoolHealthSummary, *errx.Error)
+
+	// WireWebhooks attaches the webhook dispatcher post-construction so
+	// health-state transitions fan out to subscribed customer endpoints.
+	WireWebhooks(w WebhookDispatcher, emailRepo repository.EmailRepository)
+	// WireRealtime attaches the realtime publisher so health transitions are
+	// also pushed live to the owning user's dashboard.
+	WireRealtime(r HealthRealtimePublisher, emailRepo repository.EmailRepository)
+}
+
+// OperatorNotifier is the instance-wide operator alert surface, injected
+// post-construction so this package needs no import of it. Nil disables it.
+type OperatorNotifier interface {
+	NotifyOperator(key, title, summary string, fields map[string]string)
+}
+
+type service struct {
+	repo      repository.WarmupRepository
+	emailRepo repository.EmailRepository
+	webhooks  WebhookDispatcher
+	realtime  HealthRealtimePublisher
+	opsNotify OperatorNotifier
+	now       func() time.Time
+}
+
+// WireOperatorNotifier attaches the operator alert channel.
+func (s *service) WireOperatorNotifier(n OperatorNotifier) { s.opsNotify = n }
+
+func NewService(repo repository.WarmupRepository) Service {
+	return &service{
+		repo: repo,
+		now:  time.Now,
+	}
+}
+
+// WireWebhooks attaches the webhook dispatcher post-construction so health
+// transitions fan out to subscribed customer endpoints. The emailRepo is
+// needed to resolve the org for an account (warmup events are recorded
+// per-account but dispatched per-org).
+func (s *service) WireWebhooks(w WebhookDispatcher, emailRepo repository.EmailRepository) {
+	s.webhooks = w
+	s.emailRepo = emailRepo
+}
+
+// WireRealtime attaches the realtime publisher (and emailRepo, if not already
+// set via WireWebhooks) so health transitions push live to the dashboard.
+func (s *service) WireRealtime(r HealthRealtimePublisher, emailRepo repository.EmailRepository) {
+	s.realtime = r
+	if s.emailRepo == nil {
+		s.emailRepo = emailRepo
+	}
+}
+
+func (s *service) PublishHealthTransition(ctx context.Context, accountID uuid.UUID, oldState, newState models.WarmupHealthState, reason string) {
+	s.dispatchHealthEvent(ctx, accountID, oldState, newState, reason)
+}
+
+// dispatchHealthEvent fans a health-state transition out to (1) the owning
+// user's realtime stream so the dashboard updates live, and (2) subscribed
+// customer webhooks. Both are best-effort and independent — realtime still
+// fires when webhooks aren't wired (e.g. in the consumer). No-op on a
+// no-change transition or when the account can't be resolved.
+func (s *service) dispatchHealthEvent(ctx context.Context, accountID uuid.UUID, oldState, newState models.WarmupHealthState, reason string) {
+	repository.AfterSendResultCommit(ctx, func(ctx context.Context) { s.publishHealthEvent(ctx, accountID, oldState, newState, reason) })
+}
+
+func (s *service) publishHealthEvent(ctx context.Context, accountID uuid.UUID, oldState, newState models.WarmupHealthState, reason string) {
+	if s.emailRepo == nil || oldState == newState {
+		return
+	}
+
+	account, _ := s.emailRepo.GetByID(ctx, accountID)
+	if account == nil || account.OrganizationID == nil {
+		return
+	}
+
+	// Realtime push to the dashboard (independent of webhooks).
+	if s.realtime != nil {
+		s.realtime.PublishAccountHealth(ctx, account.OrganizationID.String(), account.UserID, accountID.String(), account.Email, string(oldState), string(newState), reason)
+	}
+
+	if s.webhooks == nil {
+		return
+	}
+
+	payload := map[string]any{
+		"email_account_id": accountID,
+		"email":            account.Email,
+		"previous_state":   string(oldState),
+		"new_state":        string(newState),
+		"reason":           reason,
+	}
+	// Every transition fires health_changed once; a quarantine or block also
+	// fires its own event once, so a subscriber to either hears it once.
+	_, _ = s.webhooks.Dispatch(ctx, *account.OrganizationID, models.WebhookEventWarmupHealthChanged, payload)
+	switch newState {
+	case models.WarmupHealthBlocked:
+		_, _ = s.webhooks.Dispatch(ctx, *account.OrganizationID, models.WebhookEventWarmupBlocked, payload)
+	case models.WarmupHealthQuarantined:
+		_, _ = s.webhooks.Dispatch(ctx, *account.OrganizationID, models.WebhookEventWarmupQuarantined, payload)
+	}
+}
+
+func (s *service) EnsurePoolMembershipWithRole(ctx context.Context, accountID uuid.UUID, poolType, role string) *errx.Error {
+	if role != "sender_receiver" && role != "recipient_only" {
+		return errx.New(errx.BadRequest, "invalid warmup participant role")
+	}
+
+	// The pools are fixed rows (000156); a missing one fails on the foreign
+	// key and the warmup_pools_missing health check names it.
+	poolID, ok := models.WarmupPoolID(poolType)
+	if !ok {
+		return errx.New(errx.BadRequest, "invalid warmup pool type")
+	}
+	if err := s.repo.MoveToPool(ctx, poolID, accountID, role); err != nil {
+		return errx.InternalError()
+	}
+	return nil
+}
+
+func (s *service) MovePoolMembership(ctx context.Context, accountID uuid.UUID, poolType string) (bool, *errx.Error) {
+	poolID, ok := models.WarmupPoolID(poolType)
+	if !ok {
+		return false, errx.New(errx.BadRequest, "invalid warmup pool type")
+	}
+	moved, err := s.repo.MoveExistingToPool(ctx, poolID, accountID)
+	if err != nil {
+		return false, errx.InternalError()
+	}
+	return moved, nil
+}
+
+func (s *service) RemoveFromAllPools(ctx context.Context, accountID uuid.UUID) *errx.Error {
+	if err := s.repo.LeaveAllPools(ctx, accountID); err != nil {
+		return errx.InternalError()
+	}
+	return nil
+}
+
+func (s *service) CanParticipate(ctx context.Context, accountID uuid.UUID, poolType string) (bool, string, *errx.Error) {
+	eligible, err := s.repo.IsPoolEligible(ctx, accountID, poolType, false)
+	if err != nil {
+		return false, "", errx.InternalError()
+	}
+	if !eligible {
+		return false, "pool_authority_unavailable", nil
+	}
+	health, err := s.repo.GetParticipantHealth(ctx, accountID, poolType)
+	if err != nil {
+		return false, "", errx.InternalError()
+	}
+	if health == nil {
+		return false, "not_in_pool", nil
+	}
+
+	now := s.now().UTC()
+	if health.BlockedUntil != nil && !health.BlockedUntil.After(now) {
+		// Block period expired. Instead of snapping back to healthy, enter probation
+		// (throttled state with a 3-day window at reduced volume).
+		wasBlocked := health.HealthState == models.WarmupHealthQuarantined || health.HealthState == models.WarmupHealthBlocked
+		health, xerr := s.evaluateAndPersist(ctx, health)
+		if xerr != nil {
+			return false, "", xerr
+		}
+		if health == nil {
+			return false, "not_in_pool", nil
+		}
+		// If metrics are clean and the mailbox was previously blocked, force probation
+		if wasBlocked && health.HealthState == models.WarmupHealthHealthy {
+			probationEnd := now.Add(warmupThrottleDuration)
+			reason := "re-entry probation after block expiry"
+			if _, err := s.repo.UpdateParticipantHealth(ctx, accountID, models.WarmupHealthThrottled, &probationEnd, reason, 0); err != nil {
+				return false, "", errx.InternalError()
+			}
+			return true, "throttled", nil
+		}
+	}
+
+	switch health.HealthState {
+	case models.WarmupHealthQuarantined, models.WarmupHealthBlocked:
+		if health.BlockedUntil == nil || health.BlockedUntil.After(now) {
+			if health.BlockedReason != nil && *health.BlockedReason != "" {
+				return false, *health.BlockedReason, nil
+			}
+			return false, string(health.HealthState), nil
+		}
+	case models.WarmupHealthThrottled:
+		// Throttled accounts can still participate but callers should reduce volume
+		return true, "throttled", nil
+	}
+
+	return true, "", nil
+}
+
+// RecordSpamPlacement is a thin wrapper that fires ApplySpamReport with the
+// 'spam_placement' type and a smaller spam-score delta (placement is a
+// weaker individual signal than a user complaint — it is more likely to
+// reflect content rather than malice).
+func (s *service) RecordSpamPlacement(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, contentSource, recipientProvider, recipientDomain string) (*models.WarmupParticipantHealth, *errx.Error) {
+	inserted, err := s.repo.RecordSpamReport(ctx, &repository.SpamReport{
+		ID:                uuid.New(),
+		ReporterAccountID: reporterAccountID,
+		ReportedAccountID: reportedAccountID,
+		MessageID:         messageID,
+		ReportType:        "spam_placement",
+		ContentSource:     contentSource,
+		RecipientProvider: recipientProvider,
+		RecipientDomain:   recipientDomain,
+	})
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+	if !inserted {
+		return s.getParticipantForAnyPool(ctx, reportedAccountID)
+	}
+	// Fan a warmup.placement_in_spam webhook for the sender (best-effort).
+	s.dispatchPlacementInSpam(ctx, reportedAccountID, reporterAccountID, contentSource, recipientProvider)
+	return s.evaluateAndPersistAnyPool(ctx, reportedAccountID)
+}
+
+// dispatchPlacementInSpam fires the warmup.placement_in_spam customer webhook for
+// the sending mailbox. Best-effort; no-op when webhooks aren't wired (consumer
+// still records the signal and the health evaluation still runs). The recipient
+// is named by its mail host only: it is usually another workspace's mailbox.
+func (s *service) dispatchPlacementInSpam(ctx context.Context, accountID, recipientID uuid.UUID, contentSource, recipientProvider string) {
+	if s.webhooks == nil || s.emailRepo == nil {
+		return
+	}
+	account, _ := s.emailRepo.GetByID(ctx, accountID)
+	if account == nil || account.OrganizationID == nil {
+		return
+	}
+	host := ""
+	if recipient, _ := s.emailRepo.GetByID(ctx, recipientID); recipient != nil {
+		host = string(mailhost.ForMailbox(recipient.MailHost, recipient.Provider, recipient.Email))
+	}
+	_, _ = s.webhooks.Dispatch(ctx, *account.OrganizationID, models.WebhookEventWarmupPlacementInSpam, map[string]any{
+		"email_account_id":   accountID,
+		"email":              account.Email,
+		"content_source":     contentSource,
+		"recipient_provider": recipientProvider,
+		"recipient_host":     host,
+	})
+}
+
+// RecordTampering records that a participant harmed a warmup email (deleted it
+// or marked it as spam) and lets the bands decide what that means. The event
+// is the durable record, so a sweep reaches the same answer as this call.
+func (s *service) RecordTampering(ctx context.Context, accountID uuid.UUID, messageID, kind string) (*models.WarmupParticipantHealth, *errx.Error) {
+	inserted, err := s.repo.RecordWarmupTampering(ctx, accountID, messageID, kind)
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+	if !inserted {
+		// Already counted this exact harm — don't double-penalise.
+		return s.getParticipantForAnyPool(ctx, accountID)
+	}
+	return s.evaluateAndPersistAnyPool(ctx, accountID)
+}
+
+func (s *service) WithdrawTampering(ctx context.Context, accountID uuid.UUID, messageID, kind string) (*models.WarmupParticipantHealth, *errx.Error) {
+	exists, err := s.repo.HasWarmupTampering(ctx, accountID, messageID, kind)
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+	if !exists {
+		return nil, nil
+	}
+	// Revised before the strike goes, so a failure leaves it to be retried.
+	if xerr := s.reviseTamperingHold(ctx, accountID, messageID); xerr != nil {
+		return nil, xerr
+	}
+	if _, err := s.repo.WithdrawWarmupTampering(ctx, accountID, messageID, kind); err != nil {
+		return nil, errx.InternalError()
+	}
+	participant, xerr := s.getParticipantForAnyPool(ctx, accountID)
+	if xerr != nil || participant == nil {
+		return nil, xerr
+	}
+	return s.evaluateAndPersist(ctx, participant)
+}
+
+// reviseTamperingHold re-decides a live tampering hold, which the bands never
+// lower, on the strikes other than withdrawn left in the week before it began.
+func (s *service) reviseTamperingHold(ctx context.Context, accountID uuid.UUID, withdrawn string) *errx.Error {
+	hold, err := s.repo.GetWarmupHold(ctx, accountID)
+	if err != nil {
+		return errx.InternalError()
+	}
+	if !isTamperingHold(hold) {
+		return nil
+	}
+	decidedAt := tamperingHoldDecidedAt(hold)
+	deletions, spamFlags, err := s.repo.CountWarmupTamperingBetween(ctx, accountID, decidedAt.Add(-7*24*time.Hour), decidedAt, withdrawn, !hold.InPool)
+	if err != nil {
+		return errx.InternalError()
+	}
+	decision := evaluateTampering(&models.WarmupHealthMetrics{DeletionsLast7d: deletions, SpamFlagsLast7d: spamFlags}, decidedAt)
+	if healthSeverity(decision.State) >= healthSeverity(hold.State) {
+		return nil
+	}
+	state, until, reason := decision.State, decision.BlockedUntil, decision.Reason
+	if until == nil || !until.After(s.now()) {
+		state, until, reason = models.WarmupHealthHealthy, nil, ""
+	}
+	if _, err := s.repo.ReviseWarmupHold(ctx, accountID, hold, state, until, reason); err != nil {
+		return errx.InternalError()
+	}
+	return nil
+}
+
+// isTamperingHold is a live pause or block the tampering band imposed.
+func isTamperingHold(h *repository.WarmupHold) bool {
+	if h == nil || h.BlockedUntil == nil {
+		return false
+	}
+	if h.State != models.WarmupHealthQuarantined && h.State != models.WarmupHealthBlocked {
+		return false
+	}
+	return strings.HasPrefix(h.Reason, tamperingPausePrefix) || strings.HasPrefix(h.Reason, tamperingBlockPrefix)
+}
+
+// tamperingHoldDecidedAt is when the hold was imposed, from its term when the
+// row does not record it.
+func tamperingHoldDecidedAt(h *repository.WarmupHold) time.Time {
+	if h.BlockedAt != nil {
+		return *h.BlockedAt
+	}
+	term := warmupQuarantineDuration
+	if h.State == models.WarmupHealthBlocked {
+		term = warmupBlockDuration
+	}
+	return h.BlockedUntil.Add(-term)
+}
+
+func tamperingVerb(kind string) string {
+	switch kind {
+	case "deletion":
+		return "deleted"
+	case "spam_flag":
+		return "moved to spam"
+	default:
+		return "tampered with"
+	}
+}
+
+// tamperingKind names the single harm behind a watch.
+func tamperingKind(m *models.WarmupHealthMetrics) string {
+	if m.SpamFlagsLast7d > 0 {
+		return "spam_flag"
+	}
+	return "deletion"
+}
+
+// tamperingSummary spells the harm out for a reason the owner reads.
+func tamperingSummary(m *models.WarmupHealthMetrics) string {
+	parts := []string{}
+	if m.SpamFlagsLast7d > 0 {
+		parts = append(parts, fmt.Sprintf("%d warmup %s moved to spam", m.SpamFlagsLast7d, plural(m.SpamFlagsLast7d, "email", "emails")))
+	}
+	if m.DeletionsLast7d > 0 {
+		parts = append(parts, fmt.Sprintf("%d warmup %s deleted", m.DeletionsLast7d, plural(m.DeletionsLast7d, "email", "emails")))
+	}
+	return strings.Join(parts, " and ")
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// SubmitAppeal records a member's appeal against a warmup ban. Verifies the
+// mailbox belongs to the organization, is actually blocked, and has no open appeal.
+func (s *service) SubmitAppeal(ctx context.Context, orgID, userID, accountID uuid.UUID, reason string) (uuid.UUID, *errx.Error) {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return uuid.Nil, errx.New(errx.BadRequest, "an appeal reason is required")
+	}
+	if len(reason) > 2000 {
+		reason = reason[:2000]
+	}
+
+	if xerr := s.mailboxInOrg(ctx, orgID, accountID); xerr != nil {
+		return uuid.Nil, xerr
+	}
+
+	health, _ := s.getParticipantForAnyPool(ctx, accountID)
+	if health == nil || (health.HealthState != models.WarmupHealthBlocked && health.HealthState != models.WarmupHealthQuarantined) {
+		return uuid.Nil, errx.New(errx.BadRequest, "this mailbox is not blocked from warmup")
+	}
+
+	pending, err := s.repo.HasPendingWarmupAppeal(ctx, accountID)
+	if err != nil {
+		return uuid.Nil, errx.InternalError()
+	}
+	if pending {
+		return uuid.Nil, errx.New(errx.BadRequest, "an appeal is already pending for this mailbox")
+	}
+
+	id, err := s.repo.CreateWarmupAppeal(ctx, accountID, userID, reason)
+	if err != nil {
+		return uuid.Nil, errx.InternalError()
+	}
+
+	if s.opsNotify != nil {
+		s.opsNotify.NotifyOperator(
+			"warmup_appeal.created",
+			"Warmup ban appealed",
+			"A blocked mailbox asked to be let back into the warmup pool.",
+			map[string]string{
+				"Mailbox": accountID.String(),
+				"State":   string(health.HealthState),
+				"Reason":  reason,
+			},
+		)
+	}
+
+	return id, nil
+}
+
+// mailboxInOrg refuses a mailbox outside the caller's organization.
+func (s *service) mailboxInOrg(ctx context.Context, orgID, accountID uuid.UUID) *errx.Error {
+	if s.emailRepo == nil {
+		return nil
+	}
+	acc, _ := s.emailRepo.GetByID(ctx, accountID)
+	if acc == nil || acc.OrganizationID == nil || *acc.OrganizationID != orgID {
+		return errx.New(errx.NotFound, "mailbox not found")
+	}
+	return nil
+}
+
+// GetBanStatus returns the user-facing warmup standing for a mailbox.
+func (s *service) GetBanStatus(ctx context.Context, orgID, accountID uuid.UUID) (*models.WarmupBanStatus, *errx.Error) {
+	if xerr := s.mailboxInOrg(ctx, orgID, accountID); xerr != nil {
+		return nil, xerr
+	}
+
+	status := &models.WarmupBanStatus{
+		EmailAccountID: accountID,
+		HealthState:    string(models.WarmupHealthHealthy),
+	}
+
+	health, _ := s.getParticipantForAnyPool(ctx, accountID)
+	if health != nil {
+		status.HealthState = string(health.HealthState)
+		status.BlockedAt = health.BlockedAt
+		status.BlockedUntil = health.BlockedUntil
+		if health.BlockedReason != nil {
+			status.Reason = *health.BlockedReason
+		}
+		if health.HealthState == models.WarmupHealthBlocked || health.HealthState == models.WarmupHealthQuarantined {
+			status.Blocked = true
+		}
+	}
+
+	if status.Blocked {
+		pending, _ := s.repo.HasPendingWarmupAppeal(ctx, accountID)
+		status.PendingAppeal = pending
+		status.CanAppeal = !pending
+	}
+
+	return status, nil
+}
+
+func (s *service) ApplySpamReport(ctx context.Context, reporterAccountID, reportedAccountID uuid.UUID, messageID, reportType string) (*models.WarmupParticipantHealth, *errx.Error) {
+	inserted, err := s.repo.RecordSpamReport(ctx, &repository.SpamReport{
+		ID:                uuid.New(),
+		ReporterAccountID: reporterAccountID,
+		ReportedAccountID: reportedAccountID,
+		MessageID:         messageID,
+		ReportType:        reportType,
+	})
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+	if !inserted {
+		return s.getParticipantForAnyPool(ctx, reportedAccountID)
+	}
+
+	return s.evaluateAndPersistAnyPool(ctx, reportedAccountID)
+}
+
+func (s *service) ApplyRateLimitExceeded(ctx context.Context, accountID uuid.UUID, reason string) (*models.WarmupParticipantHealth, *errx.Error) {
+	blockedUntil := s.now().UTC().Add(warmupBlockDuration)
+	if _, err := s.repo.UpdateParticipantHealth(ctx, accountID, models.WarmupHealthBlocked, &blockedUntil, reason, 100); err != nil {
+		return nil, errx.InternalError()
+	}
+	return s.getParticipantForAnyPool(ctx, accountID)
+}
+
+// evaluateAndPersistAnyPool reads the row once and judges it; nil when the mailbox is in no pool.
+func (s *service) evaluateAndPersistAnyPool(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, *errx.Error) {
+	health, xerr := s.getParticipantForAnyPool(ctx, accountID)
+	if xerr != nil || health == nil {
+		return nil, xerr
+	}
+	return s.evaluateAndPersist(ctx, health)
+}
+
+// getParticipantForAnyPool reads the row from whichever pool the mailbox is in: one query, not
+// one per pool, so there is no probe order to bias toward premium.
+func (s *service) getParticipantForAnyPool(ctx context.Context, accountID uuid.UUID) (*models.WarmupParticipantHealth, *errx.Error) {
+	health, err := s.repo.GetParticipantHealthForAccount(ctx, accountID)
+	if err != nil {
+		log.Error().
+			Err(err).
+			Str("email_account_id", accountID.String()).
+			Msg("warmup: pool membership probe failed")
+		return nil, errx.InternalError()
+	}
+	return health, nil
+}
+
+// evaluateAndPersist judges the participant row in hand; the mailbox and its
+// pool are read off the row, so a caller cannot pin the wrong pool.
+func (s *service) evaluateAndPersist(ctx context.Context, participant *models.WarmupParticipantHealth) (*models.WarmupParticipantHealth, *errx.Error) {
+	accountID, poolType := participant.EmailAccountID, participant.PoolType
+	// errx.Error carries no cause, so every failure below is logged with the
+	// real error here. Without that the health bands can stop firing entirely
+	// and the only visible symptom is a last_health_evaluated_at that never
+	// moves (issue #195).
+	fail := func(stage string, cause error) *errx.Error {
+		log.Error().
+			Err(cause).
+			Str("email_account_id", accountID.String()).
+			Str("pool_type", poolType).
+			Str("stage", stage).
+			Msg("warmup: health evaluation failed; no band was applied")
+		return errx.InternalError()
+	}
+
+	// The prior state is what makes a webhook fire on a real transition
+	// rather than on every sweep.
+	priorState := participant.HealthState
+
+	metrics, err := s.loadMetrics(ctx, accountID, participant)
+	if err != nil {
+		return nil, fail("load_metrics", err)
+	}
+
+	// The floor that keeps a block from being overturned by a fresh reading is
+	// applied by UpdateParticipantHealth against the row as it is at write time.
+	decision := evaluateMetrics(metrics, placementPrior(participant), s.now().UTC())
+	health, err := s.repo.UpdateParticipantHealth(ctx, accountID, decision.State, decision.BlockedUntil, decision.Reason, decision.Score)
+	if err != nil {
+		return nil, fail("persist", err)
+	}
+	if health == nil {
+		// A review-required block is not overturned by a reading; the row stands.
+		return participant, nil
+	}
+	health.PoolType = poolType
+
+	if priorState != "" {
+		s.dispatchHealthEvent(ctx, accountID, priorState, health.HealthState, decision.Reason)
+	}
+	return health, nil
+}
+
+// loadMetrics is the one read behind a health decision; no window reaches
+// back past the row's health_signals_from (000096).
+func (s *service) loadMetrics(ctx context.Context, accountID uuid.UUID, participant *models.WarmupParticipantHealth) (*models.WarmupHealthMetrics, error) {
+	signalsFrom := participant.HealthSignalsFrom
+	now := s.now().UTC()
+	since := func(window time.Duration) time.Time {
+		start := now.Add(-window)
+		if signalsFrom.After(start) {
+			return signalsFrom
+		}
+		return start
+	}
+	counts, err := s.repo.HealthMetricCounts(ctx, accountID, since(7*24*time.Hour), since(30*24*time.Hour))
+	if err != nil {
+		return nil, fmt.Errorf("HealthMetricCounts: %w", err)
+	}
+	sentLast7d, spamPlacementsLast7d, userComplaintsLast7d := counts.SentLast7d, counts.SpamPlacementsLast7d, counts.UserComplaintsLast7d
+	complaintsLast30d, bouncesLast30d, deliveredLast30d := counts.ComplaintsLast30d, counts.BouncesLast30d, counts.DeliveredLast30d
+
+	// Placement (the provider's classifier) and complaint (the recipient) have
+	// different remediation paths, so they earn separate rates.
+	warmupComplaintRate := 0.0
+	if sentLast7d > 0 {
+		warmupComplaintRate = float64(userComplaintsLast7d) / float64(sentLast7d) * 100
+	}
+	placementRate, placementSample := counts.Placement.Judged()
+
+	complaintRate := 0.0
+	if deliveredLast30d > 0 {
+		complaintRate = float64(complaintsLast30d) / float64(deliveredLast30d) * 100
+	}
+	bounceRate := 0.0
+	if deliveredLast30d > 0 {
+		bounceRate = float64(bouncesLast30d) / float64(deliveredLast30d) * 100
+	}
+
+	return &models.WarmupHealthMetrics{
+		SentLast7d:           sentLast7d,
+		SpamPlacementsLast7d: spamPlacementsLast7d,
+		SpamPlacementRate:    placementRate,
+		PlacementSample:      placementSample,
+		OtherSpamRate:        pct(counts.Placement.OtherSpam, counts.Placement.OtherDelivered),
+		OtherDelivered:       counts.Placement.OtherDelivered,
+		UserComplaintsLast7d: userComplaintsLast7d,
+		WarmupComplaintRate:  warmupComplaintRate,
+		ComplaintsLast30d:    complaintsLast30d,
+		DeliveredLast30d:     deliveredLast30d,
+		ComplaintRate:        complaintRate,
+		BouncesLast30d:       bouncesLast30d,
+		BounceRate:           bounceRate,
+		DeletionsLast7d:      counts.DeletionsLast7d,
+		SpamFlagsLast7d:      counts.SpamFlagsLast7d,
+	}, nil
+}
+
+func pct(part, whole int) float64 {
+	if whole <= 0 {
+		return 0
+	}
+	return float64(part) / float64(whole) * 100
+}
+
+type evaluationDecision struct {
+	State        models.WarmupHealthState
+	BlockedUntil *time.Time
+	Reason       string
+	Score        float64
+}
+
+// evaluateMetrics is the rate bands and the tampering band judged apart, with
+// the more severe finding kept, so a seven-day rate quarantine can never hide
+// a thirty-day tampering block or the other way round.
+// prior is the standing the placement band gave the row last time, which it
+// needs to hold a watch or throttle until the rate has clearly recovered.
+func evaluateMetrics(metrics *models.WarmupHealthMetrics, prior models.WarmupHealthState, now time.Time) evaluationDecision {
+	rates := moreSevere(evaluateRateBands(metrics, now), evaluatePlacement(metrics, prior, now))
+	return moreSevere(rates, evaluateTampering(metrics, now))
+}
+
+// healthSeverity orders the bands; ties go to the later term.
+func healthSeverity(state models.WarmupHealthState) int {
+	switch state {
+	case models.WarmupHealthWatch:
+		return 1
+	case models.WarmupHealthThrottled:
+		return 2
+	case models.WarmupHealthQuarantined:
+		return 3
+	case models.WarmupHealthBlocked:
+		return 4
+	}
+	return 0
+}
+
+func moreSevere(a, b evaluationDecision) evaluationDecision {
+	sa, sb := healthSeverity(a.State), healthSeverity(b.State)
+	switch {
+	case sb > sa:
+		return b
+	case sa > sb:
+		return a
+	case a.BlockedUntil != nil && b.BlockedUntil != nil && b.BlockedUntil.After(*a.BlockedUntil):
+		return b
+	}
+	return a
+}
+
+// evaluateTampering needs no sample: each strike is one act on mail the mailbox
+// verifiably received. A single one only warns, because the likeliest cause is
+// someone tidying the folder or a provider filing it as spam. A deletion is only
+// recorded inside config.WarmupDeletionStrikeHours of arrival, and only once a
+// search of the mailbox found the message in the trash or gone.
+func evaluateTampering(metrics *models.WarmupHealthMetrics, now time.Time) evaluationDecision {
+	strikes := metrics.TamperingStrikes()
+	score := maxFloat(float64(strikes)*10, metrics.SpamPlacementRate)
+	switch {
+	case strikes >= tamperingBlockStrikes:
+		until := now.Add(warmupBlockDuration)
+		return evaluationDecision{
+			State:        models.WarmupHealthBlocked,
+			BlockedUntil: &until,
+			Reason:       tamperingBlockPrefix + tamperingSummary(metrics) + " in the last 7 days. Leave warmup mail in the mailbox and out of spam; Pegasusbound deletes it on its own once its retention window passes. You can appeal this from your dashboard.",
+			Score:        score,
+		}
+	case strikes >= tamperingQuarantineStrikes:
+		until := now.Add(warmupQuarantineDuration)
+		return evaluationDecision{
+			State:        models.WarmupHealthQuarantined,
+			BlockedUntil: &until,
+			Reason:       tamperingPausePrefix + tamperingSummary(metrics) + " in the last 7 days. Leave warmup mail in the mailbox and out of spam; Pegasusbound deletes it on its own once its retention window passes.",
+			Score:        score,
+		}
+	case strikes >= tamperingWatchStrikes:
+		return evaluationDecision{
+			State:  models.WarmupHealthWatch,
+			Reason: "A warmup email was " + tamperingVerb(tamperingKind(metrics)) + " soon after it arrived. Leave warmup mail in the mailbox; Pegasusbound deletes it on its own once its retention window passes. A second one within 7 days pauses warmup.",
+			Score:  score,
+		}
+	}
+	return evaluationDecision{State: models.WarmupHealthHealthy, Score: metrics.SpamPlacementRate}
+}
+
+func evaluateRateBands(metrics *models.WarmupHealthMetrics, now time.Time) evaluationDecision {
+	decision := evaluationDecision{
+		State: models.WarmupHealthHealthy,
+		Score: metrics.SpamPlacementRate,
+	}
+
+	// Evaluate complaint rate (requires minimum sample of 100 delivered in 30d)
+	if metrics.DeliveredLast30d >= minComplaintSample {
+		switch {
+		case metrics.ComplaintRate >= complaintRateBlockPct:
+			until := now.Add(warmupBlockDuration)
+			return evaluationDecision{
+				State:        models.WarmupHealthBlocked,
+				BlockedUntil: &until,
+				Reason:       fmt.Sprintf("complaint rate %.2f%% exceeded block threshold over %d delivered", metrics.ComplaintRate, metrics.DeliveredLast30d),
+				Score:        maxFloat(metrics.ComplaintRate*100, metrics.SpamPlacementRate),
+			}
+		case metrics.ComplaintRate >= complaintRateQuarantinePct:
+			until := now.Add(warmupQuarantineDuration)
+			return evaluationDecision{
+				State:        models.WarmupHealthQuarantined,
+				BlockedUntil: &until,
+				Reason:       fmt.Sprintf("complaint rate %.2f%% exceeded quarantine threshold", metrics.ComplaintRate),
+				Score:        maxFloat(metrics.ComplaintRate*100, metrics.SpamPlacementRate),
+			}
+		case metrics.ComplaintRate >= complaintRateWatchPct:
+			decision = evaluationDecision{
+				State:  models.WarmupHealthWatch,
+				Reason: fmt.Sprintf("complaint rate %.2f%% in watch band", metrics.ComplaintRate),
+				Score:  maxFloat(metrics.ComplaintRate*100, metrics.SpamPlacementRate),
+			}
+		}
+	}
+
+	// Evaluate bounce rate (requires minimum sample of 100 delivered in 30d)
+	if metrics.DeliveredLast30d >= minComplaintSample {
+		switch {
+		case metrics.BounceRate >= bounceRateBlockPct:
+			until := now.Add(warmupBlockDuration)
+			return evaluationDecision{
+				State:        models.WarmupHealthBlocked,
+				BlockedUntil: &until,
+				Reason:       fmt.Sprintf("bounce rate %.1f%% exceeded block threshold over %d delivered", metrics.BounceRate, metrics.DeliveredLast30d),
+				Score:        maxFloat(metrics.BounceRate, metrics.SpamPlacementRate),
+			}
+		case metrics.BounceRate >= bounceRateQuarantinePct:
+			until := now.Add(warmupQuarantineDuration)
+			return evaluationDecision{
+				State:        models.WarmupHealthQuarantined,
+				BlockedUntil: &until,
+				Reason:       fmt.Sprintf("bounce rate %.1f%% exceeded quarantine threshold", metrics.BounceRate),
+				Score:        maxFloat(metrics.BounceRate, metrics.SpamPlacementRate),
+			}
+		}
+	}
+
+	// Evaluate warmup-internal user-complaint rate. These signals come from
+	// recipients actively flagging the warmup mail as spam and warrant their
+	// own thresholds — separate from external-recipient complaint rates and
+	// from passive folder-placement signals.
+	if metrics.SentLast7d >= minSpamPlacementSample {
+		switch {
+		case metrics.WarmupComplaintRate >= warmupComplaintBlockPct:
+			until := now.Add(warmupBlockDuration)
+			return evaluationDecision{
+				State:        models.WarmupHealthBlocked,
+				BlockedUntil: &until,
+				Reason:       fmt.Sprintf("warmup user-complaint rate %.2f%% exceeded block threshold", metrics.WarmupComplaintRate),
+				Score:        maxFloat(metrics.WarmupComplaintRate*10, metrics.SpamPlacementRate),
+			}
+		case metrics.WarmupComplaintRate >= warmupComplaintQuarantinePct:
+			until := now.Add(warmupQuarantineDuration)
+			return evaluationDecision{
+				State:        models.WarmupHealthQuarantined,
+				BlockedUntil: &until,
+				Reason:       fmt.Sprintf("warmup user-complaint rate %.2f%% exceeded quarantine threshold", metrics.WarmupComplaintRate),
+				Score:        maxFloat(metrics.WarmupComplaintRate*10, metrics.SpamPlacementRate),
+			}
+		case metrics.WarmupComplaintRate >= warmupComplaintWatchPct:
+			if decision.State == models.WarmupHealthHealthy {
+				decision = evaluationDecision{
+					State:  models.WarmupHealthWatch,
+					Reason: fmt.Sprintf("warmup user-complaint rate %.2f%% in watch band", metrics.WarmupComplaintRate),
+					Score:  maxFloat(metrics.WarmupComplaintRate*10, metrics.SpamPlacementRate),
+				}
+			}
+		}
+	}
+
+	return decision
+}
+
+// evaluatePlacement is the spam-placement ladder. It only slows a mailbox
+// down, and lifts on its own once the rate is clearly back down.
+func evaluatePlacement(m *models.WarmupHealthMetrics, prior models.WarmupHealthState, now time.Time) evaluationDecision {
+	healthy := evaluationDecision{State: models.WarmupHealthHealthy, Score: m.SpamPlacementRate}
+	if m.PlacementSample < minSpamPlacementSample {
+		return healthy
+	}
+	rate := m.SpamPlacementRate
+	switch {
+	case rate >= spamPlacementThrottlePct,
+		prior == models.WarmupHealthThrottled && rate >= spamPlacementThrottlePct*spamPlacementExitFactor:
+		until := now.Add(warmupThrottleDuration)
+		return evaluationDecision{
+			State:        models.WarmupHealthThrottled,
+			BlockedUntil: &until,
+			Reason: fmt.Sprintf("%s Warmup and cold sending run at half volume with wider spacing until it is below %s, then return to normal on their own.",
+				placementSummary(m), fmtPct(spamPlacementThrottlePct*spamPlacementExitFactor)),
+			Score: rate,
+		}
+	case rate >= spamPlacementWatchPct,
+		(prior == models.WarmupHealthWatch || prior == models.WarmupHealthThrottled) && rate >= spamPlacementWatchPct*spamPlacementExitFactor:
+		return evaluationDecision{
+			State: models.WarmupHealthWatch,
+			Reason: fmt.Sprintf("%s Sending is slowed slightly until it is below %s.",
+				placementSummary(m), fmtPct(spamPlacementWatchPct*spamPlacementExitFactor)),
+			Score: rate,
+		}
+	}
+	return healthy
+}
+
+// placementReasonMarker is in every reason the placement band writes, which is
+// how the next evaluation knows a watch or throttle is placement's to hold.
+const placementReasonMarker = "of warmup mail delivered at Google, Microsoft and Yahoo landed in spam"
+
+// placementPrior is the row's standing when the placement band set it, and
+// empty otherwise, so a probation or complaint watch is never held by it.
+func placementPrior(p *models.WarmupParticipantHealth) models.WarmupHealthState {
+	if p.LastHealthReason != nil && strings.Contains(*p.LastHealthReason, placementReasonMarker) {
+		return p.HealthState
+	}
+	return ""
+}
+
+// placementSummary says what the placement band read.
+func placementSummary(m *models.WarmupHealthMetrics) string {
+	out := fmt.Sprintf("%s %s over 7 days (%d delivered).", fmtPct(m.SpamPlacementRate), placementReasonMarker, m.PlacementSample)
+	if m.OtherDelivered > 0 && m.OtherSpamRate > 0 {
+		out += fmt.Sprintf(" Other mail hosts (%s of %d) run their own filters and are not counted.", fmtPct(m.OtherSpamRate), m.OtherDelivered)
+	}
+	return out
+}
+
+// fmtPct is a percentage to one decimal, without a trailing ".0".
+func fmtPct(v float64) string {
+	return strconv.FormatFloat(math.Round(v*10)/10, 'f', -1, 64) + "%"
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// EvaluateAllParticipants runs a health evaluation sweep across all warmup pool participants.
+// Returns the number evaluated and the number of state changes.
+func (s *service) EvaluateAllParticipants(ctx context.Context) (int, int, *errx.Error) {
+	// The standing of a removed mailbox is held against its address for a
+	// fixed window; this is where the window is enforced.
+	if purged, err := s.repo.PurgeExpiredReputationLedger(ctx); err != nil {
+		log.Warn().Err(err).Msg("warmup: could not purge the expired reputation ledger")
+	} else if purged > 0 {
+		log.Info().Int64("purged", purged).Msg("warmup: reputation ledger rows lapsed")
+	}
+
+	// The listing carries the rows, stalest evaluation first, so the loop
+	// reads nothing per mailbox before judging it (#492).
+	participants, err := s.repo.ListParticipantHealth(ctx)
+	if err != nil {
+		log.Error().Err(err).Msg("warmup: health sweep could not list participants")
+		return 0, 0, errx.InternalError()
+	}
+
+	evaluated := 0
+	stateChanges := 0
+	skipped := 0
+
+	for i := range participants {
+		if ctx.Err() != nil {
+			// Past the deadline every read fails; stop, and say how far it got.
+			log.Error().
+				Int("evaluated", evaluated).
+				Int("remaining", len(participants)-i).
+				Msg("warmup: health sweep cut off by its deadline; the rest is judged first next pass")
+			return evaluated, stateChanges, errx.InternalError()
+		}
+		before := &participants[i]
+		// The cause of a failure is logged where it happens; it is counted here.
+		after, xerr := s.evaluateAndPersist(ctx, before)
+		if xerr != nil {
+			skipped++
+			continue
+		}
+		evaluated++
+
+		if after.HealthState != before.HealthState {
+			stateChanges++
+		}
+	}
+
+	if skipped > 0 {
+		log.Error().
+			Int("skipped", skipped).
+			Int("evaluated", evaluated).
+			Int("participants", len(participants)).
+			Msg("warmup: health sweep could not evaluate every participant; those accounts keep their last known band")
+	}
+
+	return evaluated, stateChanges, nil
+}
+
+// GetPoolHealthSummary returns an aggregate health overview across all warmup pools
+func (s *service) GetPoolHealthSummary(ctx context.Context) (*models.WarmupPoolHealthSummary, *errx.Error) {
+	counts, avgScore, err := s.repo.GetPoolHealthCounts(ctx)
+	if err != nil {
+		return nil, errx.InternalError()
+	}
+
+	// Pool-wide spam-placement rate over the last 7 days. Previously this
+	// summary field was always serialised as 0 because nothing populated it.
+	since := s.now().UTC().Add(-7 * 24 * time.Hour)
+	placementRate, prErr := s.repo.PoolSpamPlacementRate(ctx, since)
+	if prErr != nil {
+		return nil, errx.InternalError()
+	}
+	byProvider, bpErr := s.repo.PoolSpamPlacementsByProvider(ctx, since)
+	if bpErr != nil {
+		return nil, errx.InternalError()
+	}
+
+	total := 0
+	blockedCount := 0
+	atRiskCount := 0
+	for state, count := range counts {
+		total += count
+		switch models.WarmupHealthState(state) {
+		case models.WarmupHealthQuarantined, models.WarmupHealthBlocked:
+			blockedCount += count
+		case models.WarmupHealthWatch, models.WarmupHealthThrottled:
+			atRiskCount += count
+		}
+	}
+
+	return &models.WarmupPoolHealthSummary{
+		TotalParticipants:       total,
+		ByState:                 counts,
+		AvgHealthScore:          avgScore,
+		AvgSpamPlacement:        placementRate,
+		SpamPlacementByProvider: byProvider,
+		BlockedCount:            blockedCount,
+		AtRiskCount:             atRiskCount,
+	}, nil
+}

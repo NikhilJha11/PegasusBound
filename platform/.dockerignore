@@ -1,0 +1,61 @@
+# Keep the build context small.
+#
+# Without this, every `docker compose build` ships the entire worktree
+# (incl. node_modules and the Vite cache) to BuildKit before the first
+# layer runs. The Go images don't need any of it.
+
+.git
+.github
+.gitignore
+.idea
+.vscode
+.agentd
+
+# Frontend trees: the Go images never need them, and a host node_modules
+# copied over the forms image's own install makes pnpm abort the build (#292).
+**/node_modules
+**/.vite
+web/dist
+web/build
+web/coverage
+forms/dist
+admin/dist
+site/dist
+site/.astro
+
+# Compiled host binaries that would shadow / inflate the context.
+bin
+dist
+build
+
+# Editor / OS noise
+.DS_Store
+*.swp
+
+# macOS AppleDouble sidecars. On a volume without native xattr support macOS
+# writes a ._name companion beside every file to hold the extended attributes.
+# BuildKit's context sender then tries to read xattrs off those companions and
+# fails with "operation not permitted", which aborts the whole build.
+._*
+**/._*
+*~
+.envrc
+
+# Test + coverage artifacts
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Local dev secrets (we use envsample in repo).
+*.env
+!cmd/*/envsample
+
+# Logs
+*.log
+logs/
+
+# Docs/markdown aren't needed inside the image.
+docs
+*.md
+!README.md

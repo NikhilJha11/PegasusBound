@@ -1,0 +1,273 @@
+---
+title: "Analytics"
+description: "Campaign and account performance metrics."
+---
+
+Analytics turns every send, open, click, reply, bounce and complaint into rates you can act on, for the whole workspace, each campaign and each mailbox.
+
+![The workspace dashboard: sends, opens, replies and bounces over time, top campaigns and account health](/guides/analytics.webp)
+
+## Read your numbers
+
+<Steps>
+
+<Step>
+
+Check the four headline rates for your window: `7d`, `30d` or `90d`.
+
+</Step>
+
+<Step>
+
+If one looks off, switch the chart to that metric and find the day it moved.
+
+</Step>
+
+<Step>
+
+Open that campaign and read its per-step stats to see which touch is responsible.
+
+</Step>
+
+<Step>
+
+For bounces or complaints, check the per-mailbox breakdown to find the sender at fault.
+
+</Step>
+
+</Steps>
+
+## Good to know
+
+- Opens and clicks only count when open or link tracking is on for the campaign.
+- Bots, security scanners and privacy-proxy auto-opens are logged but never counted.
+- Replies are human replies. Out-of-office notices and autoresponders never count.
+- A click by a person counts as an open too.
+- Pegasusbound will not call an A/B winner until the leader has a minimum sample, `30` sends by default.
+
+<Fold>
+
+## What analytics covers and who can see it
+
+Browsing filters, searches and view choices are [remembered in your browser tab](/guides/browsing/) across refreshes and navigation, separately for each user and workspace.
+
+Analytics rolls every send, open, click, reply, bounce, and complaint into rates you can act on, by workspace, campaign, and mailbox. For health bands and the thresholds Pegasusbound acts on, see [Deliverability](/guides/deliverability/).
+
+Campaign analytics are shared across the workspace. With **View analytics**, you can see the overview, daily and hourly statistics, step performance and comparisons for campaigns created by any member of the selected workspace. The campaign author does not need to grant separate access.
+
+</Fold>
+
+<Fold>
+
+## Signup source attribution (platform admins)
+
+This is separate from email and campaign analytics. The marketing site carries the original landing path, external referrer host and any `utm_source`, `utm_medium`, `utm_campaign`, `utm_term` and `utm_content` tags through its page links into the dashboard. App redirects and switching between sign-in and registration keep those fields available at signup.
+
+The new workspace records acquisition once. In the admin panel, **Organizations → Channel** shows the campaign source when supplied, the saved referrer host and landing path. If a saved table layout hides Channel, enable it under **Columns**. The acquisition filters accept an exact referrer host, such as `www.google.com` or `www.reddit.com`. **Overview → Acquisition** summarizes signup channels, referrers and paid conversions.
+
+Sources come from campaign tags or the browser's referrer, not guesses. Pegasusbound's own domains are not external sources. Browsers, search engines and apps can withhold referrers; absent source information is shown as **Unknown**, even when the landing page is known. Full referrer URLs, search queries and landing-page query strings are not stored. Acquisition values are limited in length and email-shaped values are redacted by the backend.
+
+The marketing site stays cookieless, with no persistent PostHog identity. Attribution travels in URLs, not cookies or browser storage. It survives linked navigation but cannot reliably reconnect a later unrelated visit, another device or a URL whose attribution parameters were removed. It is not a complete anonymous browsing history. Existing saved acquisition remains unchanged, and missing historical sources are not backfilled. No new configuration or database migration is required.
+
+</Fold>
+
+<Fold>
+
+## What is counted
+
+| Metric | Counts | Feeds |
+| --- | --- | --- |
+| Sent | Emails actually sent | The denominator for every rate |
+| Opens | Recipients who opened | Open rate |
+| Clicks | Recipients who clicked a tracked link | Click rate |
+| Replies | Human replies | Reply rate |
+| Positive replies | Human replies the reply classifier judged positive | Positive reply rate, interested leads |
+| Bounces | Hard and soft bounces | Bounce rate |
+| Complaints | Marked as spam | Complaint rate |
+
+Seven rules govern the counts:
+
+- **Tracking must be on.** Opens and clicks need open or link tracking enabled on the campaign, and a tracking host on the install. A [custom tracking domain](/guides/mailboxes/#custom-tracking-domain) per mailbox is optional; without one they go through the shared host and still count. With tracking off they stay at zero while sends and replies still count.
+- **Reading in Pegasusbound does not count as an open.** Unibox removes Pegasusbound's tracking pixels from the displayed message, including quoted history. This applies to sent messages and every other folder; recipient copies retain their pixels.
+- **Replies are human replies.** Out-of-office and autoresponders never count, never stamp the contact as replied, and never trip stop-on-reply. A reply is attributed by the thread it answers, so a person who replies from a different address than the one you mailed (a "send as" alias, a forward, a colleague answering on their behalf) still counts as a reply for that lead. In a campaign that rotates across several mailboxes, each lead's reply is expected in the mailbox that wrote to them (the one their follow-ups come from too), so that mailbox has to be connected with inbox sync in the same workspace for the reply to be seen; a reply that reaches another mailbox in the pool stays in the Unibox and is not counted. Reply detection is always on; the reply-intent switch in Settings governs only what happens after a reply is detected. A reply that was missed is not lost: once a day, and whenever it starts, the platform re-checks recent inbound mail that was never attributed and marks the lead replied if it should have been.
+- **Bots are filtered.** Crawlers, CLI agents, prefetches, chat link previews, and security gateways that announce themselves are served normally but never counted. The ones that do not announce themselves are caught by where they came from and by what they do. Requests from a known mail-filtering network are treated as automated whatever their user agent claims, and a click from one is still redirected, just without the ticket that would file the visit against the recipient. Microsoft 365's own filtering layer, where Safe Links and delivery-time link scanning run, is recognised out of the box, as is Barracuda's. Proofpoint, Mimecast and Cisco Secure Email are recognised too, with one difference: those three also offer browser isolation, which renders a clicked page in the vendor's cloud for the recipient to read, so a click from them can be a real person. A match there is treated as automated only when it also arrives soon enough after the send to be the delivery-time scan, and a recipient who clicks through isolation later still counts as a person. The rest are caught by behaviour: an open within a minute of the send, or a click within thirty seconds, and clicks on two or more links of one email from the same source within five seconds (a scanner walking the message). The clock on the first two starts when the send is handed to a worker, before the mail has even been delivered, so those windows cover the sending provider's queue and the transit to the recipient as well as reading time. A self-hosted instance can change those windows under Instance settings, including the one the isolation vendors are measured against, when its recipients' gateways are slower or faster than that. Otherwise one corporate scanner would "click" every link seconds after delivery. A self-hosted instance can name its own scanner networks; see [tracking service configuration](/development/configuration/).
+- **Auto-opens are logged, not counted.** Privacy proxies like Apple Mail Privacy Protection, and instant opens, are kept as proof of delivery and shown separately (`12 auto, not counted`), and an open counts only once per email however many times it is fetched. Every open count and open rate, on the campaign overview, per step, per day and per hour, and on the dashboard, counts a person's opens only, which is how the Leads tab already reads a lead: not opened until a person opens it. Apple Mail Privacy Protection's relay (a user agent of just `Mozilla/5.0`) and the stripped WebKit user agent that Mail on a Mac and the new Outlook for Windows both send are treated as a prefetch only when they arrive inside the automated-open window. Later, the same request is a person's open. **Auto-opens never trigger opened-based branches or automations.**
+- **A click is an open.** Opens need the mail client to load images, and many clients block them. A click by the person proves the email was read, so it counts as an open as well, and a lead can never read "clicked, not opened".
+- **Auto-clicks are kept but never counted.** A click classified as automated is logged on the contact's activity with the link it hit and the rule that caught it, and the campaign overview shows how many steps had only automated clicks (`3 auto`). It never makes the step clicked, never fires a clicked branch or automation, and never sends a webhook. A person clicking the same link later counts normally. A burst is only recognisable from its second click, so a click that looks human waits for the burst window plus one second (six seconds) before it fires anything (clicked branches, automations, webhooks, the live feed): if a second link follows inside that window, both clicks are relabeled, the stamp is withdrawn and nothing fires.
+
+</Fold>
+
+<Fold>
+
+## Workspace dashboard
+
+Live, scoped by `7d`, `30d`, or `90d` tabs, and by default covering every campaign in the workspace.
+
+| Section | Shows |
+|---------|-------|
+| Headline rates | Total sent, open rate, reply rate, bounce rate |
+| Email performance | One metric per day (sent, opens, clicks, replies), for spotting the day something moved |
+| Breakdown | Raw window totals behind the rates |
+| Account health | Each mailbox counted once as Healthy, At risk, or Issues, using its most severe current connection, sync, or warmup-reputation state |
+| Top campaigns | Best performers with sent, open rate, reply rate, and a status dot |
+| Recent activity | A live feed of individual opens, clicks, replies, and bounces. A reply names the mailbox that sent the email it answers, even when it landed in a [shared reply inbox](/guides/mailboxes/#a-shared-reply-inbox) |
+
+Sending totals, trends, comparisons, and top-campaign rates count email steps only. Completed wait and action steps move a sequence forward but never inflate the number of messages sent.
+
+### Platform admin send counters
+
+The admin **Overview** counts confirmed warmup, campaign, direct email, and placement-test sends across this instance. **Emails sent today** uses the UTC calendar day, not each mailbox's local sending timezone. The all-time total uses the available confirmed task history.
+
+A queued or completed dispatch is not proof of sending. Warmup sends count only after their token records the provider's Message-ID. Other sends count after a successful worker result is applied. Older warmup receipts remain included, but older non-warmup tasks without applied results are not assumed successful: their Message-ID may have been generated before sending. Reserved, unknown, failed, and cancelled dispatches without confirmation do not count. Multiple warmup tokens for one task still count as one send. If the send-count query fails, the overview returns an error instead of reporting zero sends.
+
+### Filtering by campaign or folder
+
+The **All campaigns** menu next to the period tabs narrows the dashboard to the campaigns you pick. Choose one campaign, several, one or more [campaign folders](/guides/campaigns/), or a mix. The figures add the selected campaigns together, and a campaign picked directly and through a folder, or sitting in two picked folders, is counted once. A folder stands for the campaigns in it right now, so moving a campaign in or out of the folder changes what the dashboard counts the next time it loads. The period tabs keep working on top of the filter, and the selection is remembered in your browser tab like the period.
+
+| Follows the filter | Stays workspace-wide |
+| --- | --- |
+| Headline rates, Email performance chart, Breakdown, Top campaigns, Recent activity | Account health and Direct mail, marked **Workspace-wide** and **Not filtered by campaign** while a filter is on, because neither is campaign data |
+
+A campaign or folder that is deleted while selected drops out of the filter on its own. The mobile app's Analytics overview has the same menu under its period picker; there the filter changes the overview's campaign figures and leaves the Deliverability, Warmup and Accounts sections as they are. Through the API, pass `campaign_ids` and `folder_ids` to [`GET /analytics/dashboard`](/api/reference/analytics/#get-dashboard-analytics).
+
+</Fold>
+
+<Fold>
+
+## Direct mail
+
+The rest of this page measures campaigns. **Direct mail** measures what you write by hand in the [unified inbox](/guides/unified-inbox/), which most workspaces do far more of than they expect.
+
+It is built from two different sources, and they are shown apart because they cover different sets of messages.
+
+**Volume and replies** come from your synced mailboxes, so they cover direct messages written in Pegasusbound, Gmail, or your phone and include history from before this feature existed. Synced campaign and warmup sends are excluded from the outgoing figures. Nothing has to be switched on.
+
+| Figure | Means |
+|--------|-------|
+| Sent by hand | Messages in the Sent folder of every connected mailbox, in range |
+| Received | Messages that arrived in the inbox, in range |
+| Reply rate | Of the threads you started, how many got an answer |
+| Median reply time | How long the other person took to answer, across answered threads |
+
+A thread counts as yours when the first message in it was one you sent, and as answered when a message came back after it. The delay is measured from your first send to their first reply, so a long exchange is one data point rather than many.
+
+**Opens and clicks** are opt-in and measured differently. They come from completed send records, so they only cover HTML mail sent through Pegasusbound from a mailbox with tracking switched on, and only from the moment you switched it on. Plain-text-only messages cannot carry a pixel or wrapped link and remain untracked. That is why the card states its own denominator rather than reusing "sent by hand" above: dividing opens by messages that were never tracked would invent a rate.
+
+To switch it on, open the mailbox and turn on **Track opens and clicks on direct mail**. See [Mailboxes](/guides/mailboxes/#tracking-direct-mail).
+
+**Per mailbox** ranks your mailboxes by how many messages each mailbox sent and received, and marks the ones that are tracking. **Top correspondents** ranks the people you exchange the most mail with. Your own mailboxes are excluded from that list, so a copy to yourself is not a correspondent.
+
+</Fold>
+
+<Fold>
+
+## Per-campaign
+
+Each campaign reports its own totals: enrolled contacts, sent email steps, remaining planned email-step sends, unique opens and clicks, replies, positive replies, interested leads, bounces, unsubscribes, and the five rates. Wait and action steps do not count as messages.
+
+**Positive replies** are the replies the [reply classifier](/guides/inbox-tagging/) judged positive, the same verdict the `reply_positive` branch condition routes on. The **positive rate** divides them by emails sent, like the reply rate, so two campaigns compare on opportunities rather than on raw answers: a campaign with 100 replies and 5 positive does worse than one with 60 replies and 20 positive. **Interested leads** counts the contacts behind them once each, so a prospect who answers two steps positively is one lead. Negative replies, requests to stop, unclassified replies, out-of-office notices and autoresponders never count as positive. A step's verdict is its latest reply's, so a lead who said yes and later wrote back to decline counts as negative.
+
+**Reply quality** on the overview splits the replies into positive, neutral, negative, asked to stop and unclassified, which add up to the reply count, and lists out-of-office notices and autoresponders beside them as not counted.
+
+**Per-step stats** break sent, opens, clicks, replies, positive replies and bounces down by sequence step, which is how you find the touch pulling replies and the follow-ups that are dead weight. Email steps are listed in the order the sequence runs them and numbered the way the canvas numbers them (an unnamed step shows as `Email 2`), so action steps are left out of the count. Each count carries the step's own rate underneath it, measured against that step's sends rather than the campaign's, so a fourth touch that reached 11 contacts still compares against a first touch that reached 337. A step that has sent nothing shows a dash rather than 0%, and a dotted rate means some of those events were automated: hover it for the split. Daily stats drive the trend chart, and hourly stats show when sends land and get engagement. Campaigns can also be compared side by side on the same metrics, over the same kind of period.
+
+### Reporting period
+
+The **Performance** bar on a campaign's overview picks the period every figure on the page covers: `7d`, `30d`, `90d`, **All time** or **Custom** (a first and a last day). The headline rates, the totals, reply quality, step performance, the daily chart and who engaged all change together. **Share image** exports emails sent, open rate, reply rate and positive rate, and names the period under the campaign. **All time** is the default and charts from the day of the first send. The last preset you picked is remembered for every campaign.
+
+A period is a send cohort: it selects the emails sent on its days and counts every open, click, reply, positive reply and bounce those emails earned, whenever they arrived. An email sent on September 5 that is answered on September 10 counts as a reply in a September 1 to 7 period, and a reply that arrives on September 3 to an email sent in August does not. That keeps every rate a share of the same emails, so the reply rate of last week's sends is comparable with the week before, before and after you change a mailbox, a domain or the copy. A recent period's rates can still rise as late replies come in. Days are UTC calendar days, and the last day counts in full. Enrolled contacts and remaining sends describe the campaign as it stands now and do not change with the period.
+
+**Who engaged, and from where** lists the countries, mail clients and devices people opened and clicked from, counting each contact once per bucket. The device column says how the email was read as well as on what: **Mobile app**, **Desktop app**, **Tablet app**, **Webmail**, or **Hidden by image proxy** when the mailbox provider loaded the image itself (see [How an open was read](#how-an-open-was-read)). A click counts under the device it came from. Only human events feed it, so a security scanner's data centre never tops the country list.
+
+### What is recorded per open and click
+
+Every open and every click is kept as its own record, repeats included, with what the request said about itself: the mail client, whether it was an installed app or webmail, the browser, operating system and device type (see [How an open was read](#how-an-open-was-read)); the country, region and city resolved from the source network; for clicks the exact link; and whether it was the person or an automated fetch, with the rule that caught it. The address itself never leaves the tracking service: it publishes the network the address belongs to (the last IPv4 octet zeroed, an IPv6 address cut to its first 48 bits), which is enough for a city-level lookup and cannot single out a host, plus a keyed token of the full address used to tell one source from another, which cannot be turned back into the address. The consumer resolves the network to a location and stores neither. Location needs the GeoLite2 database on the consumer (`GEODB_PATH`); without it the country, region and city stay empty and everything else is still recorded. These records are kept for a year, then pruned; the counts and the first open and click per step live on the lead itself and are not affected.
+
+### How an open was read
+
+Each open says what it was read on, as far as the request can tell: **iPhone · Apple Mail app**, **Windows PC · Outlook app**, **Mac · Webmail in Chrome**. The contact's Activity tab shows it on every open and click, the live feed on a running campaign and the dashboard's recent activity show it next to the contact, and the contact's Overview sums it up under **How they read**: each client and device their opens came from, with how many and how recently.
+
+What the request can tell depends on the mail client:
+
+| Opened in | Shown as | Why |
+| --- | --- | --- |
+| Gmail, on the web or in the Gmail apps | **Gmail · device hidden**, no location | Gmail loads every image through Google's servers, so the device and network belong to Google |
+| Yahoo Mail, HEY, Fastmail's web app, Seznam | The provider, device hidden, no location | The same: the provider fetches the image |
+| Apple Mail with Mail Privacy Protection | **Apple Mail · device hidden**, region only | Apple's relay hides the device and keeps only the rough region |
+| Apple Mail on an iPhone or iPad without it | **iPhone · Apple Mail app** | The request comes from the device. Another iOS mail app that renders mail the same way and names nothing is counted here too; Spark, Edison and Canary block tracking images by default |
+| Classic Outlook for Windows, Outlook for Mac and mobile, Thunderbird, eM Client and other desktop apps | The device and **app** | The client names itself |
+| Mail on a Mac, or the new Outlook for Windows | **Apple Mail or Outlook app**, no device | Both send the same stripped header, which names neither the client nor the device |
+| An Android mail app | **Android phone · Mail app** | Android apps render mail in a web view that does not name the app |
+| Webmail in a browser that loads images directly | **Webmail in** the browser, with the device | A full browser loaded the image |
+
+A click names the browser the link opened in and the device it opened on, because the link leaves the mail client. Nothing is guessed: when the request cannot say something, the field is left empty rather than filled with the proxy's own details. Opens and clicks recorded before this was added are read again by the same rules in the background after the instance upgrades, a small batch at a time, so older history reads the same way once it finishes.
+
+These records back the engagement rows on a contact's [activity timeline](/guides/contacts-crm/#activity-timeline) and the per-campaign breakdown above.
+
+</Fold>
+
+<Fold>
+
+## Per-mailbox
+
+| Signal | What it tells you |
+|--------|-------------------|
+| Health | Healthy, warning, or error, with a score and specific issues |
+| Daily usage | Campaign emails sent today against `campaign_limit` (default `50`/day), plus warmup sent and limit |
+| Warmup status | Whether warmup is on, actual volume today, the target the scheduler is using, max volume, configured reply target, and elapsed warmup days |
+| Warmup health | Pool standing: healthy, watch, throttled, quarantined, or blocked, with the score and reason the band decided, and the block expiry |
+
+The overview calls the configured percentage **Reply target** because it controls how much synthetic warmup mail should receive a reply. The Analytics tab reports the measured reply rate from actual sends and replies. Its **Target met** percentage is actual warmup sends divided by planned target volume across the active days in the selected range; it can exceed 100% when volume beats the plan.
+
+Use this to find the one mailbox dragging down a campaign's bounce rate instead of blaming the campaign.
+
+</Fold>
+
+<Fold>
+
+## A/B analysis
+
+Variants can be scoped to one sequence step or the whole campaign. Traffic splits across the active arms, and the step's own email is the **Original** control arm, itself a first-class arm with its own share, so 70% Original against 30% of a new subject is a valid test. Drag the split bar or type exact percentages; shares always total 100%.
+
+A/B is on by default in outreach settings, but a campaign only runs an experiment with at least two active variants.
+
+**Assignment** is deterministic per contact and step for step-scoped variants, so the same contact sees the same variant across retries. Campaign-level variants assign on first send by weighted random draw and keep the contact there. Pausing a variant drops it from the split without deleting it.
+
+### Picking a winner
+
+The default winning rule is **reply rate**; you can rank by open or click rate instead. Pegasusbound will not call a winner on a tiny sample: it needs a minimum (default `30` sends for the leader) and reports confidence.
+
+| Confidence | Meaning |
+| --- | --- |
+| `none` | No variant data yet |
+| `low` | Leader below the minimum sample |
+| `medium` | Leader reached the minimum |
+| `high` | Leader at three times the minimum |
+
+<Callout type="info" title="Let the test run">
+A variant can look like the winner after a handful of sends and flip later. Wait for `medium` or `high` before promoting one. The minimum sample size is configurable in outreach settings.
+</Callout>
+
+</Fold>
+
+<Fold>
+
+## How to read your numbers
+
+1. Check the four headline rates for your window.
+2. If one looks off, switch the chart to that metric and find the day it moved. That usually points at one campaign or list.
+3. Open that campaign and read per-step stats to see which touch is responsible.
+4. For bounces or complaints, drop into the per-mailbox breakdown and [Deliverability](/guides/deliverability/) to find the sender at fault.
+5. Use A/B analysis for copy decisions, and wait for real confidence.
+
+A clean reply rate with low bounces and complaints beats a big open-rate screenshot every time.
+
+</Fold>
+
+## Related guides
+
+<Cards>
+  <Card title="Deliverability" href="/guides/deliverability/" />
+  <Card title="Sequences" href="/guides/sequences/" />
+  <Card title="Personalization & expressions" href="/guides/expressions/" />
+</Cards>

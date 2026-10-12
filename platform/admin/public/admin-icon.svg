@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Admin favicon: the Pegasusbound mark in the admin red (red-600, the theme's
+       admin-danger token) on the app's dark slate. The red marks this as the
+       restricted admin surface and sets the tab apart from the dashboard.
+       The mark is OPTICALLY centered, not bounding-box centered: it is
+       left-heavy (a thin point reaches right while the mass sits left), so
+       the transform nudges it right (~+4.5px) to look centered in the square. -->
+  <rect width="64" height="64" rx="14" fill="#0f172a"/>
+  <path transform="translate(8.2 8.09) scale(0.0634)"
+        d="M140 548C300 462 468 300 616 120L596 292C478 418 326 516 140 548ZM140 640C326 604 498 504 640 352L612 476C490 580 330 638 140 640ZM140 724C318 716 470 656 594 560L566 650C452 722 302 744 140 724Z"
+        fill="#dc2626"/>
+</svg>

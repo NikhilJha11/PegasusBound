@@ -1,0 +1,212 @@
+// Capacity-math unit tests. The placement loop bets a lot on
+// ComputeCapacity (it's the sort key for every shared-worker assignment),
+// so the edge cases that historically bite - zero sends, NaN from
+// divide-by-zero in the view, age younger than the ramp, perfect health
+// vs disaster health - all have explicit coverage here.
+
+package worker
+
+import (
+	"math"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+)
+
+func TestComputeCapacity_TableDriven(t *testing.T) {
+	type want struct {
+		utilization float64
+		healthMul   float64
+		ageMul      float64
+	}
+	cases := []struct {
+		name string
+		row  WorkerCapacityRow
+		want want
+	}{
+		{
+			name: "fresh_cold_smtp_worker_floors_at_one",
+			row: WorkerCapacityRow{
+				BaseCapacity:     16,
+				HealthMultiplier: 1.0,
+				AgeMultiplier:    0.0, // brand new
+				LoadScore:        0,
+			},
+			// floor(16 * 1 * 0) = 0, then floored to 1
+			want: want{utilization: 0, healthMul: 1.0, ageMul: 0.0},
+		},
+		{
+			name: "perfect_health_full_age_oauth_worker",
+			row: WorkerCapacityRow{
+				BaseCapacity:     400,
+				HealthMultiplier: 1.0,
+				AgeMultiplier:    1.0,
+				LoadScore:        100,
+			},
+			want: want{utilization: 100.0 / 400.0, healthMul: 1.0, ageMul: 1.0},
+		},
+		{
+			name: "half_health_half_age_cold_smtp",
+			row: WorkerCapacityRow{
+				BaseCapacity:     16,
+				HealthMultiplier: 0.5,
+				AgeMultiplier:    0.5,
+				LoadScore:        2,
+			},
+			want: want{utilization: 0.25, healthMul: 0.5, ageMul: 0.5},
+		},
+		{
+			name: "disaster_health_zero_age_warmup_only",
+			row: WorkerCapacityRow{
+				BaseCapacity:     25,
+				HealthMultiplier: 0.0,
+				AgeMultiplier:    0.0,
+				LoadScore:        12,
+			},
+			// 25 * 0 * 0 = 0, floored to 1; utilisation 12/1
+			want: want{utilization: 12, healthMul: 0, ageMul: 0},
+		},
+		{
+			name: "nan_health_mul_coerced_to_zero",
+			row: WorkerCapacityRow{
+				BaseCapacity:     16,
+				HealthMultiplier: math.NaN(),
+				AgeMultiplier:    1.0,
+				LoadScore:        0,
+			},
+			// NaN -> 0; floor(16 * 0 * 1) = 0, floored to 1
+			want: want{utilization: 0, healthMul: 0, ageMul: 1},
+		},
+		{
+			name: "negative_age_mul_coerced_to_zero",
+			row: WorkerCapacityRow{
+				BaseCapacity:     16,
+				HealthMultiplier: 1.0,
+				AgeMultiplier:    -0.5,
+				LoadScore:        0,
+			},
+			want: want{utilization: 0, healthMul: 1, ageMul: 0},
+		},
+		{
+			name: "over_one_health_mul_clamped",
+			row: WorkerCapacityRow{
+				BaseCapacity:     16,
+				HealthMultiplier: 1.5,
+				AgeMultiplier:    1.0,
+				LoadScore:        0,
+			},
+			want: want{utilization: 0, healthMul: 1, ageMul: 1},
+		},
+		{
+			name: "high_bounce_high_age_oauth_worker",
+			row: WorkerCapacityRow{
+				BaseCapacity:     400,
+				HealthMultiplier: 0.2, // big bounce penalty
+				AgeMultiplier:    1.0,
+				LoadScore:        50,
+			},
+			// floor(400 * 0.2 * 1) = 80
+			want: want{utilization: 50.0 / 80.0, healthMul: 0.2, ageMul: 1},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ComputeCapacity(tc.row)
+			if math.Abs(got.Utilization-tc.want.utilization) > 1e-9 {
+				t.Errorf("Utilization = %v, want %v", got.Utilization, tc.want.utilization)
+			}
+			if got.HealthMul != tc.want.healthMul {
+				t.Errorf("HealthMul = %v, want %v", got.HealthMul, tc.want.healthMul)
+			}
+			if got.AgeMul != tc.want.ageMul {
+				t.Errorf("AgeMul = %v, want %v", got.AgeMul, tc.want.ageMul)
+			}
+		})
+	}
+}
+
+func TestComputeCapacity_NewWorkerStillEligible(t *testing.T) {
+	// A brand-new worker keeps its target while the age score slows admission.
+	c := ComputeCapacity(WorkerCapacityRow{
+		WorkerID:         uuid.New(),
+		BaseCapacity:     16,
+		HealthMultiplier: 1,
+		AgeMultiplier:    0,
+		LoadScore:        0,
+	})
+	if c.Target != 16 {
+		t.Fatalf("Target = %v, want 16", c.Target)
+	}
+}
+
+func TestMailboxWeightCountsEveryMailbox(t *testing.T) {
+	cases := []struct {
+		name     string
+		provider string
+		warmup   bool
+		want     float64
+	}{
+		{"gmail_warmup", "gmail", true, 1},
+		{"smtp_imap_warmup", "smtp_imap", true, 1},
+		{"gmail_cold", "gmail", false, 1},
+		{"outlook_cold", "outlook", false, 1},
+		{"smtp_imap_cold", "smtp_imap", false, 1.0},
+		{"empty_provider_cold", "", false, 1.0},
+		{"unknown_provider_cold", "exchange-rpc", false, 1.0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := MailboxWeight(tc.provider, tc.warmup); got != tc.want {
+				t.Errorf("MailboxWeight(%q, %v) = %v, want %v", tc.provider, tc.warmup, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestComputeCapacity_HealthStatesArePassedThrough(t *testing.T) {
+	// HealthState is metadata only inside ComputeCapacity (the SQL filter
+	// already drops everything that's not healthy/watch), so verifying
+	// the math doesn't accidentally use it locks the contract.
+	for _, state := range []models.WorkerHealthState{
+		models.WorkerHealthHealthy,
+		models.WorkerHealthWatch,
+		models.WorkerHealthThrottled,
+		models.WorkerHealthQuarantined,
+		models.WorkerHealthBlocked,
+	} {
+		row := WorkerCapacityRow{
+			BaseCapacity:     16,
+			HealthMultiplier: 1,
+			AgeMultiplier:    1,
+			LoadScore:        4,
+			HealthState:      state,
+		}
+		got := ComputeCapacity(row)
+		if got.Target != 16 {
+			t.Errorf("state %s: target changed unexpectedly (%v)", state, got.Target)
+		}
+	}
+}
+
+func TestComputeCapacity_TargetIgnoresTheAgeRamp(t *testing.T) {
+	// One hour into the 72h ramp must not shrink the target.
+	c := ComputeCapacity(WorkerCapacityRow{
+		BaseCapacity: 16, HealthMultiplier: 1, AgeMultiplier: 1.0 / 72, LoadScore: 0,
+	})
+	if c.Target != 16 {
+		t.Fatalf("target: got %v want 16", c.Target)
+	}
+
+	// Health still shrinks the target: that is about the worker, not its age.
+	sick := ComputeCapacity(WorkerCapacityRow{BaseCapacity: 16, HealthMultiplier: 0.5, AgeMultiplier: 1})
+	if sick.Target != 8 {
+		t.Fatalf("target: got %v want 8", sick.Target)
+	}
+
+	// And it never reaches zero, or projected utilization divides by nothing.
+	dead := ComputeCapacity(WorkerCapacityRow{BaseCapacity: 16, HealthMultiplier: 0, AgeMultiplier: 1})
+	if dead.Target != 1 {
+		t.Fatalf("target: got %v want the floor of 1", dead.Target)
+	}
+}

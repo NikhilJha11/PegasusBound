@@ -1,0 +1,331 @@
+package repository
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/pegasusbound/pegasusbound/internal/config"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+)
+
+type NotificationRepository interface {
+	GetPreferences(ctx context.Context, userID uuid.UUID) (*models.NotificationPreferences, error)
+	UpdatePreferences(ctx context.Context, userID uuid.UUID, prefs *models.NotificationPreferences) error
+	Create(ctx context.Context, n *models.Notification) (*models.Notification, error)
+	CanNotifyAboutMessage(ctx context.Context, messageID uuid.UUID, category models.NotificationCategory) (bool, error)
+	List(ctx context.Context, userID uuid.UUID, limit int, unreadOnly bool) ([]models.Notification, error)
+	CountUnread(ctx context.Context, userID uuid.UUID) (int, error)
+	MarkRead(ctx context.Context, userID, notifID uuid.UUID) error
+	MarkAllRead(ctx context.Context, userID uuid.UUID) error
+
+	// ClaimDueEmails atomically claims every pending email row belonging to a
+	// user with at least one due row (so all their pending mail bundles into
+	// one digest) or sharing an org group with a due row (so a shared event
+	// coalesces into one email even when its recipients digest on different
+	// cadences). Safe across replicas: the claim is an UPDATE guarded by
+	// FOR UPDATE SKIP LOCKED, and stale claims from crashed flushes recover
+	// back to pending first.
+	ClaimDueEmails(ctx context.Context) ([]models.Notification, error)
+	// MarkEmailed settles claimed rows as sent. On sent rows email_due_at
+	// becomes the send time, which is what the daily budget counts.
+	MarkEmailed(ctx context.Context, ids []uuid.UUID) error
+	// SkipEmails settles claimed rows as skipped (dropped recipient, spent
+	// budget); the in-app feed remains the record.
+	SkipEmails(ctx context.Context, ids []uuid.UUID) error
+	// CountEmailedSince counts notification emails delivered to a user after
+	// since — the rolling daily budget check.
+	CountEmailedSince(ctx context.Context, userID uuid.UUID, since time.Time) (int, error)
+	// RequeueEmails returns claimed rows to pending after a send failure,
+	// with a retry delay; rows that already burned their attempts are
+	// dropped to skipped instead of retrying forever.
+	RequeueEmails(ctx context.Context, ids []uuid.UUID, delay time.Duration, maxAttempts int) error
+}
+
+type notificationRepository struct {
+	db *pgxpool.Pool
+}
+
+func NewNotificationRepository(db *pgxpool.Pool) NotificationRepository {
+	return &notificationRepository{db: db}
+}
+
+// GetPreferences returns the user's prefs merged over the defaults (stored keys
+// override defaults; absent keys keep their default — forward-compatible).
+func (r *notificationRepository) GetPreferences(ctx context.Context, userID uuid.UUID) (*models.NotificationPreferences, error) {
+	prefs := models.DefaultNotificationPreferences()
+	var raw []byte
+	err := r.db.QueryRow(ctx, `SELECT notification_preferences FROM users WHERE id = $1`, userID).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return &prefs, nil
+		}
+		return nil, err
+	}
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &prefs)
+	}
+	// Absent/zero (older blobs) takes the default; out-of-range clamps.
+	if prefs.EmailDigestMinutes == 0 {
+		prefs.EmailDigestMinutes = config.NotificationEmailWindowDefaultMinutes
+	}
+	prefs.EmailDigestMinutes = min(
+		max(prefs.EmailDigestMinutes, config.NotificationEmailWindowMinMinutes),
+		config.NotificationEmailWindowMaxMinutes)
+	return &prefs, nil
+}
+
+func (r *notificationRepository) UpdatePreferences(ctx context.Context, userID uuid.UUID, prefs *models.NotificationPreferences) error {
+	raw, err := json.Marshal(prefs)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `UPDATE users SET notification_preferences = $2 WHERE id = $1`, userID, raw)
+	return err
+}
+
+func (r *notificationRepository) Create(ctx context.Context, n *models.Notification) (*models.Notification, error) {
+	if id := SendResultEffectEventID(ctx); id != uuid.Nil {
+		n.ID = uuid.NewSHA1(id, []byte(n.UserID.String()))
+	}
+	if n.ID == uuid.Nil {
+		n.ID = uuid.New()
+	}
+	meta, _ := json.Marshal(n.Metadata)
+	if len(meta) == 0 {
+		meta = []byte("{}")
+	}
+	if n.EmailState == "" {
+		n.EmailState = "none"
+	}
+	var groupKey *string
+	if n.GroupKey != "" {
+		groupKey = &n.GroupKey
+	}
+	// A message already read is announced as read, with no email. FOR SHARE
+	// waits out a read in flight, so the read trigger cannot miss this row.
+	err := r.db.QueryRow(ctx, `
+		WITH msg AS (SELECT seen FROM unibox_emails WHERE id = $13 FOR SHARE),
+		seen AS (SELECT COALESCE((SELECT seen FROM msg), false) AS v),
+		candidate AS (SELECT $2::uuid AS user_id, $3::uuid AS organization_id, $4::text AS category,
+			$8::jsonb AS metadata, $13::uuid AS unibox_email_id)
+		INSERT INTO notifications (id, user_id, organization_id, category, title, body, link, metadata,
+			group_key, email_state, email_due_at, read_at, unibox_email_id)
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9,
+			CASE WHEN seen.v AND $10 = 'pending' THEN 'skipped' ELSE $10 END,
+			CASE WHEN seen.v AND $10 = 'pending' THEN NULL ELSE $11::timestamptz END,
+			CASE WHEN $12 OR seen.v THEN now() END,
+			$13
+		FROM seen, candidate n WHERE `+notificationReplyVisibleSQL+` AND `+notificationRecipientVisibleSQL+`
+		ON CONFLICT(id) DO UPDATE SET id=EXCLUDED.id
+		RETURNING created_at, (SELECT v FROM seen)`,
+		n.ID, n.UserID, n.OrganizationID, n.Category, n.Title, n.Body, n.Link, meta,
+		groupKey, n.EmailState, n.EmailDueAt, n.PreRead, n.UniboxEmailID).Scan(&n.CreatedAt, &n.MessageSeen)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotificationMessageAutomated
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.ConstraintName == "notifications_unibox_email_id_fkey" {
+			return nil, ErrNotificationMessageGone
+		}
+		return nil, err
+	}
+	return n, nil
+}
+
+// ErrNotificationMessageGone is a message notification whose message left the
+// unibox before the notification was written.
+var ErrNotificationMessageGone = errors.New("notification: message no longer in the unibox")
+
+var ErrNotificationMessageAutomated = errors.New("notification: message is not a reply")
+
+// Legacy thread alerts are hidden only when every verdict in that mailbox's thread is automated.
+const notificationReplyVisibleSQL = `(
+	n.category NOT IN ('inbound_reply', 'inbound_out_of_office') OR (
+		NOT EXISTS (
+			SELECT 1 FROM unibox_emails ue
+			LEFT JOIN inbox_tag_results r ON r.email_account_id = ue.email_id
+				AND r.message_id = ue.message_id AND r.status = 'complete'
+			WHERE ue.id = n.unibox_email_id AND (
+				(n.category = 'inbound_reply' AND ue.automated)
+				OR (r.kind IN ('notification', 'bounce_hard', 'bounce_soft')
+					AND r.kind_confidence >= 0.70 AND r.review_reason <> 'kind')
+			)
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM inbox_tag_results r
+			WHERE n.unibox_email_id IS NULL AND r.organization_id = n.organization_id
+				AND r.email_account_id::text = n.metadata->>'email_account_id'
+				AND r.thread_id <> '' AND r.thread_id = n.metadata->>'thread_id'
+				AND r.status = 'complete' AND r.kind_confidence >= 0.70 AND r.review_reason <> 'kind'
+				AND (r.kind IN ('notification', 'bounce_hard', 'bounce_soft')
+					OR (n.category = 'inbound_reply' AND r.automated))
+				AND NOT EXISTS (
+					SELECT 1 FROM inbox_tag_results other
+					WHERE other.organization_id = r.organization_id AND other.email_account_id = r.email_account_id
+						AND other.thread_id = r.thread_id AND NOT (
+							other.status = 'complete' AND other.kind_confidence >= 0.70 AND other.review_reason <> 'kind'
+							AND (other.kind IN ('notification', 'bounce_hard', 'bounce_soft')
+								OR (n.category = 'inbound_reply' AND other.automated))
+						)
+				)
+		)
+	)
+)`
+
+func (r *notificationRepository) CanNotifyAboutMessage(ctx context.Context, messageID uuid.UUID, category models.NotificationCategory) (bool, error) {
+	var allowed bool
+	err := r.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM unibox_emails WHERE id = $1) AND `+notificationReplyVisibleSQL+`
+		FROM (SELECT $1::uuid AS unibox_email_id, $2::text AS category,
+			NULL::uuid AS organization_id, '{}'::jsonb AS metadata) n`, messageID, category).Scan(&allowed)
+	return allowed, err
+}
+
+func (r *notificationRepository) List(ctx context.Context, userID uuid.UUID, limit int, unreadOnly bool) ([]models.Notification, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	q := `SELECT id, user_id, organization_id, category, title, body, link, metadata, read_at, created_at
+		FROM notifications n WHERE user_id = $1 AND ` + notificationReplyVisibleSQL + ` AND ` + notificationRecipientVisibleSQL
+	if unreadOnly {
+		q += ` AND read_at IS NULL`
+	}
+	q += ` ORDER BY created_at DESC LIMIT $2`
+	rows, err := r.db.Query(ctx, q, userID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.Notification{}
+	for rows.Next() {
+		var n models.Notification
+		var meta []byte
+		if err := rows.Scan(&n.ID, &n.UserID, &n.OrganizationID, &n.Category, &n.Title, &n.Body, &n.Link, &meta, &n.ReadAt, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		if len(meta) > 0 {
+			_ = json.Unmarshal(meta, &n.Metadata)
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (r *notificationRepository) CountUnread(ctx context.Context, userID uuid.UUID) (int, error) {
+	var c int
+	err := r.db.QueryRow(ctx, `SELECT COUNT(*) FROM notifications n WHERE user_id = $1 AND read_at IS NULL AND `+notificationReplyVisibleSQL+` AND `+notificationRecipientVisibleSQL, userID).Scan(&c)
+	return c, err
+}
+
+// MarkRead also cancels the row's pending email: a notification the user has
+// already seen in-app must never email them later.
+func (r *notificationRepository) MarkRead(ctx context.Context, userID, notifID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE notifications
+		SET read_at = now(),
+			email_state = CASE WHEN email_state = 'pending' THEN 'skipped' ELSE email_state END
+		WHERE id = $1 AND user_id = $2 AND read_at IS NULL`, notifID, userID)
+	return err
+}
+
+func (r *notificationRepository) MarkAllRead(ctx context.Context, userID uuid.UUID) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE notifications
+		SET read_at = now(),
+			email_state = CASE WHEN email_state = 'pending' THEN 'skipped' ELSE email_state END
+		WHERE user_id = $1 AND read_at IS NULL`, userID)
+	return err
+}
+
+// ClaimDueEmails flips claimable rows to 'sending' and returns them. While a
+// row is 'sending', email_due_at doubles as the claim timestamp so crashed
+// claims can be recovered back to pending.
+func (r *notificationRepository) ClaimDueEmails(ctx context.Context) ([]models.Notification, error) {
+	if _, err := r.db.Exec(ctx, `UPDATE notifications n SET email_state = 'skipped', email_due_at = NULL
+		WHERE email_state = 'pending' AND NOT (`+notificationReplyVisibleSQL+` AND `+notificationRecipientVisibleSQL+`)`); err != nil {
+		return nil, err
+	}
+	_, _ = r.db.Exec(ctx, `
+		UPDATE notifications SET email_state = 'pending', email_due_at = now()
+		WHERE email_state = 'sending' AND email_due_at < now() - interval '10 minutes'`)
+
+	rows, err := r.db.Query(ctx, `
+		UPDATE notifications SET email_state = 'sending', email_due_at = now()
+		WHERE id IN (
+			SELECT n.id FROM notifications n
+			WHERE n.email_state = 'pending' AND `+notificationReplyVisibleSQL+` AND `+notificationRecipientVisibleSQL+` AND (
+				n.user_id IN (
+					SELECT user_id FROM notifications
+					WHERE email_state = 'pending' AND email_due_at <= now())
+				OR (n.group_key IS NOT NULL AND n.organization_id IS NOT NULL AND (n.organization_id, n.group_key) IN (
+					SELECT organization_id, group_key FROM notifications
+					WHERE email_state = 'pending' AND email_due_at <= now()
+						AND group_key IS NOT NULL AND organization_id IS NOT NULL))
+			)
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING id, user_id, organization_id, category, title, body, link,
+			COALESCE(group_key, ''), email_attempts, created_at, unibox_email_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []models.Notification{}
+	for rows.Next() {
+		var n models.Notification
+		if err := rows.Scan(&n.ID, &n.UserID, &n.OrganizationID, &n.Category, &n.Title, &n.Body,
+			&n.Link, &n.GroupKey, &n.EmailAttempts, &n.CreatedAt, &n.UniboxEmailID); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+func (r *notificationRepository) MarkEmailed(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE notifications SET email_state = 'sent', email_due_at = now()
+		WHERE id = ANY($1) AND email_state = 'sending'`, ids)
+	return err
+}
+
+func (r *notificationRepository) SkipEmails(ctx context.Context, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE notifications SET email_state = 'skipped', email_due_at = NULL
+		WHERE id = ANY($1) AND email_state = 'sending'`, ids)
+	return err
+}
+
+func (r *notificationRepository) CountEmailedSince(ctx context.Context, userID uuid.UUID, since time.Time) (int, error) {
+	var c int
+	err := r.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM notifications
+		WHERE user_id = $1 AND email_state = 'sent' AND email_due_at >= $2`, userID, since).Scan(&c)
+	return c, err
+}
+
+func (r *notificationRepository) RequeueEmails(ctx context.Context, ids []uuid.UUID, delay time.Duration, maxAttempts int) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err := r.db.Exec(ctx, `
+		UPDATE notifications SET
+			email_attempts = email_attempts + 1,
+			email_state = CASE WHEN email_attempts + 1 >= $3 THEN 'skipped' ELSE 'pending' END,
+			email_due_at = CASE WHEN email_attempts + 1 >= $3 THEN NULL ELSE now() + make_interval(secs => $2) END
+		WHERE id = ANY($1) AND email_state = 'sending'`, ids, delay.Seconds(), maxAttempts)
+	return err
+}

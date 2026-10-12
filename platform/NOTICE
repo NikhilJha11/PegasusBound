@@ -1,0 +1,10 @@
+This product is a modified fork of Warmbly (https://github.com/warmbly/warmbly),
+Copyright Warmbly contributors, licensed under the Apache License 2.0 (see LICENSE).
+
+Modifications (2026-10-11 onward):
+- Forked from upstream commit 0dfdedb; upstream git history and remote removed.
+- Removed the self-updater service and disabled the upstream release check.
+- Rebranding and an added intelligence layer (experiments, memory, Company Brain
+  and CRM connections) are in progress.
+
+"Warmbly" is a trademark of its owners; this fork must not use it as a product name.

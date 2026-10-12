@@ -1,0 +1,429 @@
+package repository
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/pegasusbound/pegasusbound/internal/config"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/infrastructure/db"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/encrypt"
+)
+
+// emptyBodyHTML is what a step with no body carries: the dashboard composer's
+// own empty document, so opening a blank step in the editor shows an empty
+// canvas rather than nothing at all. It is NOT an empty string, which is why
+// every "does this step have a body" check goes through mailhtml.HasContent.
+const emptyBodyHTML = "<div></div>"
+
+type SequenceRepository interface {
+	Create(ctx context.Context, orgID, campaignID string) (*models.Sequence, *errx.Error)
+	Get(ctx context.Context, orgID, campaignID string) ([]models.Sequence, *errx.Error)
+	Update(ctx context.Context, orgID, campaignID, sequenceID string, data *models.UpdateSequence) (*models.Sequence, *errx.Error)
+	// UpdateLayout merges only x/y for the given steps under a campaign, in one
+	// statement, without bumping updated_at — so a drag never reads as a content
+	// change. Cosmetic and unaudited.
+	UpdateLayout(ctx context.Context, orgID, campaignID string, positions []models.SequencePosition) *errx.Error
+	Delete(ctx context.Context, orgID, campaignID, sequenceID string) *errx.Error
+}
+
+type sequenceRepository struct {
+	DB      *db.DB
+	Encrypt *encrypt.Encrypter
+}
+
+func NewSequenceRepostory(db *db.DB) SequenceRepository {
+	return &sequenceRepository{
+		DB: db,
+	}
+}
+
+var SequenceSelections []string = []string{
+	"id",
+	"name",
+	"subject",
+	"body_plain",
+	"body_html",
+	"body_sync",
+	"body_code",
+	"wait_after",
+	"position",
+	"thread_reply",
+	"x",
+	"y",
+	"conditions",
+	"kind",
+	"action",
+	"updated_at",
+	"created_at",
+}
+
+func getSequenceSelect(join bool) string {
+	sel := SequenceSelections
+	if join {
+		for i := range sel {
+			sel[i] = "s." + sel[i]
+		}
+	}
+	return strings.Join(sel, ", ")
+}
+
+var (
+	SequenceSelect     = getSequenceSelect(false)
+	SequenceSelectJoin = getSequenceSelect(true)
+)
+
+func GetSequence(row db.Scannable, seq *models.Sequence) error {
+	return row.Scan(
+		&seq.ID, &seq.Name, &seq.Subject, &seq.BodyPlain, &seq.BodyHTML, &seq.BodySync,
+		&seq.BodyCode, &seq.WaitAfter, &seq.Position, &seq.ThreadReply, &seq.X, &seq.Y, &seq.Conditions, &seq.Kind, &seq.Action,
+		&seq.UpdatedAt, &seq.CreatedAt,
+	)
+}
+
+func (r *sequenceRepository) Get(ctx context.Context, orgID string, campaignID string) ([]models.Sequence, *errx.Error) {
+	query := fmt.Sprintf(
+		`SELECT %s
+		 FROM sequences s
+		 JOIN campaigns c ON s.campaign_id = c.id
+		 WHERE s.campaign_id = $1
+		  AND c.organization_id = $2
+		 ORDER BY s.position ASC, s.created_at ASC`,
+		SequenceSelectJoin,
+	)
+
+	params := []any{
+		campaignID,
+		orgID,
+	}
+
+	rows, err := r.DB.Query(
+		ctx,
+		query,
+		params...,
+	)
+	if err != nil {
+		db.CaptureError(err, query, params, "query")
+		return nil, errx.InternalError()
+	}
+
+	defer rows.Close()
+
+	var sequences []models.Sequence = make([]models.Sequence, 0)
+
+	for rows.Next() {
+		var seq models.Sequence
+		err = GetSequence(rows, &seq)
+		if err != nil {
+			db.CaptureError(err, "", nil, "scan")
+			return nil, errx.InternalError()
+		}
+		sequences = append(sequences, seq)
+	}
+
+	if err := rows.Err(); err != nil {
+		db.CaptureError(err, query, params, "rows")
+		return nil, errx.InternalError()
+	}
+	return sequences, nil
+}
+
+func (r *sequenceRepository) Create(ctx context.Context, orgID string, campaignID string) (*models.Sequence, *errx.Error) {
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		db.CaptureError(err, "", nil, "begin")
+		return nil, errx.InternalError()
+	}
+	defer tx.Rollback(ctx)
+
+	// FOR UPDATE serialises step creation per campaign, so two concurrent
+	// inserts cannot take the same position.
+	query := `
+		SELECT id
+		FROM campaigns WHERE id = $1 AND organization_id = $2
+		FOR UPDATE
+	`
+
+	params := []any{
+		campaignID,
+		orgID,
+	}
+	var locked uuid.UUID
+	err = tx.QueryRow(
+		ctx,
+		query,
+		params...,
+	).Scan(&locked)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errx.ErrNotFound
+		}
+		db.CaptureError(err, query, params, "queryrow")
+		return nil, errx.InternalError()
+	}
+
+	// Get the next position for this campaign's sequences
+	var nextPos int
+	_ = tx.QueryRow(ctx, `SELECT COALESCE(MAX(position), 0) + 1 FROM sequences WHERE campaign_id = $1`, campaignID).Scan(&nextPos)
+
+	// organization_id is inherited from the campaign: a step that lost it is
+	// invisible to every org-scoped read and skips org-scoped send gates.
+	query = fmt.Sprintf(
+		`INSERT INTO sequences (
+			campaign_id, organization_id, name, subject, body_plain, body_html, position
+		 ) VALUES (
+			$1, $2, $3, $4, $5, $6, $7
+		 ) RETURNING %s`, SequenceSelect,
+	)
+
+	params = []any{
+		campaignID,
+		orgID,
+		config.SequenceDefaultName,
+		"",
+		"",
+		emptyBodyHTML,
+		nextPos,
+	}
+
+	row := tx.QueryRow(
+		ctx,
+		query,
+		params...,
+	)
+	var seq models.Sequence
+	err = GetSequence(row, &seq)
+	if err != nil {
+		db.CaptureError(err, query, params, "scan")
+		return nil, errx.InternalError()
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		db.CaptureError(err, "", nil, "commit")
+		return nil, errx.InternalError()
+	}
+
+	return &seq, nil
+}
+
+func (r *sequenceRepository) Update(ctx context.Context, orgID, campaignID, sequenceID string, data *models.UpdateSequence) (*models.Sequence, *errx.Error) {
+	setClauses := []string{}
+	args := []any{orgID, campaignID, sequenceID}
+	argPos := 4
+
+	if data.Name != nil {
+		if len(*data.Name) > 50 {
+			return nil, errx.ErrSequenceName
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "name", argPos))
+		args = append(args, *data.Name)
+		argPos++
+	}
+	if data.Subject != nil {
+		if len(*data.Subject) > 100 {
+			return nil, errx.ErrSequenceSubject
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "subject", argPos))
+		args = append(args, *data.Subject)
+		argPos++
+	}
+	if data.BodyPlain != nil {
+		if len(*data.BodyPlain) > config.SequenceBodyLimit {
+			return nil, errx.ErrSequenceBody
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "body_plain", argPos))
+		args = append(args, *data.BodyPlain)
+		argPos++
+	}
+	if data.BodyHTML != nil {
+		if len(*data.BodyHTML) > config.SequenceBodyLimit {
+			return nil, errx.ErrSequenceBody
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "body_html", argPos))
+		args = append(args, *data.BodyHTML)
+		argPos++
+	}
+	if data.BodySync != nil {
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "body_sync", argPos))
+		args = append(args, *data.BodySync)
+		argPos++
+	}
+	if data.BodyCode != nil {
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "body_code", argPos))
+		args = append(args, *data.BodyCode)
+		argPos++
+	}
+	if data.WaitAfter != nil {
+		if *data.WaitAfter < 0 || *data.WaitAfter > config.SequenceWaitAfterMax {
+			return nil, errx.ErrSequenceWaitAfter
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "wait_after", argPos))
+		args = append(args, *data.WaitAfter)
+		argPos++
+	}
+	if data.ThreadReply != nil {
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "thread_reply", argPos))
+		args = append(args, *data.ThreadReply)
+		argPos++
+	}
+	if data.Conditions != nil {
+		// Validate shape (operators/fields/values) before persisting. Cross-step
+		// validation (targets-in-campaign + no cycles) happens in the service
+		// layer where the full sequence set is available.
+		if verr := validateBranchConditions(data.Conditions); verr != nil {
+			return nil, verr
+		}
+		raw, merr := json.Marshal(data.Conditions)
+		if merr != nil {
+			db.CaptureError(merr, "", nil, "marshal_conditions")
+			return nil, errx.InternalError()
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "conditions", argPos))
+		args = append(args, raw)
+		argPos++
+	}
+	if data.Kind != nil {
+		if *data.Kind != "email" && *data.Kind != "action" && *data.Kind != "wait" {
+			return nil, errx.ErrSequenceKind
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "kind", argPos))
+		args = append(args, *data.Kind)
+		argPos++
+	}
+	if data.Action != nil {
+		if verr := validateActionConfig(data.Action); verr != nil {
+			return nil, verr
+		}
+		raw, merr := json.Marshal(data.Action)
+		if merr != nil {
+			db.CaptureError(merr, "", nil, "marshal_action")
+			return nil, errx.InternalError()
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", "action", argPos))
+		args = append(args, raw)
+		argPos++
+	}
+
+	if argPos == 4 {
+		return nil, errx.ErrNotEnough
+	}
+
+	var seq models.Sequence
+	query := fmt.Sprintf(
+		`UPDATE sequences s
+		 SET %s
+		 FROM campaigns c
+		 WHERE c.organization_id = $1
+		  AND c.id = $2
+		  AND s.campaign_id = c.id
+		  AND s.id = $3
+		 RETURNING %s`,
+		strings.Join(setClauses, ", "),
+		SequenceSelectJoin,
+	)
+
+	row := r.DB.QueryRow(
+		ctx,
+		query,
+		args...,
+	)
+	err := GetSequence(row, &seq)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errx.ErrNotFound
+		}
+		db.CaptureError(err, query, args, "queryrow")
+		return nil, errx.InternalError()
+	}
+
+	return &seq, nil
+}
+
+// UpdateLayout changes only workspace-scoped step coordinates; unknown ids are ignored.
+func (r *sequenceRepository) UpdateLayout(ctx context.Context, orgID, campaignID string, positions []models.SequencePosition) *errx.Error {
+	ids := make([]uuid.UUID, 0, len(positions))
+	xs := make([]float64, 0, len(positions))
+	ys := make([]float64, 0, len(positions))
+	for _, p := range positions {
+		id, err := uuid.Parse(p.ID)
+		if err != nil {
+			continue
+		}
+		ids = append(ids, id)
+		xs = append(xs, p.X)
+		ys = append(ys, p.Y)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	query := `
+		UPDATE sequences AS s
+		SET x = v.x, y = v.y
+		FROM unnest($3::uuid[], $4::float8[], $5::float8[]) AS v(id, x, y)
+		WHERE s.id = v.id
+		  AND s.campaign_id = $2
+		  AND EXISTS (SELECT 1 FROM campaigns c WHERE c.id = $2 AND c.organization_id = $1)`
+	args := []any{orgID, campaignID, ids, xs, ys}
+	if _, err := r.DB.Exec(ctx, query, args...); err != nil {
+		db.CaptureError(err, query, args, "exec")
+		return errx.InternalError()
+	}
+	return nil
+}
+
+func (r *sequenceRepository) Delete(ctx context.Context, orgID, campaignID, sequenceID string) *errx.Error {
+	query := `
+		DELETE FROM sequences s
+		USING campaigns c
+		WHERE c.organization_id = $1
+		 AND c.id = $2
+		 AND s.campaign_id = c.id
+		 AND s.id = $3
+	`
+
+	params := []any{
+		orgID,
+		campaignID,
+		sequenceID,
+	}
+
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		db.CaptureError(err, "", nil, "begin")
+		return errx.InternalError()
+	}
+	defer tx.Rollback(ctx)
+
+	cmd, err := tx.Exec(
+		ctx,
+		query,
+		params...,
+	)
+	if err != nil {
+		db.CaptureError(err, query, params, "exec")
+		return errx.InternalError()
+	}
+	if cmd.RowsAffected() == 0 {
+		return errx.ErrNotFound
+	}
+
+	if stepID, err := uuid.Parse(sequenceID); err == nil {
+		if err := ResolveAdvisorFindingsFor(ctx, tx, orgID, []uuid.UUID{stepID}); err != nil {
+			db.CaptureError(err, "", nil, "exec")
+			return errx.InternalError()
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		db.CaptureError(err, "", nil, "commit")
+		return errx.InternalError()
+	}
+	return nil
+}

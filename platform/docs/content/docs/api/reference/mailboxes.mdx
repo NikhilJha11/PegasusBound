@@ -1,0 +1,847 @@
+---
+title: Mailboxes
+description: Connect, configure, warm up, verify, and send from sender mailboxes (email accounts).
+---
+
+Mailboxes are the sender accounts Pegasusbound sends campaign and warmup mail from. These endpoints live under `/emails` and let you list and inspect connected mailboxes, update their sending and warmup settings, point a custom tracking domain at a mailbox, drive the warmup lifecycle, check authentication and ban status, verify addresses before sending, and send a one-off message from a specific mailbox.
+
+Most read routes require the **Read emails** scope and write routes require the **Write emails** scope. The mailbox connection (onboarding) routes are session only because they write user-encrypted refresh tokens through the SPA popup flow, and the send route requires the **Send campaigns** scope because it transmits real mail. When an API key is scoped to specific mailboxes, every `/:id` route is additionally gated to keys allowed to act on that mailbox.
+
+## List mailboxes
+
+`GET /emails`
+
+Returns the organization's connected mailboxes, newest first, with cursor pagination.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `q` | query | string | Optional free-text search over mailbox address and name. |
+| `tag` | query | string (UUID) | Optional tag id to filter by. Must be a valid UUID. |
+| `cursor` | query | string (UUID) | Opaque cursor from a previous `pagination.next_cursor`. |
+| `limit` | query | integer | Page size. Defaults to `50`. Invalid limits return `400`. |
+
+### Response
+
+A `data` array of mailbox objects plus a `pagination` envelope.
+
+```json
+{
+  "data": [
+    {
+      "id": "0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
+      "user_id": "a1b2c3d4-...",
+      "organization_id": "f9e8d7c6-...",
+      "worker_id": "7b6a5c4d-...",
+      "email": "sales@acme.com",
+      "name": "Acme Sales",
+      "signature_plain": "",
+      "signature_html": "",
+      "signature_sync": false,
+      "signature_code": false,
+      "send_as_email": "",
+      "provider": "gmail",
+      "mail_host": "google_workspace",
+      "auth_method": "oauth",
+      "avatar_url": "",
+      "status": "active",
+      "last_synced_at": "2026-06-11T09:14:00Z",
+      "last_id": 184213,
+      "campaign_limit": 50,
+      "min_wait_time": 600,
+      "reply_to": "",
+      "tracking_domain": "t.acme.com",
+      "tracking_domain_verified": true,
+      "tracking_domain_verified_at": "2026-06-01T12:00:00Z",
+      "auth_state": "passing",
+      "auth_spf": true,
+      "auth_dkim": true,
+      "auth_dmarc": true,
+      "auth_dmarc_policy": "quarantine",
+      "auth_reason": "SPF, DKIM and DMARC all present (DMARC policy: quarantine)",
+      "auth_checked_at": "2026-06-11T03:00:00Z",
+      "auth_failing_since": null,
+      "warmup": "2026-05-20T00:00:00Z",
+      "warmup_paused_at": null,
+      "warmup_base": 10,
+      "warmup_max": 40,
+      "warmup_increase": 1,
+      "warmup_reply_rate": 30,
+      "warmup_tag": "",
+      "warmup_pool_type": "premium",
+      "warmup_start_time": "09:00",
+      "warmup_end_time": "17:00",
+      "warmup_days": 5,
+      "timezone": "America/New_York",
+      "tags": ["outbound"],
+      "created_at": "2026-05-19T18:00:00Z",
+      "updated_at": "2026-06-11T09:14:00Z"
+    }
+  ],
+  "pagination": {
+    "total": 12,
+    "next_cursor": "c1_b3BhcXVlLWN1cnNvcg",
+    "has_more": true
+  }
+}
+```
+
+`provider` is one of `gmail`, `outlook`, or `smtp_imap`, and says how Pegasusbound talks to the mailbox. `mail_host` says who hosts it, whatever the transport: one of `google_workspace`, `gmail`, `microsoft365`, `outlook`, `zoho`, `yahoo`, `aol`, `icloud`, `fastmail`, `godaddy`, `namecheap`, `ionos`, `hostinger`, `ovh`, `migadu`, `purelymail`, `rackspace`, `yandex`, `gmx`, `proton`, or `other`. `auth_method` is how it signs in: `password`, `app_password`, `oauth`, or `delegated`. A Google Workspace mailbox on an app password is `provider` `smtp_imap`, `mail_host` `google_workspace`, `auth_method` `app_password`. Either may be an empty string until known; a mailbox whose host is not recorded yet is classified in the background from its domain's DNS. `avatar_url` is the mailbox's own profile photo, read when a Microsoft mailbox connects or reconnects, or through an administrator grant or from the inbox vendor it was imported from, which are re-checked weekly; it is an empty string when none can be read, which includes Google mailboxes signed in on their own and every SMTP mailbox. `status` is one of `active`, `inactive`, or `revoked`. `warmup` is the warmup anchor timestamp (null when warmup has never been enabled); a non-null `warmup_paused_at` means warmup is enabled but paused. `auth_state` is the sending domain's authentication state, one of `passing` (SPF and DMARC present), `failing` (SPF or DMARC missing), or `unknown` (not checked yet, the DNS lookup could not complete, or the domain is special-use and cannot resolve). It is refreshed by a background check. `auth_dkim` is positive-only and never gates: `true` means a DKIM key was found at a probed selector, `false` means none answered, which is unverified rather than missing because selectors are not discoverable from DNS. `auth_failing_since` is when the domain entered `failing` and is null otherwise; a domain that stays `failing` past the instance grace period stops cold sending and warmup from every mailbox on it, so this is the clock that decides. See [domain authentication](/guides/deliverability/#domain-authentication). `total` and `next_cursor` may be null when not applicable.
+
+## Get a mailbox
+
+`GET /emails/:id`
+
+Returns a single mailbox by id.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox (email account) id. |
+
+### Response
+
+A bare mailbox object, same shape as one element of the list `data` array.
+
+```json
+{
+  "id": "0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
+  "email": "sales@acme.com",
+  "name": "Acme Sales",
+  "provider": "gmail",
+  "status": "active",
+  "campaign_limit": 50,
+  "min_wait_time": 600,
+  "warmup": "2026-05-20T00:00:00Z",
+  "warmup_paused_at": null,
+  "warmup_pool_type": "premium",
+  "tracking_domain": "t.acme.com",
+  "tracking_domain_verified": true,
+  "auth_state": "passing",
+  "auth_checked_at": "2026-06-11T03:00:00Z",
+  "auth_failing_since": null,
+  "tags": ["outbound"],
+  "created_at": "2026-05-19T18:00:00Z",
+  "updated_at": "2026-06-11T09:14:00Z"
+}
+```
+
+## Update a mailbox
+
+`PATCH /emails/:id`
+
+Updates mailbox settings: display name, signature, status, sending caps, reply-to, warmup configuration, and tags. All fields are optional; only present fields are applied.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Request body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | no | Display name on outgoing mail. |
+| `signature_plain` | string | no | Plain-text signature. |
+| `signature_html` | string | no | HTML signature. |
+| `signature_sync` | boolean | no | Append the signature to outgoing mail. Unrelated to where the signature came from. |
+| `signature_code` | boolean | no | Treat the HTML signature as raw code. |
+| `send_as_email` | string | no | A verified provider alias this mailbox sends from. Must be one the provider reported as verified (see [Get the sending identity](#get-the-sending-identity)) or the mailbox's own address; anything else returns `mailbox_send_as_unknown`. Send an empty string to go back to the mailbox address. Gmail only. |
+| `status` | string | no | `active`, `inactive`, or `revoked`. |
+| `campaign_limit` | integer | no | Cold-email safety ceiling across all campaigns, `0` to `5000`, default `50`. Separate from the configurable variable sending-plan target, enabled for newly connected mailboxes with a starting range of `28` to `32` per local working day. The lower limit wins; existing mailbox profiles are unchanged. |
+| `min_wait_time` | integer | no | Minimum seconds between sends. |
+| `reply_to` | string | no | Reply-to address. |
+| `timezone` | string | no | The mailbox's own IANA zone, such as `America/Denver`. Its warmup hours, sending behaviour and business-hours window are evaluated in this zone. Send an empty string to clear it: the mailbox then reads its hours in the workspace timezone (UTC when none is set) and, on campaigns, only the campaign's own window applies. |
+| `warmup` | boolean | no | Enable or disable warmup. |
+| `warmup_base` | integer | no | Warmup starting volume per day. |
+| `warmup_max` | integer | no | Warmup daily ceiling. |
+| `warmup_increase` | integer | no | Per-day warmup ramp increment. |
+| `warmup_reply_rate` | integer | no | Percentage of warmup threads to reply to. |
+| `warmup_tag` | string | no | Tag applied to warmup threads. |
+| `warmup_start_time` | string | no | Daily warmup window start, `HH:MM`. |
+| `warmup_end_time` | string | no | Daily warmup window end, `HH:MM`. |
+| `warmup_days` | integer | no | Number of active warmup days per week. |
+| `warmup_placement` | string | no | Where warmup mail is filed in the mailbox itself: `folder` (default), `inbox`, or `archive`. See [Warmup](/guides/warmup/#in-your-mail-client). |
+| `warmup_folder` | string | no | Folder (Gmail label) warmup mail is filed into when `warmup_placement` is `folder`. Empty string means the instance default, `Pegasusbound`. No folder separators or control characters; 64 characters max. |
+| `warmup_retention_days` | integer | no | How many days warmup mail stays in this mailbox before Pegasusbound deletes it, wherever `warmup_placement` keeps it: `3` to `3650`, or `0` to follow the instance setting (30 days unless the operator changed it). |
+| `tags` | string[] | no | Tag ids assigned to the mailbox. |
+
+```json
+{
+  "name": "Acme Sales (US)",
+  "status": "active",
+  "campaign_limit": 40,
+  "min_wait_time": 720,
+  "reply_to": "replies@acme.com",
+  "warmup_max": 35,
+  "tags": ["outbound", "us"]
+}
+```
+
+### Response
+
+The updated mailbox object (same shape as Get a mailbox).
+
+## Get the sending identity
+
+`GET /emails/:id/identity`
+
+Reports which addresses the mailbox's provider will let it send as, which one it currently uses, and where its stored signature came from. Stored state only: the provider is not contacted, so this is cheap to call.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+```json
+{
+  "supported": true,
+  "provider": "gmail",
+  "mailbox_email": "sales@acme.com",
+  "send_as_email": "hello@acme.com",
+  "identities": [
+    { "email": "sales@acme.com", "name": "Acme Sales", "is_primary": true, "is_default": true, "verified": true },
+    { "email": "hello@acme.com", "name": "Acme", "is_primary": false, "is_default": false, "verified": true }
+  ],
+  "synced_at": "2026-09-13T11:02:00Z",
+  "signature_source": "provider",
+  "signature_imported_at": "2026-09-13T11:02:00Z"
+}
+```
+
+`supported` is `false` for Outlook and SMTP/IMAP mailboxes, which publish no send-as list; `identities` is then empty and the refresh below returns `mailbox_send_as_unsupported`. `send_as_email` is empty when the mailbox sends as its own address, which is the default. `verified` is `false` for an alias the provider has not finished verifying: it is listed, but setting `send_as_email` to it is refused. `signature_source` is `provider` when the stored signature was imported and `manual` once it is edited in Pegasusbound.
+
+## Refresh the sending identity
+
+`POST /emails/:id/identity/refresh`
+
+Re-reads the send-as addresses from the provider and stores them, optionally importing the provider's signature at the same time. This is the only call that contacts the provider, and it does so through the worker running the mailbox rather than from the API itself, so the provider keeps seeing this mailbox from the one address it always has.
+
+A send-as choice the provider no longer verifies is cleared by the same call, so a removed alias stops being used instead of failing every send.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Request body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `import_signature` | boolean | no | Also replace the mailbox's stored signature with the one configured at the provider, for whichever identity the mailbox sends as. Defaults to `false`. An empty signature at the provider changes nothing. |
+
+```json
+{ "import_signature": true }
+```
+
+The body may be omitted entirely, which refreshes the addresses only.
+
+Takes no `Idempotency-Key`: the call reads the provider's current state and stores exactly that, so repeating it converges on the same result.
+
+### Response
+
+The refreshed sending identity, same shape as Get the sending identity.
+
+Gmail only. Every other provider returns `400` with `mailbox_send_as_unsupported`, and a signature past the stored maximum returns `400` with `mailbox_signature_too_large` without storing anything.
+
+A mailbox that is not currently running on a worker returns `503` with `mailbox_identity_unavailable`: there is no machine to make the call, nothing was changed, and the next attempt is the fix. Mailboxes are placed within moments of connecting, so this is a mid-migration or just-restarted condition rather than a lasting one.
+
+## Get the tracking domain
+
+`GET /emails/:id/track`
+
+Returns the mailbox's stored tracking-domain state plus the `CNAME` value this install expects. Read-only: it does no DNS work, so it is safe to call on every render. Use Verify the tracking domain to re-resolve.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+```json
+{
+  "tracking_domain": "t.acme.com",
+  "tracking_domain_verified": false,
+  "tracking_domain_verified_at": null,
+  "cname_target": "t.pegasusbound.com",
+  "status": "pending",
+  "message": "t.acme.com has not verified yet. Check it again to see what DNS returns for it right now.",
+  "tracking_host_unresolvable": false
+}
+```
+
+## Update the tracking domain
+
+`PATCH /emails/:id/track`
+
+Sets or clears the custom open/click tracking domain for a mailbox, then resolves it once and records the verdict. The record has to point at this install's tracking host, which is returned as `cname_target` (it is the deployment's `TRACKING_DOMAIN`, not a fixed value). DNS can lag a freshly added record, so a miss is reported as unverified with a reason, not an error. Send an empty domain to clear the custom domain and fall back to the shared host.
+
+The value is normalized before it is stored: a scheme, path, trailing dot or stray case is stripped, so `https://T.Acme.com/` is stored as `t.acme.com`. Anything that is still not a bare hostname (a raw IP, a host with a port, `localhost`, a single label) is rejected with `400`.
+
+Only a verified domain is used at send time. While it is unverified, opens and clicks go through the shared tracking host, so sending is never blocked by a pending record.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+| `domain` | query | string | The custom tracking subdomain (for example `t.acme.com`). Empty clears it. |
+
+### Response
+
+```json
+{
+  "tracking_domain": "t.acme.com",
+  "tracking_domain_verified": true,
+  "tracking_domain_verified_at": "2026-06-11T09:20:00Z",
+  "cname_target": "t.pegasusbound.com",
+  "status": "verified",
+  "message": "t.acme.com points at t.pegasusbound.com.",
+  "observed": "t.pegasusbound.com",
+  "tracking_host_unresolvable": false
+}
+```
+
+`tracking_domain_verified_at` is null until the record resolves to the tracking host.
+
+| Field | Description |
+|-------|-------------|
+| `cname_target` | The value to put in the `CNAME`. Empty when the deployment has no tracking host, in which case nothing can verify. |
+| `status` | `verified`, `unset`, `no_target`, `not_found`, `wrong_target`, `lookup_error`, or `pending` for stored state that has not been re-resolved. |
+| `message` | One sentence explaining `status`, safe to show to an end user. |
+| `observed` | What DNS returned, when it differs from the target. |
+| `tracking_host_unresolvable` | True when the record is correct but this install's own tracking host has no DNS record, so nothing will be recorded. An operator problem, not a caller one. |
+
+A domain whose provider flattens `CNAME` records verifies on matching addresses instead, and `status` is still `verified`.
+
+## Verify the tracking domain
+
+`POST /emails/:id/track/verify`
+
+Re-resolves the mailbox's saved tracking domain and records the verdict, without changing the domain itself. This is how a record that has finished propagating starts being used, rather than waiting to be saved again.
+
+The backend also re-resolves every custom tracking domain hourly (each one at most daily), so this endpoint is the impatient path rather than the only one. A transient resolver failure never revokes a verified domain.
+
+Write-scoped on purpose: recording the verdict is what routes real links through the custom host.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+Same shape as Update the tracking domain.
+
+## Start warmup
+
+`POST /emails/:id/warmup/start`
+
+Enables warmup for a mailbox. When resuming from a paused state it preserves ramp progress and seeds the warmup task chain immediately rather than waiting for the next reconciler pass. A [placement seed inbox](/api/reference/placement/#mark-a-seed-inbox) never warms up, so starting or resuming warmup on one answers `409` with `mailbox_is_seed`.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The updated mailbox object, reflecting the new warmup state.
+
+```json
+{
+  "id": "0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
+  "email": "sales@acme.com",
+  "warmup": "2026-06-11T09:25:00Z",
+  "warmup_paused_at": null,
+  "warmup_pool_type": "premium"
+}
+```
+
+## Pause warmup
+
+`POST /emails/:id/warmup/pause`
+
+Pauses warmup without losing ramp progress. A later start continues from the same daily volume.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The updated mailbox object. A paused mailbox has a non-null `warmup_paused_at`.
+
+```json
+{
+  "id": "0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
+  "warmup": "2026-06-11T09:25:00Z",
+  "warmup_paused_at": "2026-06-11T11:00:00Z"
+}
+```
+
+## Resume warmup
+
+`POST /emails/:id/warmup/resume`
+
+Resumes a paused warmup, shifting the ramp anchor forward so progress continues where it left off, and re-seeds the warmup task chain immediately.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The updated mailbox object, with `warmup_paused_at` cleared.
+
+## Stop warmup
+
+`POST /emails/:id/warmup/stop`
+
+Disables warmup entirely and clears ramp progress. Distinct from pause: a later start begins a fresh ramp.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The updated mailbox object, with warmup disabled.
+
+```json
+{
+  "id": "0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
+  "warmup": null,
+  "warmup_paused_at": null
+}
+```
+
+## Hold a mailbox
+
+`POST /emails/:id/hold`
+
+Takes the mailbox out of campaign sending until it is released. Warmup keeps running. This is the owner's decision: the automatic rest and resume logic never touches a held mailbox. Bodyless and idempotent, so it takes no `Idempotency-Key`; holding an already held mailbox returns its current state.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The mailbox's cold-rotation state.
+
+```json
+{
+  "state": "reserve",
+  "since": "2026-08-28T10:15:00Z",
+  "reason": "held back by its owner"
+}
+```
+
+## Release a mailbox
+
+`POST /emails/:id/release`
+
+Puts a held or resting mailbox back into automatic management. It lands in `active`, or straight in `resting` when warmup is running and still reports the mailbox as quarantined or blocked, so a release never sends cold mail from a mailbox the pool has taken out. A `watch` or `throttled` mailbox lands in `active` and sends at its dampened volume. A resting mailbox with no warmup running has no signal to wait for and lands in `active`. Bodyless and idempotent; releasing a mailbox that is already active returns its current state.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+The mailbox's cold-rotation state.
+
+```json
+{
+  "state": "active",
+  "since": "2026-08-28T11:40:00Z",
+  "reason": "released by its owner"
+}
+```
+
+## Check domain authentication
+
+`GET /emails/:id/auth-check`
+
+Validates SPF, DKIM, and DMARC for the mailbox's sending domain on demand. Authentication alignment is a hard bulk-sender requirement and a common silent deliverability failure, so this confirms the domain is configured correctly without leaving the dashboard.
+
+Read-only: it reports what DNS says right now and leaves the mailbox's stored `auth_state` alone.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. The domain is derived from the mailbox address. |
+
+### Response
+
+```json
+{
+  "domain": "mail.acme.com",
+  "spf_found": true,
+  "spf_record": "v=spf1 include:_spf.google.com ~all",
+  "dkim_found": true,
+  "dkim_status": "found",
+  "dkim_selectors": ["google"],
+  "dmarc_found": true,
+  "dmarc_policy": "quarantine",
+  "dmarc_domain": "acme.com",
+  "dmarc_inherited": true,
+  "reserved": false,
+  "lookup_error": false,
+  "all_aligned": true,
+  "summary": "SPF, DKIM and DMARC all present (DMARC policy: quarantine), inherited from acme.com"
+}
+```
+
+`spf_record`, `dkim_selectors`, `dmarc_policy`, and `dmarc_domain` are omitted when the corresponding record is not found.
+
+`dkim_status` is `found` or `undetermined`, and it is the field to read for DKIM. `dkim_found` is positive-only: a DKIM key sits at a selector its owner chose and DNS cannot be asked to list the selectors under a domain, so `false` means no key answered at the selectors probed, which is not evidence the domain has none. Do not present it as a missing record. The check derives candidate selectors from the domain's own SPF and MX records, which name the provider handling its mail, on top of a default set; a provider that mints a random per-account selector stays `undetermined` however well the domain is configured. DKIM never affects `auth_state`.
+
+`dmarc_inherited` is `true` when the sending domain has no DMARC record of its own and is covered by its organizational domain's policy, which is how a dedicated sending subdomain normally works; `dmarc_domain` then names the domain the record was read from, and `dmarc_policy` reports its `sp=` value when it publishes one. SPF never inherits, so it must be published on the exact sending domain.
+
+A record the instance's resolver does not return is confirmed with the domain's own authoritative nameservers before `spf_found` or `dmarc_found` reads `false`, so a stale cached miss or a resolver that drops `TXT` answers does not report a configured domain as missing.
+
+`lookup_error` is `true` when DNS could not answer, from the instance's resolver or the domain's nameservers, and `reserved` is `true` for a special-use domain (`.test`, `.invalid`, `.localhost`, `.example`, `.local`) that cannot resolve by definition. Either one means the domain is unevaluatable, so it is recorded as `unknown` rather than `failing`.
+
+## Record a domain authentication check
+
+`POST /emails/:id/auth-check`
+
+Runs the same check and **records** the verdict against every active mailbox on that sending domain, because authentication is a property of the domain rather than of one mailbox.
+
+This is how a mailbox blocked by the send gate is unblocked: fix the DNS records at your registrar, call this, and cold sending and warmup resume on the next scheduled send instead of waiting for the daily background check.
+
+Recording the verdict is what lifts the gate, so this needs the write scope even though it reads nothing but public DNS.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. The domain is derived from the mailbox address. |
+
+No request body. No `Idempotency-Key` is needed: the result is derived entirely from public DNS with no caller input, so repeating the call converges on the same stored state.
+
+### Response
+
+Identical to `GET /emails/:id/auth-check`.
+
+## Verify an email address
+
+`POST /emails/verify`
+
+Verifies a single email address on demand (syntax, then MX, then an SMTP RCPT probe, then catch-all detection). This is pre-send verification: confirm an address is deliverable before a worker ever sends to it, instead of learning from a hard bounce. The probe runs from the backend (a non-sending IP), never from worker IPs.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+The address may be supplied in the JSON body or as the `email` query param; the body takes precedence.
+
+### Request body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `email` | string | no | The address to verify. Required if the `email` query param is not set. |
+
+```json
+{
+  "email": "jane.doe@example.com"
+}
+```
+
+### Response
+
+```json
+{
+  "email": "jane.doe@example.com",
+  "status": "valid",
+  "reason": "accepted by recipient mail server",
+  "is_catch_all": false,
+  "has_mx": true,
+  "checked_at": "2026-06-11T09:30:00Z"
+}
+```
+
+`status` is one of `valid`, `risky`, `invalid`, or `unknown`. A missing or empty address returns a `400` error envelope.
+
+## Get warmup ban status
+
+`GET /emails/:id/warmup/ban-status`
+
+Returns whether a mailbox of the caller's workspace is blocked from the shared warmup pool, why, and whether it can be appealed. Powers the dashboard ban banner. A mailbox outside the workspace answers `404`.
+
+Auth: **Scope** `READ_EMAILS` · **Org permission** `view_campaigns`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+```json
+{
+  "email_account_id": "0c0f1a2b-3c4d-5e6f-7a8b-9c0d1e2f3a4b",
+  "blocked": true,
+  "health_state": "quarantined",
+  "reason": "complaint rate 0.15% exceeded quarantine threshold",
+  "blocked_at": "2026-06-09T14:00:00Z",
+  "blocked_until": "2026-06-16T14:00:00Z",
+  "can_appeal": true,
+  "pending_appeal": false
+}
+```
+
+`reason`, `blocked_at`, and `blocked_until` are omitted when the mailbox is not blocked. `health_state` reflects the mailbox's rolling warmup health (for example `healthy`, `watch`, `throttled`, `quarantined`, or `blocked`).
+
+## Submit a warmup appeal
+
+`POST /emails/:id/warmup/appeal`
+
+Appeals a warmup ban on a mailbox of the caller's workspace, with a reason. Any member with `manage_emails` can appeal, not only the member who connected the mailbox. A mailbox outside the workspace answers `404`.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Request body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `reason` | string | no | The explanation for the appeal. |
+
+```json
+{
+  "reason": "Authentication is fixed and the high-bounce list has been removed."
+}
+```
+
+### Response
+
+```json
+{
+  "appeal_id": "5e6f7a8b-9c0d-1e2f-3a4b-5c6d7e8f9a0b"
+}
+```
+
+## Delete a mailbox
+
+`DELETE /emails/:id`
+
+Disconnects and deletes a mailbox. It is removed from all warmup pools and an account-disconnected event fans out.
+
+Nothing is removed unless the two steps that cannot be repaired afterwards succeed first: the machine syncing the mailbox is told to drop it, and the mailbox's [Pegasusbound Cloud](/guides/pegasusbound-cloud/) link is released, which takes an enrolled mailbox's stored credentials out of the pool and returns a cloud-managed mirror to the cloud workspace. A failure at either point puts the mailbox back as it was and is safe to retry. If the record itself then fails to delete, the mailbox remains but its link is already released, so its warmup moves back to this instance until the delete is retried.
+
+Auth: **Scope** `WRITE_EMAILS` · **Org permission** `manage_emails`
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The mailbox id. |
+
+### Response
+
+`204 No Content` with an empty body.
+
+| Status | `code` | Meaning |
+|--------|--------|---------|
+| `409` | `mailbox_cloud_unenroll_failed` | The mailbox's Pegasusbound Cloud link could not be released. See [error codes](/api/error-codes/#409-conflict) |
+| `503` | `mailbox_worker_unreachable` | The machine syncing the mailbox could not be told to drop it. See [error codes](/api/error-codes/#mailbox_worker_unreachable) |
+
+## Send from a mailbox
+
+`POST /emails/:id/send`
+
+Sends a one-off email from a specific mailbox. The send is scheduled and dispatched through the mailbox's assigned worker. Choose how it is scheduled with `send_mode`.
+
+Auth: **Scope** `SEND_CAMPAIGNS` · **Org permission** `send_campaigns`. Requires an active organization.
+
+| Parameter | In | Type | Description |
+|-----------|----|------|-------------|
+| `id` | path | string (UUID) | The sending mailbox id. |
+
+### Request body
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `to` | string[] | yes | Recipient addresses. |
+| `cc` | string[] | no | CC addresses. |
+| `bcc` | string[] | no | BCC addresses. |
+| `subject` | string | yes | Email subject. |
+| `body_html` | string | no | HTML body. |
+| `body_plain` | string | no | Plain-text body. |
+| `in_reply_to` | string[] | no | Message ids this email replies to. |
+| `thread_id` | string | no | Thread id to attach the message to. |
+| `send_mode` | string | no | `instant` (default), `smart` (next per-mailbox scheduler gap), or `scheduled` (use `scheduled_at`). |
+| `scheduled_at` | string (RFC 3339) | no | Required when `send_mode` is `scheduled`. Must be in the future. |
+
+```json
+{
+  "to": ["jane.doe@example.com"],
+  "subject": "Quick question about your rollout",
+  "body_html": "<p>Hi Jane, ...</p>",
+  "body_plain": "Hi Jane, ...",
+  "send_mode": "smart"
+}
+```
+
+### Response
+
+```json
+{
+  "task_id": "9a0b1c2d-3e4f-5a6b-7c8d-9e0f1a2b3c4d",
+  "scheduled_at": "2026-06-11T09:45:00Z",
+  "send_mode": "smart"
+}
+```
+
+`task_id` identifies the queued send task. `scheduled_at` is the resolved dispatch time (immediate for `instant`, the next gap for `smart`, or the requested time for `scheduled`).
+
+## Connect a mailbox (onboarding)
+
+The three onboarding routes connect a new mailbox, and a fourth moves an existing one to an app password. They are **session only (not available to API keys)** because they write user-encrypted provider refresh tokens through the SPA popup flow.
+
+### Start OAuth
+
+`POST /emails/onboarding/oauth/start`
+
+Begins an OAuth round trip for a Gmail or Outlook mailbox and returns the provider authorization URL plus an opaque `state` to round-trip back.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `provider` | string | yes | `gmail` or `outlook`. `gmail` is refused with `403` `mailbox_gmail_oauth_disabled` unless `GET /auth/config` reports `gmail_oauth_connect: true`; new Gmail mailboxes go through [Connect SMTP/IMAP](#connect-smtpimap) with an app password instead. Re-authorizing an existing Gmail mailbox is not gated. |
+| `login_hint` | string | no | The address to pre-select on the provider's sign-in screen. |
+| `return` | string | no | `web` when a browser dashboard starts the round trip. A sign-in window that has no opener then returns to the dashboard's `/oauth-return` page instead of the `pegasusbound://` scheme. Omit it from a native app. |
+
+```json
+{
+  "provider": "gmail"
+}
+```
+
+Response:
+
+```json
+{
+  "url": "https://accounts.google.com/o/oauth2/auth?...",
+  "state": "n0nc3-opaque-state"
+}
+```
+
+For `outlook` the response also carries `admin_consent_url`: Microsoft's admin consent page for the same delegated permissions, tenant-wide. Pass it to the organization's administrator when Microsoft answers the sign-in with **Need admin approval**; once they approve, every mailbox in the organization can sign in. It returns to the API's callback page, which shows the outcome and hands nothing back to an opener.
+
+After the user approves, the provider redirects to the API's callback page, which hands `code` and `state` back to the client: a web opener receives them via `postMessage`. When there is no opener, a round trip started with `return: "web"` goes to the dashboard's `/oauth-return` page, which passes them to the waiting dashboard tab (this happens when a browser blocked the sign-in window and the user allowed it afterwards). Any other round trip without an opener (a native in-app browser session) redirects to `pegasusbound://email-oauth?provider=...&code=...&state=...&error=...`. Either way, the client then calls Finish OAuth.
+
+### Finish OAuth
+
+`POST /emails/onboarding/oauth/finish`
+
+Completes the OAuth round trip with the authorization code and state from the provider, then creates the mailbox.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `code` | string | yes | Authorization code from the provider. |
+| `state` | string | yes | The `state` returned from start. |
+
+```json
+{
+  "code": "4/0Ax...",
+  "state": "n0nc3-opaque-state"
+}
+```
+
+Response: `201 Created` with the new mailbox object (same shape as Get a mailbox).
+
+### Connect SMTP/IMAP
+
+`POST /emails/onboarding/smtp-imap`
+
+Connects an SMTP/IMAP mailbox in a single call.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `email` | string | yes | The mailbox address. |
+| `name` | string | no | Display name. |
+| `smtp` | object | yes | SMTP credentials: `username`, `password`, `host`, `port`, `security`. |
+| `imap` | object | yes | IMAP credentials: `username`, `password`, `host`, `port`, `security`. |
+
+`security` is `tls` (implicit TLS, encrypted from the first byte), `starttls` (plaintext greeting upgraded in-band) or `none` (no encryption). It is optional: omit it and the port decides, which is `tls` for SMTP 465 and IMAP 993, and `starttls` for SMTP 587 and IMAP 143. `none` is never inferred from a port, only obeyed when you ask for it. Set the mode explicitly for anything non-standard, such as a submission relay on 2525. Any port from 1 to 65535 is accepted.
+
+`none` is accepted only for a mail server on the same machine as the worker, which means a self-hosted instance and a `host` of `localhost`, an address in `127.0.0.0/8`, or `::1`. It exists for local relays such as Proton Bridge, which serve plain IMAP and SMTP on the loopback interface; see [local mail relays](/guides/mailboxes/#local-mail-relays-proton-bridge). A hostname that merely resolves to a loopback address is refused, the request is rejected with `400` on the hosted product, and the worker checks the peer again at dial time. Everywhere else TLS is not optional.
+
+```json
+{
+  "email": "sales@acme.com",
+  "name": "Acme Sales",
+  "smtp": {
+    "username": "sales@acme.com",
+    "password": "app-specific-password",
+    "host": "smtp.acme.com",
+    "port": 587,
+    "security": "starttls"
+  },
+  "imap": {
+    "username": "sales@acme.com",
+    "password": "app-specific-password",
+    "host": "imap.acme.com",
+    "port": 993,
+    "security": "tls"
+  }
+}
+```
+
+Response: `201 Created` with the new mailbox object.
+
+### Switch to an app password
+
+`POST /emails/onboarding/app-password/:id`
+
+Moves a mailbox connected with per-mailbox Google sign-in, which is [being retired](/guides/mailboxes/#moving-off-per-mailbox-google-sign-in), onto Gmail's IMAP and SMTP with a Google app password. Session only, and needs the `manage_emails` organization permission.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `app_password` | string | yes | A 16-letter app password from [myaccount.google.com/apppasswords](https://myaccount.google.com/apppasswords). Spaces are ignored. |
+
+```json
+{
+  "app_password": "abcd efgh ijkl mnop"
+}
+```
+
+The password is checked against `imap.gmail.com` and `smtp.gmail.com` before anything is stored, and refused with the same codes as [Connect SMTP/IMAP](#connect-smtpimap) (such as `mailbox_auth_refused`); a refusal changes nothing. On success the mailbox becomes `smtp_imap` with `auth_method` `app_password` in place: its id, imported mail, campaigns, warmup and settings stay, and sync continues with new mail.
+
+Response: `200 OK` with the mailbox object. `409` `mailbox_not_google_signin` when the mailbox is not on per-mailbox Google sign-in (including one already switched, so a repeat changes nothing), and `400` `app_password_invalid` when the value is not 16 letters.
+
+## Connect many mailboxes
+
+Four more route families connect and set up mailboxes in bulk. Like onboarding they are **session only (not available to API keys)**, because they carry passwords or reach a whole domain's mail, and each needs the `manage_emails` organization permission:
+
+| Routes | What they do |
+|--------|--------------|
+| `/emails/imports` | [Import mailboxes](/guides/mailbox-import/) from a file or a pasted list, in the background |
+| `/emails/vendors` | Connect an [inbox vendor](/guides/mailbox-import/#import-from-an-inbox-vendor) account and import its mailboxes |
+| `/emails/grants` | Connect a whole [Google Workspace domain](/guides/mailbox-import/#connect-a-whole-google-workspace-domain) or [Microsoft 365 organization](/guides/mailbox-import/#connect-a-whole-microsoft-365-organization) through an administrator's grant, and move mailboxes on per-mailbox sign-in onto one (`GET /emails/grants/migration` lists those still on Google sign-in). Recording, using and removing a grant also need a [recent confirmation](/api/endpoints/#actions-that-need-a-recent-confirmation) |
+| `/emails/domains` | Set a tracking host and a root redirect per [sending domain](/guides/sending-domains/), directly or through the inbox vendor that holds the domain |
+
+Every route, with its body and retry behavior, is listed under [JWT only](/api/endpoints/#jwt-only).

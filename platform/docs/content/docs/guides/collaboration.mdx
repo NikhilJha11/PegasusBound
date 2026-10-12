@@ -1,0 +1,119 @@
+---
+title: Live collaboration
+description: See your team working in real time across the whole dashboard.
+---
+
+The dashboard is live: sends, opens, replies, new mail and other changes appear for everyone the moment they happen, with no refresh. You can also see who is online and what each teammate is working on.
+
+## Good to know
+
+- The header shows everyone with the dashboard open. Click a teammate to jump to their page.
+- Anywhere a record opens, you see when a teammate has it open too.
+- Press `/` on a shared page to chat from your cursor.
+- Live events respect permissions: a member only receives what they are allowed to see.
+- An admin can hide who is online, or what each person is doing, under **Settings > Workspace > Team presence**.
+
+<Fold>
+
+## How the dashboard stays live
+
+The dashboard is live by default: sends, opens, clicks, replies, new mail, contact changes, automation runs, meetings, and audit entries appear the moment they happen, for everyone, without a refresh. A presence layer on top shows who is online and what they are working on.
+
+</Fold>
+
+<Fold>
+
+## Online teammates
+
+The header shows an avatar stack of everyone with the dashboard open. Hover for each person's name and where they are ("in unibox", "editing"). Click a teammate to jump straight to their page, which is the fastest way to join someone.
+
+</Fold>
+
+<Fold>
+
+## Who is already on this?
+
+Anywhere a record opens, Pegasusbound shows when a teammate has it too:
+
+| Surface | Indicator |
+|---------|-----------|
+| Unibox | Green pulse on a row someone is reading, amber when they are writing a reply, plus a name pill on the open thread, so two people never answer the same prospect |
+| Automations | An amber "is editing" pill by the automation name. Coordinate before saving: last save wins |
+| Campaigns, contacts | Who else is viewing or editing the same record |
+| Deals, tasks, templates, mailbox settings, integrations | The same indicator on every record that opens |
+
+Indicators are workspace-scoped. Teammates see only your name, avatar, current page, and open record.
+
+</Fold>
+
+<Fold>
+
+## What updates live
+
+- Campaign sends update progress, the leads list, and analytics for every viewer as the worker sends.
+- Opens, clicks, and replies pulse into stats and the activity feed. Out-of-office and other automated replies never count as replies.
+- New mail appears in every member's unibox as it syncs, respecting inbox permissions.
+- Contact imports, edits, and deletes refresh contacts views for the whole team.
+- Mailbox health transitions (a warmup quarantine, say) flip status badges live.
+- The CRM is live end to end: moving a deal, ticking a task, or editing pipeline stages shows up immediately, and a deal being dragged carries a colored ring so you know it is in motion.
+- Mailbox tags, labels and campaign folders each have their own shared set per workspace, so a label anyone creates appears in everybody's pickers and chips as they make it.
+- The audit log streams new entries, so the activity trail is itself a live feed.
+
+**Events are permission-aware**: a member without inbox access never receives unibox events, and billing events reach only those who can manage billing. See [Team roles](/guides/team-roles/).
+
+A member restricted to [selected resources](/guides/team-roles/#access-scope) receives only events about what they were granted: new mail in their mailboxes, and activity on their campaigns. They are not part of presence or live cursors, in either direction: they do not appear online, and they do not see who else is or what teammates are viewing.
+
+</Fold>
+
+<Fold>
+
+## Connection status
+
+A dot in the header reports the live connection: green **Live** when it is healthy, amber **Slow connection** or red **Poor connection** when heartbeats are taking longer than they should, amber **Reconnecting...** while it retries, and red **Disconnected** when it is down. The reading comes from the measured round trip to the realtime service, so amber means your connection genuinely is slow rather than merely busy.
+
+Stored data still catches up while it is down. Pegasusbound refreshes counts and lists on a slower cycle, and on reconnect it refetches everything that could have drifted. The events themselves are never replayed, so live-only signals such as presence and cursors resume from wherever things stand rather than backfilling what you missed. On a self-hosted install a permanently disconnected dot usually means the realtime service is not running; see [troubleshooting](/development/troubleshooting/).
+
+</Fold>
+
+<Fold>
+
+## Live cursors and chat
+
+On a shared page you see each other's cursors move, tagged with avatar and name, across the contacts table, deal board, unibox, settings, and everywhere else. On app-scrolling pages the cursor tracks content as either person scrolls.
+
+Press `/` to chat from your cursor: an input opens at your pointer and what you type appears live in a colored bubble beside your cursor on teammates' screens, exactly where you are pointing. Enter sends (it lingers a few seconds, then fades), Escape dismisses. It is built for spatial remarks that do not deserve a thread: "this one?", "typo here".
+
+Chat respects record permissions, enforced by the realtime service like the rest of the stream.
+
+</Fold>
+
+<Fold>
+
+## Shared builder canvases
+
+The [automation builder](/guides/automations/) and [sequence](/guides/sequences/) editor are shared canvases. You see teammates' cursors and what each person has selected, outlined in their cursor color with their name, so "the step I have selected" is visible rather than described. Cursor chat works here too.
+
+Both lay themselves out from the flow's structure, so everyone sees the same picture without arranging anything.
+
+</Fold>
+
+<Fold>
+
+## Presence privacy
+
+An admin controls this under **Settings > Workspace > Team presence** with two independent toggles:
+
+- **Show who's online** turns the avatar stack and online indicators on or off workspace-wide.
+- **Show activity** keeps online status but hides what each person is doing, so no "viewing" or "editing" detail is shared.
+
+The realtime service enforces both, so a hidden signal is **never sent**, not merely hidden in the interface. Changes apply immediately with no reload, and editing them needs the Manage settings permission. With "show activity" off, cursors and selections are not shared either.
+
+</Fold>
+
+<Fold>
+
+## Developers
+
+The same stream, including presence events, is available over a WebSocket. See the [Realtime WebSocket](/api/realtime/) reference.
+
+</Fold>

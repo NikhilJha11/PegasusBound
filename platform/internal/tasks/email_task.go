@@ -1,0 +1,1332 @@
+package tasks
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math/rand"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/pegasusbound/pegasusbound/internal/errx"
+	"github.com/pegasusbound/pegasusbound/internal/models"
+	"github.com/pegasusbound/pegasusbound/internal/observability/errs"
+	"github.com/pegasusbound/pegasusbound/internal/pkg/mailhost"
+	"github.com/pegasusbound/pegasusbound/internal/repository"
+	"github.com/pegasusbound/pegasusbound/internal/scheduler"
+	"github.com/pegasusbound/pegasusbound/internal/tasks/proto"
+	"github.com/rs/zerolog/log"
+)
+
+func (s *tasksService) HandleEmailTask(task *proto.ProcessTask) *errx.Error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// STEP 1: Parse task ID
+	taskID, err := uuid.Parse(task.TaskId)
+	if err != nil {
+		errs.CaptureException(err)
+		return errx.New(errx.BadRequest, "invalid task ID")
+	}
+
+	executionKey := "warmup:" + taskID.String()
+	executionStatus := "failed"
+	// lane distinguishes a normal user-enabled warmup send ("warmup") from a
+	// health-check send kept flowing only because the mailbox backs a live
+	// campaign ("health_check"). Set once the account is loaded; the defer
+	// reads it at completion time.
+	lane := "warmup"
+
+	// STEP 2: Load task record
+	taskRecord, err := s.taskRepo.GetTask(ctx, taskID)
+	if err != nil {
+		errs.CaptureException(err)
+		return errx.InternalError()
+	}
+
+	if taskRecord == nil {
+		return errx.ErrNotFound
+	}
+	if taskRecord.ScheduledAt != nil && taskRecord.ScheduledAt.After(time.Now()) {
+		return nil
+	}
+	lineage, ok := s.taskRepo.(repository.WarmupLineageRepository)
+	if !ok {
+		return errx.InternalError()
+	}
+
+	if taskRecord.Status != "pending" {
+		log.Info().
+			Str("task_id", taskID.String()).
+			Str("status", taskRecord.Status).
+			Msg("warmup task skipped: task not in pending state")
+		executionStatus = "completed"
+		return nil
+	}
+
+	// STEP 3: Load email account
+	account, xerr := s.emailRepo.GetByID(ctx, taskRecord.EmailAccountID)
+	if xerr != nil {
+		return xerr
+	}
+	if account == nil {
+		return errx.ErrNotFound
+	}
+	// A mailbox enrolled in Pegasusbound Cloud is warmed there; the local chain ends here.
+	if !account.TestSendingAllowed() {
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+		executionStatus = "skipped_diagnostic_stopped"
+		return nil
+	}
+	if s.cloudLink != nil && s.cloudLink.IsEnrolled(ctx, account.ID) {
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+		executionStatus = "skipped_cloud_warmup"
+		return nil
+	}
+	// Keep the warmup chain alive while the mailbox is actively warming OR
+	// while it backs a live campaign (the low-volume health-check lane). Once
+	// neither holds, the chain is allowed to wind down.
+	activelyWarming := account.IsWarmingActive()
+	inCampaign := false
+	if !activelyWarming {
+		inCampaign = s.accountInActiveCampaign(ctx, account.ID)
+	}
+	if account.Status != "active" || (!activelyWarming && !inCampaign) {
+		if s.warmupHealth != nil {
+			if account.Status == "active" && account.OrganizationID != nil && s.featureGate != nil {
+				canWarmup, xerr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
+				switch {
+				case xerr != nil:
+					// Entitlement unknown: leave the membership alone rather than let a blip evict.
+				case canWarmup:
+					_ = s.warmupHealth.EnsurePoolMembershipWithRole(ctx, account.ID, s.resolveWarmupPoolType(ctx, account), "recipient_only")
+				default:
+					_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
+				}
+			} else {
+				_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
+			}
+		}
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "cancelled")
+		executionStatus = "completed"
+		return nil
+	}
+	if !activelyWarming && inCampaign {
+		lane = "health_check"
+		log.Info().
+			Str("task_id", taskID.String()).
+			Str("email_account_id", account.ID.String()).
+			Msg("warmup health-check send (mailbox in active campaign, warmup off)")
+	}
+
+	// Tenancy gate: warmup entitlement, pool tier and the shared-pool safety
+	// signals are all org-scoped, so a mailbox with no workspace cannot be
+	// checked against any of them. Fail closed — it leaves the pool and stops
+	// warming rather than warming as if it were entitled.
+	if account.OrganizationID == nil {
+		if s.warmupHealth != nil {
+			_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
+		}
+		errs.CaptureException(fmt.Errorf("email account %s reached warmup with no organization", account.ID))
+		log.Error().Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).
+			Msg("warmup blocked: mailbox has no organization, entitlement and pool policy cannot be checked")
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_no_warmup_access")
+		executionStatus = "completed"
+		return nil
+	}
+
+	// STEP 3.5: Check if organization can use warmup (only paid orgs)
+	if s.featureGate != nil {
+		canWarmup, entitlementErr := s.featureGate.CanUseWarmup(ctx, *account.OrganizationID)
+		if !canWarmup {
+			// Only a definite "not entitled" evicts; the send is skipped either way.
+			if s.warmupHealth != nil && entitlementErr == nil {
+				_ = s.warmupHealth.RemoveFromAllPools(ctx, account.ID)
+			}
+			// Organization cannot use warmup - skip this task
+			s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_no_warmup_access")
+			executionStatus = "completed"
+			return nil
+		}
+	}
+
+	poolType := s.resolveWarmupPoolType(ctx, account)
+
+	// STEP 3.6: Sending-domain authentication. Pool reputation is shared, so an
+	// unauthenticated sender damages every other participant, not just itself.
+	// Demoted to recipient_only rather than removed: receiving harms nobody and
+	// the mailbox promotes straight back once its DNS is fixed.
+	if s.domainAuthBlocked(ctx, account) {
+		if s.warmupHealth != nil {
+			_ = s.warmupHealth.EnsurePoolMembershipWithRole(ctx, account.ID, poolType, "recipient_only")
+		}
+		log.Warn().
+			Str("task_id", taskID.String()).
+			Str("email_account_id", account.ID.String()).
+			Str("email", account.Email).
+			Msg("warmup send skipped: sending domain fails authentication")
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_domain_auth")
+		// Re-seed the chain, or the mailbox never warms again even after its
+		// DNS is fixed: this task has no successor and nothing else creates
+		// one. The recheck cadence is the partner-exhaustion one (4-8h), which
+		// is the right order of magnitude for a DNS change to propagate.
+		if createErr := s.createWarmupTask(ctx, account.ID, warmupPartnerRecheckTime()); createErr != nil {
+			log.Warn().Err(createErr).Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("Failed to reschedule warmup task after domain-auth gate")
+		}
+		executionStatus = "completed"
+		return nil
+	}
+
+	// A suspended workspace stops warming too: warmup is outbound mail from the
+	// same domains, so leaving it running would keep spending the reputation
+	// the suspension exists to protect.
+	if s.orgBlocksSending(ctx, account.OrganizationID) {
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_org_suspended")
+		executionStatus = "completed"
+		return nil
+	}
+
+	if s.warmupHealth != nil {
+		canParticipate, err := s.warmupRepo.IsPoolEligible(ctx, account.ID, poolType, true)
+		if err != nil {
+			return errx.InternalError()
+		}
+		if !canParticipate {
+			_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_warmup_protected")
+			s.scheduleWarmupRecovery(ctx, account.ID, poolType)
+			executionStatus = "completed"
+			return nil
+		}
+	}
+
+	if err := s.sendAdmission(ctx, account); err != nil {
+		if errors.Is(err, repository.ErrSendAdmissionDenied) {
+			if err := lineage.RescheduleWarmupTask(ctx, taskID, time.Now().Add(5*time.Minute)); err != nil {
+				return errx.InternalError()
+			}
+			return nil
+		}
+		return errx.InternalError()
+	}
+	capable, ok := s.emailSender.(interface {
+		WarmupWorkerReady(context.Context, models.Email) (bool, error)
+	})
+	if !ok {
+		return errx.InternalError()
+	}
+	ready, capErr := capable.WarmupWorkerReady(ctx, *account)
+	if capErr != nil {
+		return errx.InternalError()
+	}
+	if !ready {
+		if err := lineage.RescheduleWarmupTask(ctx, taskID, time.Now().Add(5*time.Minute)); err != nil {
+			return errx.InternalError()
+		}
+		return nil
+	}
+	if gate, ok := s.scheduler.(interface {
+		WarmupDispatchNotBefore(context.Context, uuid.UUID, time.Time) (time.Time, error)
+	}); ok {
+		at, err := gate.WarmupDispatchNotBefore(ctx, account.ID, time.Now())
+		if errors.Is(err, scheduler.ErrWarmupTimeWindowInvalid) {
+			if err := lineage.RescheduleWarmupTask(ctx, taskID, time.Now().Add(5*time.Minute)); err != nil {
+				return errx.InternalError()
+			}
+			return nil
+		}
+		if err != nil {
+			return errx.InternalError()
+		}
+		if at.After(time.Now()) {
+			if err := lineage.RescheduleWarmupTask(ctx, taskID, at); err != nil {
+				return errx.InternalError()
+			}
+			return nil
+		}
+	} else {
+		return errx.InternalError()
+	}
+	claimed, err := lineage.ClaimWarmupTask(ctx, taskID, time.Now())
+	if err != nil {
+		return errx.InternalError()
+	}
+	if !claimed {
+		return nil
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = lineage.ReleaseUnpublishedWarmupTask(releaseCtx, taskID, time.Now().Add(5*time.Minute))
+	}()
+	if s.advanced != nil {
+		_, xerr := s.advanced.StartTaskExecution(ctx, taskID, executionKey, map[string]interface{}{"task_type": "warmup"})
+		if xerr != nil {
+			return xerr
+		}
+		defer func() {
+			_ = s.advanced.CompleteTaskExecution(ctx, taskID, executionKey, executionStatus, map[string]interface{}{"task_type": "warmup", "lane": lane})
+		}()
+	}
+
+	// STEP 5: Select warmup partner. A task directed at one partner is a
+	// reply-back: someone mailed this mailbox and it is answering them, which
+	// is what makes a thread read as a conversation instead of two monologues.
+	// The directed partner still passes the same health gate as a drawn one.
+	partner := s.directedWarmupPartner(ctx, taskID, account, poolType)
+	warmupTask, err := s.taskRepo.GetWarmupTask(ctx, taskID)
+	if err != nil || warmupTask == nil {
+		return errx.InternalError()
+	}
+	if warmupTask.TargetAccountID != nil && (warmupTask.ParentTaskID == nil || partner == nil) {
+		return s.closeWarmupThread(ctx, taskID, account.ID)
+	}
+	// A directed task IS the reply; the reply-rate draw already happened when
+	// it was scheduled. Rolling again here would square the rate, so a 30%
+	// reply rate would answer 9% of the time.
+	directedReply := partner != nil
+	if partner == nil {
+		partner, err = s.selectWarmupPartner(ctx, *account)
+	}
+	if err != nil {
+		_ = s.taskRepo.UpdateTaskStatus(ctx, taskID, "skipped_warmup_protected")
+		nextTime, scheduleErr := s.scheduler.CalculateNextWarmupTime(ctx, account.ID)
+		if scheduleErr != nil {
+			nextTime = warmupPartnerRecheckTime()
+		}
+		if nextTime.Before(time.Now().Add(4 * time.Hour)) {
+			nextTime = warmupPartnerRecheckTime()
+		}
+		if createErr := s.createWarmupTask(ctx, account.ID, nextTime); createErr != nil {
+			log.Warn().Err(createErr).Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("Failed to reschedule warmup task after partner exhaustion")
+		}
+		executionStatus = "completed"
+		return nil
+	}
+
+	// STEP 6: Determine if this should be a reply or a new warmup email.
+	// Replies advance the exact cached conversation plan used by the parent.
+	shouldReply := directedReply
+	var subject, emailBody, conversationTheme, contentSource string
+	var conversationID *uuid.UUID
+	var conversationTurn int
+	var inReplyTo string
+	var references []string
+	var threadID string
+	var content warmupContent
+
+	if shouldReply {
+		candidate, replyErr := lineage.ExactWarmupParent(ctx, taskID)
+		if replyErr != nil {
+			return errx.InternalError()
+		}
+		content, inReplyTo, references, replyErr = s.exactReplyContent(ctx, candidate, *account)
+		if replyErr != nil {
+			return s.closeWarmupThread(ctx, taskID, account.ID)
+		}
+		conversationTurn = candidate.ConversationTurn + 1
+		if account.Provider == string(models.InboxProviderGoogle) && candidate.ThreadID != nil {
+			threadID = *candidate.ThreadID
+		}
+	}
+
+	// STEP 7: Build a new warmup message when not replying. Content comes from
+	// the AI bank (segment-aware) when enabled, else the static library.
+	if !shouldReply {
+		content = s.pickNewWarmupContent(ctx, *account)
+	}
+	subject, emailBody, conversationTheme, contentSource, conversationID = content.subject, content.body, content.theme, content.contentSource, content.conversationID
+
+	if err := lintDiagnosticContent(subject, emailBody, shouldReply, *account); err != nil {
+		return s.closeWarmupThread(ctx, taskID, account.ID)
+	}
+	if err := lineage.SaveWarmupLineage(ctx, taskID, repository.WarmupLineage{Subject: subject, References: references, ScenarioVersion: content.scenarioVersion, RenderingVersion: content.renderingVersion, MaxTurns: content.maxTurns}); err != nil {
+		return errx.InternalError()
+	}
+
+	// STEP 9: Generate Message-ID
+	messageID := generateMessageID(account.Email)
+	if err := s.taskRepo.UpdateTaskMessageID(ctx, taskID, messageID); err != nil {
+		return errx.InternalError()
+	}
+
+	// STEP 9.5: Generate warmup verification token
+	warmupToken := uuid.New()
+	tokenRecord := &models.WarmupToken{
+		Token:              warmupToken,
+		TaskID:             taskID,
+		SenderAccountID:    account.ID,
+		RecipientAccountID: partner.ID,
+		ConversationTheme:  conversationTheme,
+		ContentSource:      contentSource,
+		ConversationID:     conversationID,
+		ConversationTurn:   conversationTurn,
+		// The recipient falls back to matching on the subject when the verify
+		// header does not survive delivery (Graph strips it).
+		Subject:   subject,
+		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+	}
+	if err := s.warmupRepo.CreateWarmupToken(ctx, tokenRecord); err != nil {
+		// Without a token the partner cannot tell this is warmup, so it would
+		// land in their unibox as ordinary mail. Skip the send, keep the chain.
+		log.Warn().Err(err).Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("Failed to create warmup token; send skipped")
+		_ = s.taskRepo.RecordTaskFailure(ctx, taskID, "Warmup token not created", err.Error())
+		nextTime, scheduleErr := s.scheduler.CalculateNextWarmupTime(ctx, account.ID)
+		if scheduleErr != nil {
+			nextTime = warmupPartnerRecheckTime()
+		}
+		if createErr := s.createWarmupTask(ctx, account.ID, nextTime); createErr != nil {
+			log.Warn().Err(createErr).Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("Failed to reschedule warmup task after token failure")
+		}
+		executionStatus = "completed"
+		return nil
+	}
+	warmupTokenStr := warmupToken.String()
+
+	// STEP 10: Send warmup email to worker via Kafka
+	emailMsg := EmailMessage{
+		From:        account.Email,
+		To:          []string{partner.Email},
+		Subject:     subject,
+		BodyHTML:    "", // Warmup emails are plaintext only
+		BodyPlain:   emailBody,
+		InReplyTo:   inReplyTo,
+		References:  references,
+		ThreadID:    threadID,
+		MessageID:   messageID,
+		IsWarmup:    true,
+		Tracking:    nil, // No tracking for warmup
+		WarmupToken: warmupTokenStr,
+	}
+
+	if err := s.validateWarmupPair(ctx, account, partner, poolType, shouldReply); err != nil {
+		return s.closeWarmupThread(ctx, taskID, account.ID)
+	}
+	if err := s.sendAdmission(ctx, account); err != nil {
+		return errx.InternalError()
+	}
+	dispatch, ok := s.taskRepo.(repository.WarmupDispatchRepository)
+	if !ok || account.WorkerID == nil {
+		return errx.InternalError()
+	}
+	nonce, err := dispatch.AuthorizeWarmupDispatch(ctx, taskID, account.ID, *account.WorkerID)
+	if err != nil {
+		return errx.InternalError()
+	}
+	emailMsg.DispatchNonce = nonce.String()
+	if err := s.emailSender.Send(ctx, taskID, emailMsg, *account); err != nil {
+		if !errors.Is(err, ErrSendDispatchUnknown) && !errors.Is(err, ErrWarmupDispatchDeferred) {
+			result := models.SendEmailResult{TaskID: taskID, Error: &models.EmailSendError{Failure: &errx.SendFailure{Protocol: "internal", Stage: "prepare", Disposition: errx.SendRetry, Scope: "mailbox", ObservedAt: time.Now().UTC()}}, SentAt: time.Now().UTC()}
+			recovery := s.taskRepo.(repository.SendResultRecovery)
+			if applyErr := recovery.ApplySendResult(ctx, result, func(ctx context.Context) error {
+				return s.warmupRepo.FailWarmupSend(ctx, account.ID, taskID, result.SentAt, "Send not published", "Worker authority unavailable")
+			}); applyErr != nil {
+				return errx.InternalError()
+			}
+		}
+		return nil
+	}
+
+	// STEP 11: Update task record
+	taskRecord.MessageID = messageID
+	taskRecord.Status = "completed"
+
+	// STEP 14: Publish events
+	s.publishWarmupEmailSentEvent(ctx, taskRecord, account, partner, shouldReply)
+
+	// STEP 15: Calculate next warmup time and create new task
+	nextTime, err := s.scheduler.CalculateNextWarmupTime(ctx, account.ID)
+	if err != nil {
+		log.Warn().Err(err).Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("Failed to calculate next warmup time")
+		return nil
+	}
+
+	if err := s.createWarmupTask(ctx, account.ID, nextTime); err != nil {
+		log.Warn().Err(err).Str("task_id", taskID.String()).Str("email_account_id", account.ID.String()).Msg("Failed to create next warmup task")
+	}
+
+	executionStatus = "completed"
+	return nil
+}
+
+// accountInActiveCampaign reports whether the mailbox currently backs at
+// least one active campaign. Failing closed on error keeps the health-check
+// lane conservative — a transient DB error just lets the chain wind down if
+// warmup is otherwise off.
+func (s *tasksService) accountInActiveCampaign(ctx context.Context, accountID uuid.UUID) bool {
+	if s.campaignRepo == nil {
+		return false
+	}
+	count, err := s.campaignRepo.CountActiveCampaignsForAccount(ctx, accountID)
+	if err != nil {
+		return false
+	}
+	return count > 0
+}
+
+// recentPartnerWindow controls how long a partner stays excluded from
+// re-selection after being used. Bumped from 24h to 72h so a small pool
+// does not rotate through the same handful of mailboxes every day.
+const recentPartnerWindow = 72 * time.Hour
+
+// recentDomainWindow controls the lookback for the domain-distribution
+// histogram. A week is long enough to smooth out daily randomness while
+// still reflecting current behaviour.
+const recentDomainWindow = 7 * 24 * time.Hour
+
+// smallPoolWarnThreshold defines the participant count below which we log
+// a warning. Tiny pools force partner reuse and create obvious patterns
+// that mailbox providers can cluster on.
+const smallPoolWarnThreshold = 8
+
+// partnerDiversityWindow / partnerMaxSharedWindow set the explicit
+// partner-diversity target: within partnerDiversityWindow, a sender should not
+// send to the same partner more than partnerMaxSharedWindow times. Over-used
+// partners are demoted to the fallback tier so warmup traffic spreads across
+// many partners rather than forming a tight reciprocal pair (a closed-loop
+// graph signal). This is a soft target — it only applies while enough other
+// partners remain available.
+const (
+	partnerDiversityWindow = 7 * 24 * time.Hour
+	partnerMaxSharedWindow = 3
+)
+
+var (
+	errNoWarmupPartners         = errors.New("no warmup partners available")
+	errNoEligibleWarmupPartners = errors.New("no eligible warmup partners after health gate")
+	errAllPartnersExcluded      = errors.New("every warmup partner is excluded by a routing rule")
+)
+
+func warmupPartnerRecheckTime() time.Time {
+	return time.Now().Add(time.Duration(240+rand.Intn(240)) * time.Minute)
+}
+
+// selectWarmupPartner selects a warmup partner from the pool, preferring
+// partners on under-represented recipient domains to avoid concentrating
+// traffic on a single provider (e.g. all-Gmail warmup loops).
+func (s *tasksService) selectWarmupPartner(ctx context.Context, account Email) (*Email, error) {
+	poolType := s.resolveWarmupPoolType(ctx, &account)
+
+	candidates, err := s.warmupRepo.WarmupPartnerCandidates(ctx, poolType, account.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(candidates) == 0 {
+		return nil, errNoWarmupPartners
+	}
+
+	if len(candidates) < smallPoolWarnThreshold {
+		log.Warn().
+			Int("participants", len(candidates)).
+			Str("pool", poolType).
+			Str("email_account_id", account.ID.String()).
+			Msg("Warmup pool below diversity threshold; partner reuse likely")
+	}
+
+	// Customer routing rules apply to the premium pool only; a borrowed
+	// candidate answers to them like any other, since its address is known.
+	routingRules := s.warmupRoutingRules(ctx, &account, poolType)
+
+	// Every per-recipient signal derives from the address, so no candidate can
+	// be missing from a map and score a silent neutral default. A rule of
+	// weight 0 is an exclusion, so it drops the candidate here rather than
+	// weighting it: a weight cannot survive a pool of one (#501).
+	eligible := make([]models.WarmupPartnerCandidate, 0, len(candidates))
+	domainsByID := make(map[uuid.UUID]string, len(candidates))
+	hostsByID := make(map[uuid.UUID]string, len(candidates))
+	ruleWeight := make(map[uuid.UUID]float64, len(candidates))
+	starvation := make(map[uuid.UUID]float64, len(candidates))
+	filterJunk := make(map[uuid.UUID]float64)
+	poolOf := make(map[uuid.UUID]string, len(candidates))
+	excluded := 0
+	for _, c := range candidates {
+		weight := 1.0
+		if len(routingRules) > 0 {
+			weight = routingMultiplier(routingRules, account.Email, c.Email)
+		}
+		if weight <= 0 {
+			excluded++
+			continue
+		}
+		domain := strings.ToLower(models.EmailDomain(c.Email))
+		domainsByID[c.ID] = domain
+		hostsByID[c.ID] = partnerHost(c)
+		ruleWeight[c.ID] = weight
+		starvation[c.ID] = c.Starvation()
+		if junk := c.FilterJunkRate(); junk > 0 {
+			filterJunk[c.ID] = junk
+		}
+		poolOf[c.ID] = c.PoolType
+		eligible = append(eligible, c)
+	}
+	if len(eligible) == 0 {
+		// The rules are the customer's, so this is obeyed rather than worked
+		// around, and said out loud because nothing else surfaces it yet.
+		log.Warn().
+			Int("excluded", excluded).
+			Str("pool", poolType).
+			Str("email_account_id", account.ID.String()).
+			Msg("warmup: every available partner is excluded by a routing rule; no warmup mail this tick")
+		return nil, errAllPartnersExcluded
+	}
+	candidates = eligible
+
+	// This sender's recent record per recipient mail host. Best-effort: a lookup
+	// error leaves the map empty and weighting degrades to domain diversity.
+	placementByHost, placeErr := s.warmupRepo.SenderPlacementByHost(ctx, account.ID, time.Now().Add(-hostPlacementWindow))
+	if placeErr != nil {
+		placementByHost = nil
+	}
+
+	recentPartnerSet := map[uuid.UUID]struct{}{}
+	recentPartnerIDs, err := s.warmupRepo.GetRecentlyUsedPartners(ctx, account.ID, time.Now().Add(-recentPartnerWindow))
+	if err == nil {
+		for _, pid := range recentPartnerIDs {
+			recentPartnerSet[pid] = struct{}{}
+		}
+	}
+
+	todayPartnerSet := map[uuid.UUID]struct{}{}
+	todayPartnerIDs, err := s.warmupRepo.GetRecentlyUsedPartners(ctx, account.ID, time.Now().Truncate(24*time.Hour))
+	if err == nil {
+		for _, pid := range todayPartnerIDs {
+			todayPartnerSet[pid] = struct{}{}
+		}
+	}
+
+	domainCounts, err := s.warmupRepo.GetRecentPartnerDomainCounts(ctx, account.ID, time.Now().Add(-recentDomainWindow))
+	if err != nil {
+		domainCounts = nil
+	}
+
+	// Explicit partner-diversity target: how many times each partner has been
+	// used in the diversity window, so partners the sender already leans on
+	// heavily get demoted out of the preferred tier.
+	partnerCounts, err := s.warmupRepo.GetRecentPartnerCounts(ctx, account.ID, time.Now().Add(-partnerDiversityWindow))
+	if err != nil {
+		partnerCounts = nil
+	}
+
+	// Rank outside workspaces first while retaining siblings as a self-host fallback.
+	var buckets [4][]uuid.UUID
+	foreign, own := 0, 0
+	for _, c := range candidates {
+		if _, usedToday := todayPartnerSet[c.ID]; usedToday {
+			continue
+		}
+		rank := 0
+		if sameOrganization(account.OrganizationID, c.OrganizationID) {
+			rank += 2
+			own++
+		} else {
+			foreign++
+		}
+		if _, recentlyUsed := recentPartnerSet[c.ID]; recentlyUsed || partnerCounts[c.ID] >= partnerMaxSharedWindow {
+			rank++
+		}
+		buckets[rank] = append(buckets[rank], c.ID)
+	}
+	if foreign == 0 && own > 0 {
+		// Surface intentional sibling fallback without warning on local-only pools.
+		log.Info().
+			Int("participants", len(candidates)).
+			Str("pool", poolType).
+			Str("email_account_id", account.ID.String()).
+			Msg("warmup: no partner outside this workspace is available; pairing within the organization")
+	}
+
+	sig := partnerSignals{
+		domainsByID:     domainsByID,
+		domainCounts:    domainCounts,
+		hostsByID:       hostsByID,
+		placementByHost: placementByHost,
+		ruleWeight:      ruleWeight,
+		starvation:      starvation,
+		filterJunk:      filterJunk,
+	}
+
+	// A pick that fails the gate is dropped and the draw repeats; an emptied
+	// bucket falls through to the next, so a stale own-tier row cannot hide a
+	// healthy borrowed one. The gate re-evaluates a just-unblocked recipient
+	// (probation), matching the CLAUDE.md re-entry policy on the recipient surface.
+	// Every failure removes a candidate, so the loop ends by exhaustion.
+	var available []uuid.UUID
+	next := 0
+	for {
+		for len(available) == 0 && next < len(buckets) {
+			available = buckets[next]
+			next++
+		}
+		if len(available) == 0 {
+			break
+		}
+		partnerID := pickWeightedPartner(available, sig)
+
+		if s.warmupHealth != nil {
+			// Pinned to the pool it was drawn from, so a row that moved pools
+			// between the read and the gate is not accepted elsewhere (#495).
+			gatePool := poolOf[partnerID]
+			if gatePool == "" {
+				gatePool = poolType
+			}
+			if ok, _, _ := s.warmupHealth.CanParticipate(ctx, partnerID, gatePool); !ok {
+				available = removePartnerID(available, partnerID)
+				continue
+			}
+		}
+
+		partner, err := s.emailRepo.GetByID(ctx, partnerID)
+		if err != nil {
+			return nil, err
+		}
+		return partner, nil
+	}
+
+	return nil, errNoEligibleWarmupPartners
+}
+
+// partnerHost is who runs a candidate's mail, the key its sender's placement
+// record is kept under. Never the domain: a custom domain can be on any host.
+func partnerHost(c models.WarmupPartnerCandidate) string {
+	return string(mailhost.ForMailbox(c.MailHost, c.Provider, c.Email))
+}
+
+// sameOrganization treats unknown ownership as outside rather than guessing.
+func sameOrganization(a, b *uuid.UUID) bool {
+	return a != nil && b != nil && *a == *b
+}
+
+// removePartnerID returns ids without the first occurrence of target. Used to
+// drop a partner that failed the health gate before re-picking.
+func removePartnerID(ids []uuid.UUID, target uuid.UUID) []uuid.UUID {
+	out := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if id != target {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+const (
+	// weight *= 1/(1 + k*rate). Never an exclusion: a sender that stops mailing
+	// a host cannot discover it recovered there.
+	hostPlacementPenaltyK = 4.0
+	// Below this many verified deliveries a host's rate is noise, not a pattern.
+	hostPlacementMinDelivered = 5
+	hostPlacementWindow       = 7 * 24 * time.Hour
+	// weight *= 1 + k*starvation. An inbox that has received nothing back for
+	// what it sent is drawn this many times more often than one in balance,
+	// and the boost fades as the pool pays it back, so traffic settles near
+	// parity instead of overshooting.
+	reciprocityBoostK = 3.0
+	// weight *= 1/(1 + k*junk). A small host whose own filter junks what the
+	// pool sends it earns no sender anything, so it is drawn less, never excluded.
+	recipientFilterPenaltyK = 3.0
+)
+
+// partnerSignals are the per-pick inputs to partner weighting.
+type partnerSignals struct {
+	domainsByID  map[uuid.UUID]string
+	domainCounts map[string]int
+	// Keyed by who RUNS the recipient's mail (mailhost.ForMailbox), so a custom
+	// domain on Workspace and one on a small host are told apart.
+	hostsByID       map[uuid.UUID]string
+	placementByHost map[string]repository.HostPlacementStat
+	// ruleWeight is the customer's routing multiplier per candidate. An
+	// exclusion never appears here: it removed the candidate (#501).
+	ruleWeight map[uuid.UUID]float64
+	// starvation is how far behind each candidate is on what it sent (0..1).
+	starvation map[uuid.UUID]float64
+	// filterJunk is how much warmup mail a small-host candidate's own filter
+	// junks (0..1); absent when nothing is known or the host is a major one.
+	filterJunk map[uuid.UUID]float64
+}
+
+// filterPenalty draws a recipient whose own filter junks warmup mail less
+// often. 1.0 when nothing is known.
+func (sig partnerSignals) filterPenalty(partnerID uuid.UUID) float64 {
+	return 1.0 / (1.0 + recipientFilterPenaltyK*sig.filterJunk[partnerID])
+}
+
+// reciprocityBoost favours the inbox that is owed the most. 1.0 for one in
+// balance, and on every candidate the signal is missing for.
+func (sig partnerSignals) reciprocityBoost(partnerID uuid.UUID) float64 {
+	starved, ok := sig.starvation[partnerID]
+	if !ok || starved <= 0 {
+		return 1.0
+	}
+	if starved > 1 {
+		starved = 1
+	}
+	return 1.0 + reciprocityBoostK*starved
+}
+
+// hostPenalty weights sending to one mail host by how this sender has
+// recently landed there. 1.0 on too small a sample, and on every error path.
+func (sig partnerSignals) hostPenalty(partnerID uuid.UUID) float64 {
+	host, ok := sig.hostsByID[partnerID]
+	if !ok || len(sig.placementByHost) == 0 {
+		return 1.0
+	}
+	stat, ok := sig.placementByHost[host]
+	if !ok || stat.Delivered < hostPlacementMinDelivered {
+		return 1.0
+	}
+	return 1.0 / (1.0 + hostPlacementPenaltyK*stat.Rate())
+}
+
+// pickWeightedPartner picks a partner ID using a composite weight:
+//   - balanced host coverage with inverse-frequency domains within each host
+//   - this sender's recent junk rate at the partner's mail host (feedback)
+//   - how far behind the partner is on what it sent (reciprocity)
+//   - how much a small-host partner's own filter junks (recipient quality)
+//   - customer-defined routing rule multipliers (preference)
+//
+// Every candidate here is one the customer allows; an excluded pair was
+// dropped before the draw. Falls back to uniform when no signals are available.
+func pickWeightedPartner(candidates []uuid.UUID, sig partnerSignals) uuid.UUID {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	if len(sig.hostsByID) == 0 && len(sig.domainsByID) == 0 && len(sig.ruleWeight) == 0 && len(sig.placementByHost) == 0 && len(sig.starvation) == 0 && len(sig.filterJunk) == 0 {
+		return candidates[rand.Intn(len(candidates))]
+	}
+
+	weights := make([]float64, len(candidates))
+	hostTotals := make(map[string]float64)
+	// Normalize only the coverage base; quality and customer rules still change host share.
+	for _, id := range candidates {
+		if host := sig.hostsByID[id]; host != "" {
+			hostTotals[host] += 1.0 / float64(1+sig.domainCounts[sig.domainsByID[id]])
+		}
+	}
+	var total float64
+	for i, id := range candidates {
+		domain := sig.domainsByID[id]
+		// Diversity base weight.
+		w := 1.0 / float64(1+sig.domainCounts[domain])
+		if hostTotal := hostTotals[sig.hostsByID[id]]; hostTotal > 0 {
+			w /= hostTotal
+		}
+
+		// Per-host placement feedback.
+		w *= sig.hostPenalty(id)
+
+		// The pool's debt to this inbox.
+		w *= sig.reciprocityBoost(id)
+
+		// A recipient whose own filter junks what it is sent.
+		w *= sig.filterPenalty(id)
+
+		// Routing rule multiplier (premium pool only, when configured).
+		if rw, ok := sig.ruleWeight[id]; ok {
+			w *= rw
+		}
+
+		weights[i] = w
+		total += w
+	}
+
+	if total <= 0 {
+		// Nothing an exclusion can reach: those candidates are already gone.
+		// Only an underflow of the positive terms lands here, so draw uniformly.
+		return candidates[rand.Intn(len(candidates))]
+	}
+
+	r := rand.Float64() * total
+	var cum float64
+	for i, w := range weights {
+		cum += w
+		if r <= cum {
+			return candidates[i]
+		}
+	}
+	return candidates[len(candidates)-1]
+}
+
+// routingMultiplier returns the weight multiplier from the first matching
+// rule in priority order (lowest priority value wins). 1.0 when no rule
+// matches — neutral, so unmatched pairs neither preferred nor penalized.
+func routingMultiplier(rules []models.WarmupRoutingRule, senderEmail, recipientEmail string) float64 {
+	for i := range rules {
+		if rules[i].Matches(senderEmail, recipientEmail) {
+			return rules[i].Weight
+		}
+	}
+	return 1.0
+}
+
+func (s *tasksService) resolveWarmupPoolType(ctx context.Context, account *Email) string {
+	if account == nil {
+		return "premium"
+	}
+	// No organization means no entitlement to check, so the mailbox gets the
+	// lower-trust pool rather than defaulting into the paid one.
+	if account.OrganizationID == nil {
+		return "free"
+	}
+	// A restricted organization leaves the paid pool whatever it pays. Checked
+	// before the stored tier, which is never empty and would short-circuit it.
+	if s.orgSuspendedOrRestricted(ctx, *account.OrganizationID) {
+		return "free"
+	}
+	if account.WarmupPoolType != "" {
+		return account.WarmupPoolType
+	}
+	if s.featureGate != nil {
+		isPaid, xerr := s.featureGate.HasPremiumWarmup(ctx, *account.OrganizationID)
+		if xerr == nil && !isPaid {
+			return "free"
+		}
+	}
+	return "premium"
+}
+
+func (s *tasksService) scheduleWarmupRecovery(ctx context.Context, accountID uuid.UUID, poolType string) {
+	if s.warmupRepo == nil {
+		return
+	}
+
+	health, err := s.warmupRepo.GetParticipantHealth(ctx, accountID, poolType)
+	if err != nil || health == nil || health.BlockedUntil == nil {
+		return
+	}
+	if !health.BlockedUntil.After(time.Now()) {
+		return
+	}
+
+	if err := s.createWarmupTask(ctx, accountID, *health.BlockedUntil); err != nil {
+		log.Warn().Err(err).Str("email_account_id", accountID.String()).Str("pool_type", poolType).Msg("Failed to create warmup recovery task")
+	}
+}
+
+// EnsureWarmupScheduled makes sure the mailbox has a pending warmup task so
+// its warmup / health-check chain is running. Safe to call repeatedly: the
+// per-mailbox advisory lock in CreateWarmupTaskWithLock means a duplicate
+// pending task is never created. Returns ErrWarmupNotEnabled (benign) when
+// the mailbox is neither warming nor backing a live campaign.
+func (s *tasksService) EnsureWarmupScheduled(ctx context.Context, accountID uuid.UUID) error {
+	account, xerr := s.emailRepo.GetByID(ctx, accountID)
+	if xerr != nil {
+		return xerr
+	}
+	if account == nil {
+		return errors.New("mailbox unavailable")
+	}
+	if s.warmupHealth != nil {
+		pool := s.resolveWarmupPoolType(ctx, account)
+		_, xerr := s.warmupHealth.MovePoolMembership(ctx, accountID, pool)
+		if xerr != nil {
+			return xerr
+		}
+		health, err := s.warmupRepo.GetParticipantHealth(ctx, accountID, pool)
+		if err != nil {
+			return err
+		}
+		if health == nil {
+			if xerr := s.warmupHealth.EnsurePoolMembershipWithRole(ctx, accountID, pool, "sender_receiver"); xerr != nil {
+				return xerr
+			}
+		}
+	}
+	nextTime, err := s.scheduler.CalculateNextWarmupTime(ctx, accountID)
+	if err != nil {
+		return err
+	}
+	return s.createWarmupTask(ctx, accountID, nextTime)
+}
+
+// createWarmupTask creates a new warmup task in GCP Cloud Tasks
+func (s *tasksService) createWarmupTask(ctx context.Context, accountID uuid.UUID, scheduleTime time.Time) error {
+	// Create task in database
+	newTaskID := uuid.New()
+	newTask := &Task{
+		ID:             newTaskID,
+		TaskType:       "warmup",
+		EmailAccountID: accountID,
+		Status:         "pending",
+		ScheduledAt:    &scheduleTime,
+	}
+
+	// Create warmup task entry
+	warmupTask := &WarmupTask{
+		TaskID: newTaskID,
+	}
+
+	created, err := s.taskRepo.CreateWarmupTaskWithLock(ctx, newTask, warmupTask)
+	if err != nil {
+		return err
+	}
+	if !created {
+		return nil
+	}
+
+	// Create GCP Cloud Task
+	processTask := &proto.ProcessTask{
+		TaskId: newTaskID.String(),
+	}
+
+	cloudTaskName, err := s.tasksClient.CreateTask(ctx, processTask, scheduleTime)
+	if err != nil {
+		return err
+	}
+
+	// Update task with cloud task name
+	lineage, ok := s.taskRepo.(repository.WarmupLineageRepository)
+	if !ok {
+		return errors.New("warmup queue authority unavailable")
+	}
+	acked, err := lineage.AckWarmupQueue(ctx, repository.WarmupQueueRevision{TaskID: newTaskID, At: scheduleTime, Revision: 1}, cloudTaskName)
+	if err != nil {
+		return err
+	}
+	if !acked {
+		_ = s.tasksClient.DeleteTask(ctx, cloudTaskName)
+	}
+
+	return nil
+}
+
+// publishWarmupEmailSentEvent publishes warmup email sent event (realtime) and
+// an opt-in firehose webhook (warmup.email_sent).
+func (s *tasksService) publishWarmupEmailSentEvent(ctx context.Context, task *Task, account *Email, partner *Email, isReply bool) {
+	if s.eventsPublisher != nil {
+		if err := s.eventsPublisher.PublishWarmupEmailSent(ctx, task, account, partner, isReply); err != nil {
+			log.Warn().Err(err).Str("task_id", task.ID.String()).Msg("Failed to publish warmup email sent event")
+		}
+	}
+
+	if s.advanced != nil && account != nil && account.OrganizationID != nil {
+		s.advanced.EmitCampaignEvent(ctx, *account.OrganizationID, models.WebhookEventWarmupEmailSent, map[string]any{
+			"email_account_id": account.ID.String(),
+			"is_reply":         isReply,
+		})
+	}
+}
+
+// generateWarmupSubject picks a warmup subject. To reduce content
+// fingerprinting risk, ~40% of the time we synthesize a subject from
+// slot templates (yielding thousands of unique strings) instead of
+// returning a literal from the static set.
+func generateWarmupSubject() string {
+	if rand.Float64() < 0.4 {
+		if s := synthesizeWarmupSubject(); s != "" {
+			return s
+		}
+	}
+	subjects := warmupSubjectLiterals()
+	return subjects[rand.Intn(len(subjects))]
+}
+
+// synthesizeWarmupSubject composes a subject from slot fragments. With
+// the current slot dictionaries this yields several thousand distinct
+// strings, which is harder for a vendor corpus-classifier to fingerprint.
+func synthesizeWarmupSubject() string {
+	templates := []string{
+		"{adj} {noun}",
+		"{adj} {noun} {timeRef}",
+		"{verb} {noun}",
+		"{verb} on {noun}",
+		"{question} about {noun}",
+		"{timeRef} {noun}",
+		"{noun} {timeRef}",
+		// NB: no "Re:"/"Fwd:" template here — a fabricated reply prefix on a
+		// first-touch send is a deception signal and CAN-SPAM exposure. The
+		// genuine reply path adds "Re:" itself when there is a real
+		// In-Reply-To header.
+	}
+	adj := []string{"quick", "small", "short", "tiny", "casual", "friendly", "useful", "interesting", "brief", "minor"}
+	noun := []string{"check-in", "follow up", "note", "ping", "thought", "update", "idea", "heads up", "favor", "question", "nudge", "share"}
+	verb := []string{"Following up", "Circling back", "Wanted your take", "Touching base", "Picking up", "Adding"}
+	question := []string{"Quick question", "Curious", "Wanted your view", "Thought"}
+	timeRef := []string{"this week", "before EOD", "when free", "this morning", "today", "later", "if useful"}
+
+	tpl := templates[rand.Intn(len(templates))]
+	r := strings.NewReplacer(
+		"{adj}", capitalize(adj[rand.Intn(len(adj))]),
+		"{noun}", noun[rand.Intn(len(noun))],
+		"{verb}", verb[rand.Intn(len(verb))],
+		"{question}", question[rand.Intn(len(question))],
+		"{timeRef}", timeRef[rand.Intn(len(timeRef))],
+	)
+	return strings.TrimSpace(r.Replace(tpl))
+}
+
+func capitalize(s string) string {
+	if s == "" {
+		return ""
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+func warmupSubjectLiterals() []string {
+	return []string{
+		// Casual check-ins
+		"Quick question",
+		"Following up",
+		"Checking in",
+		"Quick update",
+		"Hope your week is going well",
+		"Touching base",
+		"Small update",
+		"Just wanted to say hi",
+		"How have you been?",
+		"Long time no chat",
+
+		// Sharing / referencing
+		"Thought you might find this interesting",
+		"Wanted to share this",
+		"Good read I came across",
+		"Saw this and thought of you",
+		"Worth a look",
+		"You might like this",
+		"Had to share this with you",
+		"Reminded me of our last chat",
+		"Came across something relevant",
+
+		// Engagement / questions
+		"Any thoughts on this?",
+		"A quick favor",
+		"When you get a chance",
+		"Just a thought",
+		"Would love your input",
+		"Curious what you think",
+		"Got a minute?",
+		"Need a quick opinion",
+
+		// Thread-like / follow-up
+		"Re: our conversation",
+		"One more thing",
+		"Circling back",
+		"Heads up",
+		"Forgot to mention",
+		"One thing I meant to ask",
+		"Adding to what we discussed",
+		"Quick follow up from earlier",
+
+		// Seasonal / time-based
+		"Happy Monday",
+		"End of week thought",
+		"Midweek check-in",
+		"Hope the quarter is going well",
+		"Starting the week strong",
+
+		// Professional / value-add
+		"Resource you might find useful",
+		"Something worth bookmarking",
+		"Interesting perspective on this",
+		"Quick tip I picked up",
+		"Thought this was insightful",
+	}
+}
+
+// conversationForTheme returns a conversation matching the requested theme,
+// falling back to a random conversation if the theme is empty or unknown.
+// Use this when replying so the reply body stays on-topic with the original
+// thread instead of jumping subjects mid-conversation.
+func conversationForTheme(theme string) Conversation {
+	if theme == "" {
+		return randomWarmupConversation()
+	}
+	var matches []Conversation
+	for _, c := range warmupConversations() {
+		if c.Theme == theme {
+			matches = append(matches, c)
+		}
+	}
+	if len(matches) == 0 {
+		return randomWarmupConversation()
+	}
+	return matches[rand.Intn(len(matches))]
+}
+
+func randomWarmupConversation() Conversation {
+	conversations := warmupConversations()
+	return conversations[rand.Intn(len(conversations))]
+}
+
+// staticConvID derives a STABLE id for a static-library conversation from its
+// content. Previously each call to warmupConversations() minted fresh uuid.New()
+// ids, so the conversation_id recorded on a warmup token never matched across
+// sends — defeating cohort correlation and dedupe. A deterministic id makes the
+// static library traceable the same way the AI bank rows are.
+func staticConvID(theme, description string) uuid.UUID {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("warmup-static:"+theme+"|"+description))
+}
+
+func warmupConversations() []Conversation {
+	conversations := []Conversation{
+		// Productivity & workflow
+		{Theme: "productivity", Description: "I have been trying a few workflow changes and wondered what worked best for your week.", Messages: []string{"How do you structure focused work blocks?", "Do you batch similar tasks or tackle them as they come?"}},
+		{Theme: "productivity", Description: "I started time-blocking my calendar this month and the results have been interesting so far.", Messages: []string{"Have you tried any time management methods that actually stuck?", "What does your typical morning routine look like?"}},
+		{Theme: "automation", Description: "I automated a couple of repetitive tasks recently and it freed up more time than I expected.", Messages: []string{"Are there any repetitive tasks in your day that you have managed to streamline?"}},
+
+		// Learning & growth
+		{Theme: "learning", Description: "I came across a useful article and it got me curious about what resources you rely on lately.", Messages: []string{"Any newsletter or podcast you consistently recommend?", "What is the best thing you have learned recently?"}},
+		{Theme: "learning", Description: "I have been dedicating an hour each week to learning something new and it has been surprisingly rewarding.", Messages: []string{"How do you make time for professional development?"}},
+		{Theme: "courses", Description: "I just wrapped up an online course that was really practical and well-structured.", Messages: []string{"Have you taken any courses lately that were worth the investment?"}},
+
+		// Collaboration & teams
+		{Theme: "collaboration", Description: "I was thinking about how teams keep communication clear when work gets busy.", Messages: []string{"What has helped your team keep projects moving smoothly?", "How do you handle async communication across time zones?"}},
+		{Theme: "meetings", Description: "We cut our meeting load in half last month and the team seems more productive overall.", Messages: []string{"How do you decide which meetings are actually necessary?", "Have you found a good balance between sync and async?"}},
+
+		// Industry & trends
+		{Theme: "industry", Description: "I noticed a shift in how people are approaching this topic and wanted to get your take.", Messages: []string{"Have you seen any changes in how your industry handles this?", "What trends are you paying attention to right now?"}},
+		{Theme: "market", Description: "The market has been moving fast lately and I have been trying to figure out what matters most.", Messages: []string{"How are you adapting your approach given recent changes?"}},
+
+		// Tools & technology
+		{Theme: "tools", Description: "I recently switched up a few tools in my daily workflow and the difference has been noticeable.", Messages: []string{"What tools have made the biggest impact for you this year?", "Have you found a good alternative for that?"}},
+		{Theme: "software", Description: "I have been testing a new project management setup and wondering if I am overcomplicating things.", Messages: []string{"What is your go-to for keeping projects organized?", "Do you prefer simple tools or full-featured platforms?"}},
+
+		// Networking & catch-ups
+		{Theme: "networking", Description: "It has been a while since we last connected and I wanted to see how things are going on your end.", Messages: []string{"Any new projects or goals you are excited about?", "What has been keeping you busy lately?"}},
+		{Theme: "catchup", Description: "I was cleaning up my contacts list and realized we have not caught up in ages.", Messages: []string{"How has your year been going so far?", "Anything interesting happening on your side?"}},
+		{Theme: "introduction", Description: "I met someone recently who reminded me of the work you do and thought you two should connect.", Messages: []string{"Would you be open to a quick intro?"}},
+
+		// Feedback & advice
+		{Theme: "feedback", Description: "I have been working on something and would really value a second opinion before moving forward.", Messages: []string{"Would you mind taking a quick look when you have a moment?", "I would appreciate your honest feedback on this."}},
+		{Theme: "advice", Description: "I am facing a decision and I think your perspective could really help me think it through.", Messages: []string{"Have you dealt with anything similar before?", "What would you do in this situation?"}},
+
+		// Planning & strategy
+		{Theme: "planning", Description: "I am mapping out priorities for the next quarter and trying to stay realistic about what is achievable.", Messages: []string{"How do you decide what to focus on when everything feels urgent?", "What is your process for setting quarterly goals?"}},
+		{Theme: "strategy", Description: "I have been rethinking how we allocate resources across projects and it is harder than it sounds.", Messages: []string{"How do you balance long-term bets with short-term wins?"}},
+
+		// Reading & content
+		{Theme: "reading", Description: "I just finished a great book that changed how I think about a few things at work.", Messages: []string{"Read anything good lately that stuck with you?", "Any books you keep recommending to people?"}},
+		{Theme: "content", Description: "I have been curating a reading list and looking for suggestions outside my usual topics.", Messages: []string{"What is the most surprising thing you have read recently?"}},
+
+		// Travel & experiences
+		{Theme: "travel", Description: "I am starting to plan a trip and looking for recommendations from people who have been there.", Messages: []string{"Any travel tips or favorite destinations you would suggest?", "Where was the last place you traveled that exceeded expectations?"}},
+		{Theme: "food", Description: "I tried a new restaurant last week that was genuinely impressive and thought you might enjoy it too.", Messages: []string{"Have you discovered any great spots lately?"}},
+
+		// Wellness & balance
+		{Theme: "wellness", Description: "I have been trying to be more intentional about work-life balance and curious how others handle it.", Messages: []string{"What do you do to recharge after a busy stretch?", "Have you found any habits that help you stay consistent?"}},
+		{Theme: "fitness", Description: "I recently picked up a new workout routine and it has been making a real difference in my energy levels.", Messages: []string{"Do you have a go-to way to stay active during busy weeks?"}},
+
+		// Events & community
+		{Theme: "events", Description: "I saw a conference coming up that might be relevant and wanted to flag it for you.", Messages: []string{"Are you attending any events or meetups soon?", "What was the last event you went to that was actually worthwhile?"}},
+		{Theme: "community", Description: "I have been getting more involved in a professional community and it has been a great source of ideas.", Messages: []string{"Are you part of any groups or communities you find valuable?"}},
+
+		// Hiring & careers
+		{Theme: "hiring", Description: "We have been expanding the team and I have been learning a lot about what makes a strong hire.", Messages: []string{"What do you look for when bringing someone new on board?"}},
+		{Theme: "career", Description: "I have been reflecting on where I want to be in the next few years and it is a useful exercise.", Messages: []string{"How do you think about career growth without burning out?"}},
+
+		// Gratitude & appreciation
+		{Theme: "gratitude", Description: "I was thinking about the people who have been helpful to me this year and you came to mind.", Messages: []string{"Just wanted to say thanks for being a great connection.", "Appreciate you always being willing to share your perspective."}},
+	}
+
+	// Assign stable, content-derived ids so a given static conversation has the
+	// same id on every send (see staticConvID).
+	for i := range conversations {
+		conversations[i].ID = staticConvID(conversations[i].Theme, conversations[i].Description)
+	}
+
+	return conversations
+}
+
+// directedWarmupPartner resolves a task's explicit reply-back target. Nil for
+// an ordinary task, or when the target is no longer eligible, in which case the
+// caller draws a partner as usual. A reply may cross tiers, because the other
+// side started the thread by borrowing or by returning a visit; a restricted
+// workspace still may not answer into a paying inbox.
+func (s *tasksService) directedWarmupPartner(ctx context.Context, taskID uuid.UUID, account *Email, poolType string) *Email {
+	warmupTask, err := s.taskRepo.GetWarmupTask(ctx, taskID)
+	if err != nil || warmupTask == nil || warmupTask.TargetAccountID == nil {
+		return nil
+	}
+	target := *warmupTask.TargetAccountID
+
+	if s.warmupHealth != nil {
+		ok, reason, herr := s.warmupHealth.CanParticipate(ctx, target, poolType)
+		if herr != nil {
+			return nil
+		}
+		if !ok && reason == "not_in_pool" && s.replyMayCrossTiers(ctx, account, poolType) {
+			if ok, _, herr = s.warmupHealth.CanParticipate(ctx, target, otherPoolType(poolType)); herr != nil {
+				return nil
+			}
+		}
+		if !ok {
+			return nil
+		}
+	}
+	partner, xerr := s.emailRepo.GetByID(ctx, target)
+	if xerr != nil || partner == nil {
+		return nil
+	}
+	// An exclusion is about who this mailbox may mail, so it holds for a reply
+	// too; the thread exists because the other side started it (#501).
+	if rules := s.warmupRoutingRules(ctx, account, poolType); len(rules) > 0 {
+		if routingMultiplier(rules, account.Email, partner.Email) <= 0 {
+			return nil
+		}
+	}
+	return partner
+}
+
+// warmupRoutingRules are the sender organization's rules, premium pool only:
+// a free-tier mailbox has no provider-shape preferences to express.
+func (s *tasksService) warmupRoutingRules(ctx context.Context, account *Email, poolType string) []models.WarmupRoutingRule {
+	if poolType != "premium" || s.warmupRoutingRepo == nil || account == nil || account.OrganizationID == nil {
+		return nil
+	}
+	rules, err := s.warmupRoutingRepo.ListForOrganization(ctx, *account.OrganizationID)
+	if err != nil {
+		return nil
+	}
+	return rules
+}
+
+// replyMayCrossTiers: a paid mailbox may always answer a borrowed partner; a
+// free one may answer a paid mailbox only from a workspace whose standing is
+// known to be good. Unlike the other risk reads this fails closed: the
+// downside is one unanswered warmup thread, not free mail in a paying inbox.
+func (s *tasksService) replyMayCrossTiers(ctx context.Context, account *Email, poolType string) bool {
+	if poolType == "premium" {
+		return true
+	}
+	if s.orgRiskRepo == nil || account == nil || account.OrganizationID == nil {
+		return false
+	}
+	states, err := s.orgRiskRepo.GetOrgRiskStates(ctx, []uuid.UUID{*account.OrganizationID})
+	if err != nil {
+		return false
+	}
+	state, known := states[*account.OrganizationID]
+	return known && !state.ForcesFreeWarmupPool()
+}
+
+// orgSuspendedOrRestricted reports whether the workspace's posture bars the
+// paid warmup pool. Fails open.
+func (s *tasksService) orgSuspendedOrRestricted(ctx context.Context, orgID uuid.UUID) bool {
+	if s.orgRiskRepo == nil {
+		return false
+	}
+	states, err := s.orgRiskRepo.GetOrgRiskStates(ctx, []uuid.UUID{orgID})
+	if err != nil {
+		return false
+	}
+	return states[orgID].ForcesFreeWarmupPool()
+}
+
+// orgBlocksSending reports whether the workspace is suspended. Fails open, for
+// the same reason every other risk read does.
+func (s *tasksService) orgBlocksSending(ctx context.Context, orgID *uuid.UUID) bool {
+	if s.orgRiskRepo == nil || orgID == nil {
+		return false
+	}
+	states, err := s.orgRiskRepo.GetOrgRiskStates(ctx, []uuid.UUID{*orgID})
+	if err != nil {
+		return false
+	}
+	return states[*orgID].BlocksSending()
+}
+
+// otherPoolType is the tier on the far side of a borrowed exchange.
+func otherPoolType(poolType string) string {
+	if poolType == "premium" {
+		return "free"
+	}
+	return "premium"
+}
