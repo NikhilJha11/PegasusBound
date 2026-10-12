@@ -89,11 +89,17 @@ const MIME: Record<string, string> = { ".md": "text/markdown", ".txt": "text/pla
 const creds = loadCreds();
 const token = await signIn(creds);
 
+// Name the workspace and finish onboarding only for an account that hasn't done it,
+// so loading the demo into someone's existing account never renames it.
 const me = await call("GET", "/auth/me", undefined, token);
-const needsOnboarding = JSON.stringify(me.body).includes('"onboarding_completed":false') || me.body?.user?.onboarded === false;
-await call("PATCH", "/organization/current", { name: "Bridged", timezone: "Asia/Kolkata" }, token).then((r) => r.status >= 300 && console.warn("org rename:", r.status, JSON.stringify(r.body)));
-const onb = await call("PATCH", "/auth/me/onboarding", { first_name: "Nikhil", last_name: "Bridged", referral_source: "other", role: "founder", team_size: "2-10" }, token);
-if (onb.status >= 300) console.warn("onboarding:", onb.status, JSON.stringify(onb.body), needsOnboarding ? "" : "(may already be complete)");
+const meText = JSON.stringify(me.body);
+const needsOnboarding = meText.includes('"onboarding_completed":false') || meText.includes('"onboarded":false') || !/"first_name":"[^"]+"/.test(meText);
+if (needsOnboarding) {
+  const [first, last] = (process.env.DEMO_NAME ?? "Nikhil Bridged").split(" ");
+  await call("PATCH", "/organization/current", { name: process.env.DEMO_ORG ?? "Bridged" }, token).then((r) => r.status >= 300 && console.warn("org rename:", r.status, JSON.stringify(r.body)));
+  const onb = await call("PATCH", "/auth/me/onboarding", { first_name: first, last_name: last || "Demo", referral_source: "other", role: "founder", team_size: "2-10" }, token);
+  if (onb.status >= 300) console.warn("onboarding:", onb.status, JSON.stringify(onb.body));
+}
 await call("PUT", "/auth/me/product-tour", undefined, token);
 
 const org = await call("GET", "/organization/current", undefined, token);
